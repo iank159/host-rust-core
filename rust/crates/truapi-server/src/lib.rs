@@ -101,3 +101,6 @@ truapi::uniffi_reexport_scaffolding!();
 
 #[cfg(not(target_arch = "wasm32"))]
 truapi_platform::uniffi_reexport_scaffolding!();
+
+#[cfg(not(target_arch = "wasm32"))]
+pvm_runtime::uniffi_reexport_scaffolding!();
