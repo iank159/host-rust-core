@@ -1993,6 +1993,18 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi 5.3.0",
+ "wasip2",
+]
+
+[[package]]
+name = "getrandom"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
@@ -2000,7 +2012,7 @@ dependencies = [
  "cfg-if",
  "js-sys",
  "libc",
- "r-efi",
+ "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasm-bindgen",
 ]
@@ -3657,41 +3669,20 @@ dependencies = [
 [[package]]
 name = "polkavm"
 version = "0.37.0"
-source = "git+https://github.com/paritytech/polkavm.git?rev=3df1d0309c4c81a1aad0a755d83570d203bba1d9#3df1d0309c4c81a1aad0a755d83570d203bba1d9"
+source = "git+https://github.com/paritytech/polkavm.git?rev=c160c13c3c29bf3219ce1404ec95976000235a94#c160c13c3c29bf3219ce1404ec95976000235a94"
 dependencies = [
  "libc",
  "log",
  "picosimd",
- "polkavm-assembler 0.37.0 (git+https://github.com/paritytech/polkavm.git?rev=3df1d0309c4c81a1aad0a755d83570d203bba1d9)",
- "polkavm-common 0.37.0 (git+https://github.com/paritytech/polkavm.git?rev=3df1d0309c4c81a1aad0a755d83570d203bba1d9)",
- "polkavm-linux-raw 0.37.0 (git+https://github.com/paritytech/polkavm.git?rev=3df1d0309c4c81a1aad0a755d83570d203bba1d9)",
-]
-
-[[package]]
-name = "polkavm"
-version = "0.37.0"
-source = "git+https://github.com/paritytech/polkavm.git?rev=e06cce9da5c6d3f72458168876ea304e27992094#e06cce9da5c6d3f72458168876ea304e27992094"
-dependencies = [
- "libc",
- "log",
- "picosimd",
- "polkavm-assembler 0.37.0 (git+https://github.com/paritytech/polkavm.git?rev=e06cce9da5c6d3f72458168876ea304e27992094)",
- "polkavm-common 0.37.0 (git+https://github.com/paritytech/polkavm.git?rev=e06cce9da5c6d3f72458168876ea304e27992094)",
- "polkavm-linux-raw 0.37.0 (git+https://github.com/paritytech/polkavm.git?rev=e06cce9da5c6d3f72458168876ea304e27992094)",
+ "polkavm-assembler",
+ "polkavm-common",
+ "polkavm-linux-raw",
 ]
 
 [[package]]
 name = "polkavm-assembler"
 version = "0.37.0"
-source = "git+https://github.com/paritytech/polkavm.git?rev=3df1d0309c4c81a1aad0a755d83570d203bba1d9#3df1d0309c4c81a1aad0a755d83570d203bba1d9"
-dependencies = [
- "log",
-]
-
-[[package]]
-name = "polkavm-assembler"
-version = "0.37.0"
-source = "git+https://github.com/paritytech/polkavm.git?rev=e06cce9da5c6d3f72458168876ea304e27992094#e06cce9da5c6d3f72458168876ea304e27992094"
+source = "git+https://github.com/paritytech/polkavm.git?rev=c160c13c3c29bf3219ce1404ec95976000235a94#c160c13c3c29bf3219ce1404ec95976000235a94"
 dependencies = [
  "log",
 ]
@@ -3699,32 +3690,53 @@ dependencies = [
 [[package]]
 name = "polkavm-common"
 version = "0.37.0"
-source = "git+https://github.com/paritytech/polkavm.git?rev=3df1d0309c4c81a1aad0a755d83570d203bba1d9#3df1d0309c4c81a1aad0a755d83570d203bba1d9"
+source = "git+https://github.com/paritytech/polkavm.git?rev=c160c13c3c29bf3219ce1404ec95976000235a94#c160c13c3c29bf3219ce1404ec95976000235a94"
 dependencies = [
  "log",
  "picosimd",
- "polkavm-assembler 0.37.0 (git+https://github.com/paritytech/polkavm.git?rev=3df1d0309c4c81a1aad0a755d83570d203bba1d9)",
+ "polkavm-assembler",
 ]
 
 [[package]]
-name = "polkavm-common"
-version = "0.37.0"
-source = "git+https://github.com/paritytech/polkavm.git?rev=e06cce9da5c6d3f72458168876ea304e27992094#e06cce9da5c6d3f72458168876ea304e27992094"
+name = "polkavm-gpu-wire"
+version = "0.2.0"
+source = "git+https://github.com/paritytech/polkavm-host-runtime.git?rev=e56fbe58ff3c6d694b1d86368fe87e085710372c#e56fbe58ff3c6d694b1d86368fe87e085710372c"
+
+[[package]]
+name = "polkavm-host-runtime"
+version = "0.2.0"
+source = "git+https://github.com/paritytech/polkavm-host-runtime.git?rev=e56fbe58ff3c6d694b1d86368fe87e085710372c#e56fbe58ff3c6d694b1d86368fe87e085710372c"
 dependencies = [
+ "anyhow",
+ "getrandom 0.3.4",
  "log",
- "picosimd",
- "polkavm-assembler 0.37.0 (git+https://github.com/paritytech/polkavm.git?rev=e06cce9da5c6d3f72458168876ea304e27992094)",
+ "polkavm",
+ "polkavm-gpu-wire",
+ "polkavm-motion-wire",
+ "polkavm-ui-wire",
+ "pollster",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "uniffi",
+ "wasm-encoder",
+ "wgpu",
 ]
 
 [[package]]
 name = "polkavm-linux-raw"
 version = "0.37.0"
-source = "git+https://github.com/paritytech/polkavm.git?rev=3df1d0309c4c81a1aad0a755d83570d203bba1d9#3df1d0309c4c81a1aad0a755d83570d203bba1d9"
+source = "git+https://github.com/paritytech/polkavm.git?rev=c160c13c3c29bf3219ce1404ec95976000235a94#c160c13c3c29bf3219ce1404ec95976000235a94"
 
 [[package]]
-name = "polkavm-linux-raw"
-version = "0.37.0"
-source = "git+https://github.com/paritytech/polkavm.git?rev=e06cce9da5c6d3f72458168876ea304e27992094#e06cce9da5c6d3f72458168876ea304e27992094"
+name = "polkavm-motion-wire"
+version = "0.2.0"
+source = "git+https://github.com/paritytech/polkavm-host-runtime.git?rev=e56fbe58ff3c6d694b1d86368fe87e085710372c#e56fbe58ff3c6d694b1d86368fe87e085710372c"
+
+[[package]]
+name = "polkavm-ui-wire"
+version = "0.2.0"
+source = "git+https://github.com/paritytech/polkavm-host-runtime.git?rev=e56fbe58ff3c6d694b1d86368fe87e085710372c#e56fbe58ff3c6d694b1d86368fe87e085710372c"
 
 [[package]]
 name = "polling"
@@ -3984,6 +3996,12 @@ checksum = "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
 dependencies = [
  "proc-macro2",
 ]
+
+[[package]]
+name = "r-efi"
+version = "5.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "r-efi"
@@ -5925,6 +5943,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "truapi-polkavm-host"
+version = "0.2.0"
+dependencies = [
+ "polkavm-host-runtime",
+ "truapi-server",
+]
+
+[[package]]
 name = "truapi-provider"
 version = "0.1.0"
 dependencies = [
@@ -5962,14 +5988,6 @@ dependencies = [
  "web-sys",
  "web-time",
  "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "truapi-pvm-host"
-version = "0.1.0"
-dependencies = [
- "pvm-runtime",
- "pvm-runtime-assets",
 ]
 
 [[package]]
@@ -6013,7 +6031,6 @@ dependencies = [
  "tracing-subscriber",
  "truapi",
  "truapi-platform",
- "truapi-pvm-host",
  "unicode-normalization",
  "uniffi",
  "url",
@@ -6439,6 +6456,15 @@ name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
+
+[[package]]
+name = "wasip2"
+version = "1.0.4+wasi-0.2.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
+dependencies = [
+ "wit-bindgen",
+]
 
 [[package]]
 name = "wasm-bindgen"
@@ -7125,6 +7151,12 @@ checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "wit-bindgen"
+version = "0.57.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "writeable"
