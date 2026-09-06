@@ -26,6 +26,7 @@ mod register_name;
 mod script_runner;
 mod sessions;
 mod signing_shell;
+mod storage;
 mod terminal_ui;
 mod update;
 
@@ -179,7 +180,7 @@ fn load_log_level(base_path: &Path) -> Result<Option<LogLevel>> {
 
 fn store_log_level(base_path: &Path, level: LogLevel) -> Result<()> {
     let path = base_path.join(LOG_LEVEL_FILE);
-    platform::atomic_write(&path, format!("{level}\n").as_bytes())
+    storage::write_private(&path, format!("{level}\n").as_bytes())
         .map_err(anyhow::Error::msg)
         .with_context(|| format!("persist saved log level {}", path.display()))
 }

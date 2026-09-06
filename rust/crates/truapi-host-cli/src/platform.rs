@@ -31,8 +31,6 @@ use truapi_platform::{
 use crate::chain::WsChainProvider;
 use crate::terminal_ui::{SystemEvent, UiHandle};
 
-static NEXT_STORAGE_TEMP_ID: AtomicU32 = AtomicU32::new(0);
-
 /// How the host answers confirmation prompts (the web/iOS "sign?" modals).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalPolicy {
@@ -1036,10 +1034,11 @@ fn save_product_storage(
             .collect(),
     };
     let text = serde_json::to_string_pretty(&document).map_err(|error| error.to_string())?;
-    atomic_write(
+    crate::storage::write_private(
         &product_storage_path(directory, product_id),
         text.as_bytes(),
     )
+    .map_err(|error| error.to_string())
 }
 
 fn product_storage_path(directory: &Path, product_id: &str) -> PathBuf {
@@ -1124,38 +1123,7 @@ fn save_string_map(path: &Path, values: &HashMap<String, Vec<u8>>) -> Result<(),
             .collect(),
     };
     let text = serde_json::to_string_pretty(&json).map_err(|err| err.to_string())?;
-    atomic_write(path, text.as_bytes())
-}
-
-pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("storage path has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent).map_err(|error| format!("create storage dir: {error}"))?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("storage.json");
-    let temporary_id = NEXT_STORAGE_TEMP_ID.fetch_add(1, Ordering::Relaxed);
-    let temporary =
-        path.with_file_name(format!(".{name}.{}.{temporary_id}.tmp", std::process::id()));
-    let mut file = fs::File::create(&temporary)
-        .map_err(|error| format!("create {}: {error}", temporary.display()))?;
-    file.write_all(bytes)
-        .map_err(|error| format!("write {}: {error}", temporary.display()))?;
-    file.sync_all()
-        .map_err(|error| format!("sync {}: {error}", temporary.display()))?;
-    drop(file);
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path).map_err(|error| format!("replace {}: {error}", path.display()))?;
-    }
-    fs::rename(&temporary, path).map_err(|error| format!("persist {}: {error}", path.display()))?;
-    #[cfg(unix)]
-    fs::File::open(parent)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|error| format!("sync storage dir {}: {error}", parent.display()))?;
-    Ok(())
+    crate::storage::write_private(path, text.as_bytes()).map_err(|error| error.to_string())
 }
 
 fn load_hex_key_map(path: &Path) -> HashMap<Vec<u8>, Vec<u8>> {

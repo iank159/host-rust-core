@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -210,7 +209,7 @@ impl AccountStore {
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         let text = serde_json::to_string_pretty(&self.data)?;
-        write_secret_file(&self.path, text.as_bytes())
+        crate::storage::write_private(&self.path, text.as_bytes())
             .with_context(|| format!("write {}", self.path.display()))
     }
 
@@ -794,49 +793,6 @@ fn now_unix() -> u64 {
         .as_secs()
 }
 
-fn write_secret_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp_path = temp_path(path);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(&tmp_path)?;
-        file.write_all(bytes)?;
-        fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600))?;
-        file.sync_all()?;
-        drop(file);
-        fs::rename(&tmp_path, path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        sync_parent(path)
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(&tmp_path, bytes)?;
-        let _ = fs::remove_file(path);
-        fs::rename(&tmp_path, path)
-    }
-}
-
-fn temp_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(ACCOUNT_STORE_FILE);
-    path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()))
-}
-
-#[cfg(unix)]
-fn sync_parent(path: &Path) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::File::open(parent)?.sync_all()?;
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -965,7 +921,13 @@ mod tests {
                 .map(|record| record.name.as_str()),
             Some("auto-1")
         );
-        assert!(!temp_path(&dir.path().join(ACCOUNT_STORE_FILE)).exists());
+        assert!(fs::read_dir(dir.path())?.all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".truapi-")
+        }));
         Ok(())
     }
 
