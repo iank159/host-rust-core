@@ -19,6 +19,7 @@ mod identity;
 pub(crate) mod login_failure;
 mod pairing_host;
 mod product_subtree;
+mod ring_snapshot;
 mod ring_vrf_registry;
 /// Role-neutral runtime services shared by product-facing runtimes.
 pub(crate) mod services;

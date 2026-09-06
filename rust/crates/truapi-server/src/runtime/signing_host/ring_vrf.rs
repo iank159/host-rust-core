@@ -10,8 +10,15 @@ use std::sync::Arc;
 use crate::chain_runtime::ChainRuntime;
 use crate::host_logic::product_account::derivation_index_bytes;
 use crate::host_logic::sso::messages::RingVrfError;
+#[cfg(test)]
+use crate::runtime::ring_snapshot::RingExponent;
+use crate::runtime::ring_snapshot::{
+    BoundedMembers, CollectionInfo, RingPages, RingPosition, RingRoot, RingSnapshot,
+    RingSnapshotSource, RingStatus, SnapshotError,
+};
 use async_trait::async_trait;
 use subxt::dynamic;
+#[cfg(test)]
 use subxt::ext::scale_decode::DecodeAsType;
 use truapi::v01::{ProductProofContext, RingLocation, RingLocationJunction};
 use verifiable::GenerateVerifiable;
@@ -149,6 +156,52 @@ impl RingResolver for ChainRingResolver {
         };
         let collection_info = collection_info.decode().map_err(unknown)?;
 
+        let members = RingSnapshot::read(&SubxtRingSnapshot {
+            at_block: &at_block,
+            collection,
+            ring_index,
+            included: included_count,
+        })
+        .await?
+        .members;
+        if !members.contains(&selected.member) {
+            return Err(RingVrfError::NotMember);
+        }
+
+        let root_address = dynamic::storage::<([u8; 32], u32), RingRoot>(MEMBERS_PALLET, "Root");
+        let Some(root) = storage
+            .try_fetch(root_address, (collection, ring_index))
+            .await
+            .map_err(unknown)?
+        else {
+            return Err(RingVrfError::RingNotFound);
+        };
+        let ring_revision = root.decode().map_err(unknown)?.revision;
+
+        Ok(ResolvedRing {
+            selected,
+            ring_index,
+            ring_revision,
+            domain_size: collection_info.ring_size.domain_size(),
+            members,
+        })
+    }
+}
+
+struct SubxtRingSnapshot<'a> {
+    at_block: &'a subxt::client::OnlineClientAtBlock<subxt::config::substrate::SubstrateConfig>,
+    collection: [u8; 32],
+    ring_index: u32,
+    included: u32,
+}
+
+#[async_trait]
+impl RingSnapshotSource for SubxtRingSnapshot<'_> {
+    type Error = RingVrfError;
+    async fn pages(&self) -> Result<RingPages, RingVrfError> {
+        let storage = self.at_block.storage();
+        let collection = self.collection;
+        let ring_index = self.ring_index;
         let ring_keys_address =
             dynamic::storage::<([u8; 32], u32, u32), BoundedMembers>(MEMBERS_PALLET, "RingKeys");
         let mut pages = storage
@@ -173,42 +226,15 @@ impl RingResolver for ChainRingResolver {
             let members = entry.value().decode().map_err(unknown)?.0;
             members_by_page.push((page_index, members));
         }
-        members_by_page.sort_unstable_by_key(|(page, _)| *page);
-        let mut members: Vec<_> = members_by_page
-            .into_iter()
-            .flat_map(|(_, members)| members)
-            .collect();
-        let included_count = usize::try_from(included_count).map_err(unknown)?;
-        if members.len() < included_count {
-            return Err(RingVrfError::Unknown {
-                reason: format!(
-                    "Members.RingKeys contains {} keys but RingKeysStatus includes {included_count}",
-                    members.len()
-                ),
-            });
-        }
-        members.truncate(included_count);
-        if !members.contains(&selected.member) {
-            return Err(RingVrfError::NotMember);
-        }
-
-        let root_address = dynamic::storage::<([u8; 32], u32), RingRoot>(MEMBERS_PALLET, "Root");
-        let Some(root) = storage
-            .try_fetch(root_address, (collection, ring_index))
-            .await
-            .map_err(unknown)?
-        else {
-            return Err(RingVrfError::RingNotFound);
-        };
-        let ring_revision = root.decode().map_err(unknown)?.revision;
-
-        Ok(ResolvedRing {
-            selected,
-            ring_index,
-            ring_revision,
-            domain_size: collection_info.ring_size.domain_size(),
-            members,
-        })
+        Ok(members_by_page)
+    }
+    async fn status(&self) -> Result<Option<RingStatus>, RingVrfError> {
+        Ok(Some(RingStatus {
+            included: self.included,
+        }))
+    }
+    fn invalid(error: SnapshotError) -> RingVrfError {
+        unknown(error)
     }
 }
 
@@ -346,48 +372,6 @@ fn unknown(error: impl std::fmt::Debug) -> RingVrfError {
     RingVrfError::Unknown {
         reason: format!("{error:?}"),
     }
-}
-
-#[derive(Debug, PartialEq, Eq, DecodeAsType)]
-enum RingPosition {
-    Onboarding {},
-    Included { ring_index: u32, ring_position: u32 },
-    Suspended,
-}
-
-#[derive(Debug, PartialEq, Eq, DecodeAsType)]
-struct RingStatus {
-    included: u32,
-}
-
-#[derive(Debug, PartialEq, Eq, DecodeAsType)]
-struct CollectionInfo {
-    ring_size: RingExponent,
-}
-
-#[derive(Debug, PartialEq, Eq, DecodeAsType)]
-enum RingExponent {
-    R2e9,
-    R2e10,
-    R2e14,
-}
-
-impl RingExponent {
-    fn domain_size(self) -> RingDomainSize {
-        match self {
-            Self::R2e9 => RingDomainSize::Domain11,
-            Self::R2e10 => RingDomainSize::Domain12,
-            Self::R2e14 => RingDomainSize::Domain16,
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, DecodeAsType)]
-struct BoundedMembers(Vec<[u8; 32]>);
-
-#[derive(Debug, PartialEq, Eq, DecodeAsType)]
-struct RingRoot {
-    revision: u32,
 }
 
 #[cfg(test)]

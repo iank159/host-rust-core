@@ -112,9 +112,14 @@ pub async fn register_name(config: &RegisterNameConfig) -> Result<()> {
     )
     .await
     .context("resolve full-person ring membership (is the account a recognized person?)")?;
-    let members =
-        ring::read_ring_members_at(&people_rpc, PersonhoodCollection::People, ring_index, &at)
-            .await?;
+    let members = ring::read_ring_members_at(
+        &people_rpc,
+        &people_metadata,
+        PersonhoodCollection::People,
+        ring_index,
+        &at,
+    )
+    .await?;
     // `Members.Members` reports a ring index as soon as the key is onboarded;
     // the members read above is sliced to the keys already built into the
     // ring's root, so a fresh member can be missing from it for a few blocks.

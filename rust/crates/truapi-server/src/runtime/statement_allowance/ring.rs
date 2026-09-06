@@ -5,7 +5,11 @@
 //! current ring. Every read is scoped to one [`PersonhoodCollection`], because
 //! each collection is a separate ring with its own members and index.
 
-use parity_scale_codec::{Compact, Decode};
+use crate::runtime::ring_snapshot::{
+    BoundedMembers, CollectionInfo, RingExponent, RingPages, RingPosition as MemberRingPosition,
+    RingRoot, RingSnapshot, RingSnapshotSource, RingStatus, SnapshotError,
+};
+use parity_scale_codec::Decode;
 use scale_decode::DecodeAsType;
 use sp_crypto_hashing::{blake2_128, twox_64, twox_128};
 use thiserror::Error;
@@ -18,6 +22,9 @@ use super::rpc::RpcClient;
 /// Error while reading or decoding ring storage.
 #[derive(Debug, Error)]
 pub enum RingError {
+    /// Included-member snapshot was incomplete or inconsistent.
+    #[error("{0}")]
+    InvalidSnapshot(String),
     /// Current ring index storage failed to decode.
     #[error("ring index: {0}")]
     RingIndex(#[source] parity_scale_codec::Error),
@@ -60,40 +67,6 @@ pub enum RingError {
     /// Subscriber ring exponent was absent for the collection.
     #[error("MembersSubscriber.RingCollectionExponents missing for the collection")]
     SubscriberExponentMissing,
-}
-
-/// Ring member public key length.
-const MEMBER_LEN: usize = 32;
-
-/// Fields read from `Members.Collections`.
-#[derive(Debug, PartialEq, Eq, DecodeAsType)]
-struct CollectionInfo {
-    ring_size: RingExponent,
-}
-
-/// Supported LitePeople ring domain sizes.
-#[derive(Debug, PartialEq, Eq, DecodeAsType)]
-enum RingExponent {
-    R2e9,
-    R2e10,
-    R2e14,
-}
-
-impl RingExponent {
-    /// Return the exponent represented by the runtime enum variant.
-    fn exponent(self) -> u8 {
-        match self {
-            Self::R2e9 => 9,
-            Self::R2e10 => 10,
-            Self::R2e14 => 14,
-        }
-    }
-}
-
-/// Fields read from `Members.Root`.
-#[derive(Debug, PartialEq, Eq, DecodeAsType)]
-struct RingRoot {
-    revision: u32,
 }
 
 /// On-chain ring parameters for building a verifying proof.
@@ -269,68 +242,98 @@ pub async fn read_ring_exponent(
 /// one consistent snapshot.
 pub async fn read_ring_members_at(
     rpc: &RpcClient,
+    metadata: &Metadata,
     collection: PersonhoodCollection,
     ring_index: u32,
     at: &str,
 ) -> Result<Vec<[u8; 32]>, StatementAllowanceError> {
-    // 1. Page through RingKeys collecting raw 32-byte members.
-    let mut members = Vec::new();
-    for page in 0.. {
-        let Some(bytes) = rpc
-            .get_storage_at(&ring_keys_key(collection, ring_index, page), at)
-            .await?
-        else {
-            break;
-        };
-        let mut cursor = &bytes[..];
-        let Compact(len) = Compact::<u32>::decode(&mut cursor).map_err(RingError::RingKeysLen)?;
-        if len == 0 {
-            break;
-        }
-        for i in 0..len as usize {
-            let start = i * MEMBER_LEN;
-            let member: [u8; 32] = cursor
-                .get(start..start + MEMBER_LEN)
-                .ok_or(RingError::RingKeysPageTruncated)?
-                .try_into()
-                .expect("range end uses start + MEMBER_LEN where MEMBER_LEN is 32; qed");
-            members.push(member);
-        }
-    }
-
-    // 2. Slice to the baked-in `included` prefix (absent status => all included).
-    if let Some(status) = rpc
-        .get_storage_at(&ring_keys_status_key(collection, ring_index), at)
-        .await?
-    {
-        // RingStatus = { total: u32 LE, included: u32 LE, .. }.
-        let included_bytes = status.get(4..).ok_or(RingError::RingStatusTruncated)?;
-        let included = u32::decode(&mut &included_bytes[..]).map_err(RingError::RingStatus)?;
-        members.truncate(included as usize);
-    }
-
-    Ok(members)
+    RingSnapshot::read(&RpcRingSnapshot {
+        rpc,
+        metadata,
+        collection,
+        ring_index,
+        at,
+    })
+    .await
+    .map(|snapshot| snapshot.members)
 }
 
-/// Ring coordinates of one member. Projected from the runtime's `RingPosition`
-/// enum.
-#[derive(Debug, PartialEq, Eq, DecodeAsType)]
-enum MemberRingPosition {
-    /// Waiting in the onboarding queue.
-    Onboarding {},
-    /// Included in a built ring.
-    Included { ring_index: u32 },
-    /// Suspended from all rings.
-    Suspended,
+struct RpcRingSnapshot<'a> {
+    rpc: &'a RpcClient,
+    metadata: &'a Metadata,
+    collection: PersonhoodCollection,
+    ring_index: u32,
+    at: &'a str,
+}
+
+impl RpcRingSnapshot<'_> {
+    fn decode<T: DecodeAsType>(
+        &self,
+        bytes: &[u8],
+        entry: &'static str,
+    ) -> Result<T, StatementAllowanceError> {
+        let value_type = self.metadata.storage_value_type("Members", entry).ok_or(
+            MetadataError::MissingStorageType {
+                pallet: "Members",
+                entry,
+            },
+        )?;
+        T::decode_as_type(&mut &*bytes, value_type, self.metadata.registry()).map_err(|source| {
+            RingError::DecodeAsType {
+                context: entry,
+                source,
+            }
+            .into()
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl RingSnapshotSource for RpcRingSnapshot<'_> {
+    type Error = StatementAllowanceError;
+    async fn pages(&self) -> Result<RingPages, Self::Error> {
+        let mut pages = Vec::new();
+        for page in 0.. {
+            let Some(bytes) = self
+                .rpc
+                .get_storage_at(
+                    &ring_keys_key(self.collection, self.ring_index, page),
+                    self.at,
+                )
+                .await?
+            else {
+                break;
+            };
+            let members = self.decode::<BoundedMembers>(&bytes, "RingKeys")?.0;
+            let empty = members.is_empty();
+            pages.push((page, members));
+            if empty {
+                break;
+            }
+        }
+        Ok(pages)
+    }
+    async fn status(&self) -> Result<Option<RingStatus>, Self::Error> {
+        self.rpc
+            .get_storage_at(
+                &ring_keys_status_key(self.collection, self.ring_index),
+                self.at,
+            )
+            .await?
+            .map(|bytes| self.decode(&bytes, "RingKeysStatus"))
+            .transpose()
+    }
+    fn invalid(error: SnapshotError) -> Self::Error {
+        RingError::InvalidSnapshot(error.to_string()).into()
+    }
 }
 
 /// Reads the ring index `member` is included in for `collection`, from
 /// `Members.Members`, pinned to block `at`. Errors when the member has no
 /// record. Errors too when the member is not `Included` yet.
 ///
-/// TODO(#334): second reader of `Members.Members` next to the subxt-typed one
-/// in `signing_host/ring_vrf.rs`; converge them (they also differ on
-/// non-`Included` members — this errors, that one skips).
+/// Shares the metadata projection with the signing resolver; this caller treats
+/// a non-included member as an error rather than continuing to another candidate.
 pub async fn read_member_ring_index_at(
     rpc: &RpcClient,
     metadata: &Metadata,
@@ -528,7 +531,10 @@ mod tests {
                 ring_page: 2,
                 ring_position: 300,
             }),
-            MemberRingPosition::Included { ring_index: 7 }
+            MemberRingPosition::Included {
+                ring_index: 7,
+                ring_position: 300
+            }
         );
         assert_eq!(
             decode_as::<_, MemberRingPosition>(SourceRingPosition::Onboarding {
@@ -586,6 +592,28 @@ mod tests {
     }
 
     #[test]
+    fn empty_stored_page_is_rejected() {
+        let scripted = ScriptedRpc::new([r#""0x00""#, r#""0x000000000000000000""#]);
+        let rpc = RpcClient::new(HostRpcClient::new(scripted));
+        let error = futures::executor::block_on(read_ring_members_at(
+            &rpc,
+            &Metadata::decode(include_bytes!(
+                "../../../tests/fixtures/paseo-next-v2-metadata.scale"
+            ))
+            .unwrap(),
+            PersonhoodCollection::LitePeople,
+            3,
+            "0xat",
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            StatementAllowanceError::Ring(RingError::InvalidSnapshot(reason))
+                if reason == SnapshotError::EmptyPage.to_string()
+        ));
+    }
+
+    #[test]
     fn member_reads_are_pinned_and_truncated_to_included() {
         // Page 0 holds two members; RingStatus { total: 2, included: 1, None }.
         let page = format!(
@@ -598,8 +626,17 @@ mod tests {
         let rpc = RpcClient::new(HostRpcClient::new(scripted.clone()));
 
         let collection = PersonhoodCollection::LitePeople;
-        let members =
-            futures::executor::block_on(read_ring_members_at(&rpc, collection, 3, "0xat")).unwrap();
+        let members = futures::executor::block_on(read_ring_members_at(
+            &rpc,
+            &Metadata::decode(include_bytes!(
+                "../../../tests/fixtures/paseo-next-v2-metadata.scale"
+            ))
+            .unwrap(),
+            collection,
+            3,
+            "0xat",
+        ))
+        .unwrap();
 
         assert_eq!(members, vec![[0xaa; 32]]);
         let expected: Vec<(String, String)> = [

@@ -532,7 +532,8 @@ pub async fn find_including_ring(
     let current = ring::read_current_ring_index_at(rpc, collection, &at).await?;
     let oldest = current.saturating_sub(lookback);
     for ring_index in (oldest..=current).rev() {
-        let members = ring::read_ring_members_at(rpc, collection, ring_index, &at).await?;
+        let members =
+            ring::read_ring_members_at(rpc, metadata, collection, ring_index, &at).await?;
         if members.contains(&member) {
             return Ok(Some(RingParams {
                 collection,
@@ -2098,7 +2099,7 @@ mod tests {
             r#""0x00000000""#.to_string(),
             page,
             "null".to_string(),
-            "null".to_string(),
+            r#""0x010000000100000000""#.to_string(),
         ];
         let scripted = ScriptedRpc::new(responses.iter().map(String::as_str).collect::<Vec<_>>());
         let rpc = RpcClient::new(HostRpcClient::new(scripted));
