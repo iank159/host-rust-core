@@ -884,6 +884,45 @@ fn transaction_call_error<E>(
     }))
 }
 
+impl ProductRuntimeHost {
+    fn caller_owned_account<E>(
+        &self,
+        account: v01::ProductAccountId,
+        denied: E,
+    ) -> Result<v01::ProductAccountId, CallError<E>> {
+        Self::normalize_product_account_id(account)
+            .ok()
+            .filter(|account| self.is_product_account_valid_for_caller(&account.dot_ns_identifier))
+            .ok_or(CallError::Domain(denied))
+    }
+
+    fn signing_session<E>(&self, rejected: E) -> Result<AuthoritySession, CallError<E>> {
+        self.authority
+            .current_session()
+            .ok_or(CallError::Domain(rejected))
+    }
+
+    async fn confirm_signing_action<E>(
+        &self,
+        review: UserConfirmationReview,
+        action: &str,
+        rejected: E,
+    ) -> Result<(), CallError<E>> {
+        let confirmed = self
+            .platform
+            .confirm_user_action(review)
+            .await
+            .map_err(|err| CallError::HostFailure {
+                reason: format!("{action} confirmation failed: {err:?}"),
+            })?;
+        if confirmed {
+            Ok(())
+        } else {
+            Err(CallError::Domain(rejected))
+        }
+    }
+}
+
 const PAYMENTS_NOT_IMPLEMENTED: &str = "Payments are not supported in dot.li";
 
 impl ProductRuntimeHost {

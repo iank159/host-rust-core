@@ -516,21 +516,6 @@ impl SigningHost {
         })
     }
 
-    fn require_owned_ring_vrf_key(
-        calling_product_id: &str,
-        handle: &v01::ProductAccountId,
-    ) -> Result<(), RingVrfError> {
-        let caller = normalize_product_identifier(calling_product_id).map_err(|error| {
-            RingVrfError::Unknown {
-                reason: error.to_string(),
-            }
-        })?;
-        if caller != handle.dot_ns_identifier {
-            return Err(RingVrfError::NotAllowlisted);
-        }
-        Ok(())
-    }
-
     pub(crate) async fn ring_vrf_providers(
         &self,
         ring: &v01::RingLocation,
@@ -893,7 +878,10 @@ impl ProductAuthority for SigningHost {
         request: CreateProofAuthorityRequest,
     ) -> Result<v01::HostAccountCreateProofResponse, RingVrfError> {
         self.require_current_session(session)?;
-        Self::require_owned_ring_vrf_key(&request.calling_product_id, &request.key_handle)?;
+        super::ring_vrf_registry::require_owned_ring_vrf_key(
+            &request.calling_product_id,
+            &request.key_handle,
+        )?;
         let entropy = self
             .resolve_ring_vrf_key_for_ring(session, &request.key_handle, &request.ring_location)
             .await?;
@@ -994,7 +982,10 @@ impl ProductAuthority for SigningHost {
         request: RingVrfSignAuthorityRequest,
     ) -> Result<Vec<u8>, RingVrfError> {
         self.require_current_session(session)?;
-        Self::require_owned_ring_vrf_key(&request.calling_product_id, &request.key_handle)?;
+        super::ring_vrf_registry::require_owned_ring_vrf_key(
+            &request.calling_product_id,
+            &request.key_handle,
+        )?;
         let entropy = self
             .resolve_registered_ring_vrf_key(session, &request.key_handle)
             .await?;

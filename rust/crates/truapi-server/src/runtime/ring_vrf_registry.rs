@@ -663,3 +663,18 @@ mod tests {
         ));
     }
 }
+
+pub(crate) fn require_owned_ring_vrf_key(
+    calling_product_id: &str,
+    handle: &ProductAccountId,
+) -> Result<(), RingVrfError> {
+    let caller = normalize_product_identifier(calling_product_id).map_err(|error| {
+        RingVrfError::Unknown {
+            reason: error.to_string(),
+        }
+    })?;
+    if caller != handle.dot_ns_identifier {
+        return Err(RingVrfError::NotAllowlisted);
+    }
+    Ok(())
+}
