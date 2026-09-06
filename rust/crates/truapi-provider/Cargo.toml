@@ -58,7 +58,7 @@ smoldot = [
     "dep:tokio-rustls",
     "dep:webpki-roots",
 ]
-js = ["ws", "dep:wasm-bindgen-futures", "dep:tracing-subscriber"]
+js = ["ws", "dep:wasm-bindgen-futures", "dep:truapi-logging"]
 networks = ["smoldot"]
 # Swift/UniFFI bindings for native hosts (iOS, macOS, ...).
 uniffi = ["smoldot", "networks", "dep:uniffi"]
@@ -73,7 +73,7 @@ futures = "0.3"
 hex = "0.4"
 serde_json = "1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"], optional = true }
+truapi-logging = { path = "../truapi-logging", optional = true }
 url = "2"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

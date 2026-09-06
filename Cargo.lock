@@ -5364,6 +5364,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "truapi-logging"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "truapi-macros"
 version = "0.1.0"
 dependencies = [
@@ -5412,8 +5420,8 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.24.0",
  "tracing",
- "tracing-subscriber",
  "truapi",
+ "truapi-logging",
  "truapi-platform",
  "uniffi",
  "url",
@@ -5463,8 +5471,8 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.21.0",
  "tracing",
- "tracing-subscriber",
  "truapi",
+ "truapi-logging",
  "truapi-platform",
  "unicode-normalization",
  "uniffi",

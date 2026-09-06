@@ -63,7 +63,7 @@ parking_lot = "0.12"
 tracing = "0.1"
 # `registry` + `std` only: pulls the Registry + per-layer filter/reload, but
 # not `env-filter` (which drags in `regex`, heavy on wasm).
-tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
+truapi-logging = { path = "../truapi-logging" }
 verifiable = { git = "https://github.com/paritytech/verifiable.git", rev = "19b03deb89b8dea484b143afc8bbe048a74bc1ff" }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
