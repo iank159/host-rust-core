@@ -18,6 +18,7 @@ unsafe_code = "forbid"
 [dependencies]
 truapi = { path = "../truapi" }
 truapi-platform = { path = "../truapi-platform" }
+truapi-provider = { path = "../truapi-provider" }
 truapi-server = { path = "../truapi-server" }
 anyhow = "1"
 arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }

@@ -1181,7 +1181,9 @@ pub trait JsonRpcConnection: Send + Sync {
     /// Send a JSON-RPC request string.
     fn send(&self, request: String);
 
-    /// Stream of JSON-RPC response strings.
+    /// Take the connection's response stream. Subsequent calls return an ended
+    /// stream. Frames must not be silently dropped: transport or buffer failure
+    /// terminates the stream so callers can fail pending requests and reconnect.
     fn responses(&self) -> BoxStream<'static, String>;
 
     /// Close the connection lease.

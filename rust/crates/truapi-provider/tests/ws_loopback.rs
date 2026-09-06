@@ -137,3 +137,33 @@ async fn connections_are_independent() {
         "the second connection must not observe the first connection's response"
     );
 }
+
+#[tokio::test]
+async fn direct_node_connections_obey_the_same_stream_contract() {
+    let (addr, _server) = spawn_server().await;
+    let connection = truapi_provider::connect_rpc_node(format!("ws://{addr}").parse().unwrap())
+        .await
+        .unwrap();
+    connection.send(r#"{"jsonrpc":"2.0","id":1,"method":"echo","params":["buffered"]}"#.into());
+    // The response may arrive before the consumer takes the stream.
+    tokio::task::yield_now().await;
+    let mut responses = connection.responses();
+    assert_eq!(connection.responses().next().await, None);
+    let response = tokio::time::timeout(Duration::from_secs(2), responses.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&response).unwrap()["result"],
+        "buffered"
+    );
+    connection.close();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), responses.next())
+            .await
+            .unwrap(),
+        None
+    );
+    connection.send(r#"{"jsonrpc":"2.0","id":2,"method":"echo","params":["late"]}"#.into());
+    assert_eq!(responses.next().await, None);
+}

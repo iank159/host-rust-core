@@ -70,3 +70,15 @@ pub use provider::{EmbeddedChainProvider, EmbeddedChainProviderBuilder};
 
 #[cfg(all(feature = "uniffi", not(target_arch = "wasm32")))]
 uniffi::setup_scaffolding!();
+
+/// Open a remote JSON-RPC node using the same WebSocket backend as the registry.
+///
+/// Hosts with their own chain-routing policy can use this without constructing
+/// a second registry. Each connection owns one take-once response stream; close
+/// or drop ends that stream and releases the connection's resources.
+#[cfg(feature = "ws")]
+pub async fn connect_rpc_node(
+    url: url::Url,
+) -> Result<Box<dyn truapi_platform::JsonRpcConnection>, truapi::latest::GenericError> {
+    ws::connect(url).await.map_err(Into::into)
+}

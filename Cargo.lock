@@ -5357,6 +5357,7 @@ dependencies = [
  "tracing-subscriber",
  "truapi",
  "truapi-platform",
+ "truapi-provider",
  "truapi-server",
  "unicode-width",
  "zeroize",

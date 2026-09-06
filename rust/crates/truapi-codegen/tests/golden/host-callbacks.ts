@@ -1144,7 +1144,9 @@ export interface JsonRpcConnection {
   send(request: string): void;
 
   /**
-   * Stream of JSON-RPC response strings.
+   * Take the connection's response stream. Subsequent calls return an ended
+   * stream. Frames must not be silently dropped: transport or buffer failure
+   * terminates the stream so callers can fail pending requests and reconnect.
    */
   responses(): AsyncIterable<string>;
 
