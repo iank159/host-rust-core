@@ -219,6 +219,50 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn test_client_catalog_rejects_request_id_overflow() {
+        let api = ApiDefinition {
+            traits: vec![TraitDef {
+                name: "System".to_string(),
+                module_path: Vec::new(),
+                methods: vec![make_request_method("handshake", u8::MAX)],
+                docs: None,
+            }],
+            public_trait_order: vec!["System".to_string()],
+            types: versioned_request_test_types(),
+            framework_types: Vec::new(),
+        };
+
+        let error = generate_client(&api, "testhash")
+            .expect_err("an inferred response id beyond u8 must be rejected");
+        assert!(
+            error.to_string().contains("wire id overflow"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_client_catalog_rejects_subscription_id_overflow() {
+        let api = ApiDefinition {
+            traits: vec![TraitDef {
+                name: "Account".to_string(),
+                module_path: Vec::new(),
+                methods: vec![make_subscription_method("connection_status_subscribe", 253)],
+                docs: None,
+            }],
+            public_trait_order: vec!["Account".to_string()],
+            types: Vec::new(),
+            framework_types: Vec::new(),
+        };
+
+        let error = generate_client(&api, "testhash")
+            .expect_err("an inferred receive id beyond u8 must be rejected");
+        assert!(
+            error.to_string().contains("wire id overflow"),
+            "unexpected error: {error}"
+        );
+    }
+
     fn parse_entries(src: &str) -> Vec<(u8, String)> {
         // Each method's ids are emitted as a named const, e.g.
         //   pub const PREIMAGE_SUBMIT: RequestFrameIds = RequestFrameIds {
