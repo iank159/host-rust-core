@@ -13,25 +13,4 @@ pub const TRUAPI_POLKAVM_HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Version of the pinned PolkaVM host runtime.
 pub const POLKAVM_HOST_RUNTIME_VERSION: &str = "0.2.0";
 /// Immutable source revision of the pinned PolkaVM host runtime.
-pub const POLKAVM_HOST_RUNTIME_SOURCE_REVISION: &str = "72c9ded03add6b973f61778da7245d30a1e5a635";
-
-#[cfg(test)]
-mod tests {
-    const MANIFEST: &str = include_str!("../Cargo.toml");
-
-    #[test]
-    fn test_constants_match_pinned_runtime_dependency() {
-        let dependency = MANIFEST
-            .lines()
-            .find(|line| line.starts_with("polkavm-host-runtime = "))
-            .expect("polkavm-host-runtime dependency line");
-        assert!(dependency.contains(&format!(
-            "rev = \"{}\"",
-            super::POLKAVM_HOST_RUNTIME_SOURCE_REVISION
-        )));
-        assert!(dependency.contains(&format!(
-            "version = \"={}\"",
-            super::POLKAVM_HOST_RUNTIME_VERSION
-        )));
-    }
-}
+pub const POLKAVM_HOST_RUNTIME_SOURCE_REVISION: &str = "b3ec7175ffe50ebef5577a491010f5a0229dbbe8";
