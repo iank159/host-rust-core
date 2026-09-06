@@ -147,7 +147,7 @@ impl RuntimeServices {
     /// second secret and overwriting the one peers were told to address.
     pub(crate) async fn device_encryption_secret(&self) -> Result<[u8; 32], String> {
         let _guard = self.device_encryption_key.lock().await;
-        crate::host_logic::device_key::read_or_create_device_encryption_secret(
+        crate::application::device_key::read_or_create_device_encryption_secret(
             self.platform.as_ref(),
         )
         .await

@@ -364,7 +364,7 @@ pub(super) async fn allocate_smart_contract_allowance(
 ) -> Result<(), AllowanceAllocationError> {
     use truapi::latest::ChainIdentifier;
 
-    use crate::host_logic::features;
+    use crate::application::features;
     use crate::runtime::statement_allowance::{self, ChainClient, find_including_rings, pgas};
 
     // PGAS credits the product account the caller named.

@@ -1,17 +1,12 @@
-//! Host-agnostic logic the Rust core owns on behalf of every platform host.
-//!
-//! Platform callbacks are a syscall layer for OS primitives (modals, native
-//! storage, URL handler, notification center). Everything else lives here so
-//! iOS, Android, and web hosts share one canonical implementation.
+//! Protocol models, codecs, derivation, and permission policy.
+//! Application services own platform callbacks and transport orchestration.
 
 pub mod attestation;
 pub mod bulletin;
-pub mod device_key;
 pub mod dotns;
 pub mod dotns_gateway;
 pub mod entropy;
 pub mod extrinsic;
-pub mod features;
 pub mod permissions;
 pub mod product_account;
 pub mod session;

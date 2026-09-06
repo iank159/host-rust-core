@@ -28,7 +28,7 @@ use truapi::versioned::chain::{
 };
 use truapi::{CallContext, CallError, Subscription, v01};
 
-use crate::host_logic::features::{chain_info, supported_chains};
+use crate::application::features::{chain_info, supported_chains};
 use crate::runtime::{
     ProductRuntimeHost, REMOTE_PERMISSION_DENIED_REASON, runtime_failure_to_call_error,
 };

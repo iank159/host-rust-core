@@ -207,7 +207,7 @@ async fn live_asset_hub_reports_a_skipped_revision_as_pruned() {
 // dotNS gateway: the register_name authorization shape and the username reads.
 // ---------------------------------------------------------------------------
 
-use truapi_server::host_logic::dotns_gateway::{
+use truapi_server::application::dotns::{
     DotnsTransport, DotnsViewError, VIEW_CALL_ORIGIN, call_bytes32, classify_labels,
     decode_address, discover_pop_controller, encode_revive_call, label_available, namehash_under,
     resolve_labels, selector, view_output,

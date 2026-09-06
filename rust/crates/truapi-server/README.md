@@ -24,7 +24,7 @@ dispatcher → role-neutral product runtime) is minted once per host↔product
 connection by the role handle and lives for that product's whole session; a
 **shared per-host** band owns role-neutral infrastructure (`RuntimeServices`)
 and the role object (`PairingHost` or `SigningHost`), which is itself the
-`ProductAuthority`. Pure `host_logic` is a no-I/O library both bands call, not a
+`ProductAuthority`. `host_logic` provides protocol and policy helpers both bands call, not a
 stage in the frame path; the host's `Platform` impl is the syscall floor.
 
 ```text
@@ -68,9 +68,9 @@ stage in the frame path; the host's `Platform` impl is the syscall floor.
        ╎ remote signing host   ( external wallet ) ╎
        └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
 
-   both bands call host_logic for pure work, never traverse it :
+   both bands use shared application services and protocol helpers :
    ┌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┐
-   ╎ host_logic       pure library ( no I/O )              ╎
+   ╎ host_logic       protocol and policy helpers              ╎
    ╎ crypto · codecs · derivation · policy                 ╎
    └╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌┘
 
@@ -237,9 +237,12 @@ role-specific lifecycle, so no method exists on a role that can't mean it:
   the `RuntimeServices`-owned per-chain cache rather than re-reading it per
   call.
 
-`host_logic` stays pure: the orchestrators above call into it for codecs,
-session/SSO crypto, key derivation, and permission policy, while all I/O
-(statement-store RPC, storage, prompts, chain RPC) stays in the layers above.
+`host_logic` owns codecs, session/SSO crypto, key derivation, and permission
+policy. `application` owns shared storage/prompt coordination, device-key
+persistence, feature discovery, and dotNS transport traversal. Role-specific
+workflows and infrastructure remain under `runtime`; platform implementations
+supply the I/O adapters. Allowance allocation belongs to the signing role and
+is shared by local calls and the SSO responder.
 
 ## Wire envelope
 

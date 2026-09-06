@@ -28,8 +28,8 @@ use truapi::versioned::theme::HostThemeSubscribeItem;
 use truapi::{CallContext, CallError, Subscription, v01};
 use truapi_platform::PermissionAuthorizationStatus;
 
+use crate::application::features::feature_supported;
 use crate::host_logic::dotns::{NavigateDecision, external_host, parse_navigate};
-use crate::host_logic::features::feature_supported;
 use crate::runtime::ProductRuntimeHost;
 
 #[truapi::async_trait]

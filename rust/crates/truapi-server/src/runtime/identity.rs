@@ -15,14 +15,14 @@ use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
 use web_time::Duration;
 
+use crate::application::dotns::{
+    DotnsIdentity, DotnsTransport, DotnsViewError, VIEW_CALL_ORIGIN, classify_labels,
+    discover_pop_controller, encode_revive_call, resolve_labels, view_output,
+};
 use crate::chain_runtime::{
     ChainHeadStorageValue, ChainHeadStorageValueLookup, ChainRuntime,
     wait_for_chain_head_best_hash, wait_for_chain_head_call_output,
     wait_for_chain_head_storage_value,
-};
-use crate::host_logic::dotns_gateway::{
-    DotnsIdentity, DotnsTransport, DotnsViewError, VIEW_CALL_ORIGIN, classify_labels,
-    discover_pop_controller, encode_revive_call, resolve_labels, view_output,
 };
 use crate::host_logic::session::SessionInfo;
 
@@ -323,10 +323,10 @@ mod tests {
     //! without a network.
 
     use super::*;
-    use crate::chain_runtime::{RuntimeChainProvider, RuntimeFailure};
-    use crate::host_logic::dotns_gateway::{
+    use crate::application::dotns::{
         account_to_h160, dispatcher_address_key, selector, timestamp_now_key,
     };
+    use crate::chain_runtime::{RuntimeChainProvider, RuntimeFailure};
     use crate::subscription::thread_per_subscription_spawner;
     use async_trait::async_trait;
     use futures::StreamExt;

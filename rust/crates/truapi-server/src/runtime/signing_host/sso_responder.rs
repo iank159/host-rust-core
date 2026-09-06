@@ -35,12 +35,14 @@ use crate::host_logic::product_account::{
     derive_root_keypair_from_entropy, product_public_key_to_address,
 };
 use crate::host_logic::session::SsoSessionInfo;
+#[cfg(test)]
+use crate::host_logic::sso::messages::OnExistingAllowancePolicy;
 use crate::host_logic::sso::messages::{
-    self, CreateTransactionPayload, IncomingSsoRequest, OnExistingAllowancePolicy, RemoteMessage,
-    RemoteMessageData, ResourceAllocationResponse, RingVrfAliasResponse, RingVrfError,
-    RingVrfProofResponse, RingVrfSignResponse, SignRawLegacyResponse, SignVrfResponse,
-    SigningPayloadResponseData, SigningRequest, SigningResponse, SsoAllocatableResource,
-    SsoAllocatedResource, SsoAllocationOutcome, SsoResponseCode, build_outgoing_request_statement,
+    self, CreateTransactionPayload, IncomingSsoRequest, RemoteMessage, RemoteMessageData,
+    ResourceAllocationResponse, RingVrfAliasResponse, RingVrfError, RingVrfProofResponse,
+    RingVrfSignResponse, SignRawLegacyResponse, SignVrfResponse, SigningPayloadResponseData,
+    SigningRequest, SigningResponse, SsoAllocatableResource, SsoAllocatedResource,
+    SsoAllocationOutcome, SsoResponseCode, build_outgoing_request_statement,
     build_signed_session_response_statement, decode_incoming_sso_request, v1,
 };
 use crate::host_logic::sso::pairing::{

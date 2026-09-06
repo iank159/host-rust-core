@@ -21,6 +21,7 @@
 //! - `native_debug` (non-wasm32 only): a loopback WebSocket [`DebugSink`] that
 //!   streams tapped frames to the `@parity/truapi-debugger` app.
 
+pub mod application;
 pub(crate) mod chain_runtime;
 pub mod core;
 pub(crate) mod dispatcher;

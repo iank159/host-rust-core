@@ -75,9 +75,9 @@ use truapi_platform::{
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
+use crate::application::permissions::PermissionsService;
 use crate::chain_runtime::RuntimeFailure;
 use crate::host_logic::bulletin::preimage_key;
-use crate::host_logic::permissions::PermissionsService;
 use crate::host_logic::product_account::{
     derivation_index_bytes, derive_product_public_key, public_key_from_address,
 };
