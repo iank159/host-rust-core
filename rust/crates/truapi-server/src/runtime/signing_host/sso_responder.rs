@@ -164,7 +164,7 @@ impl PairedSsoPeer {
 pub(super) enum AllowanceAllocationError {
     /// Signing host session or authority state was unavailable.
     #[error("{0}")]
-    Authority(AuthorityError),
+    Authority(#[from] AuthorityError),
     /// The host serves no chain for this role, so there is nothing to claim on.
     #[cfg(not(target_arch = "wasm32"))]
     #[error("host serves no {chain} chain")]
@@ -179,7 +179,7 @@ pub(super) enum AllowanceAllocationError {
     /// Product-account key derivation failed.
     #[cfg(not(target_arch = "wasm32"))]
     #[error("{0}")]
-    ProductAccount(ProductAccountError),
+    ProductAccount(#[from] ProductAccountError),
     /// Chain state, metadata, ring, slot, proof, or extrinsic allocation failed.
     #[cfg(not(target_arch = "wasm32"))]
     #[error("{0}")]
@@ -216,19 +216,6 @@ pub(super) enum AllowanceAllocationError {
         /// Resource name.
         resource: &'static str,
     },
-}
-
-impl From<AuthorityError> for AllowanceAllocationError {
-    fn from(err: AuthorityError) -> Self {
-        Self::Authority(err)
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl From<ProductAccountError> for AllowanceAllocationError {
-    fn from(err: ProductAccountError) -> Self {
-        Self::ProductAccount(err)
-    }
 }
 
 impl AllowanceAllocationError {
