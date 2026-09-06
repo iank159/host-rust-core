@@ -43,6 +43,24 @@ struct AuthStateInner {
     delivering: bool,
 }
 
+/// Release delivery ownership if a host callback unwinds. Normal completion
+/// clears the flag under the queue lock before disarming the guard.
+struct NotificationDelivery<'a> {
+    inner: &'a Mutex<AuthStateInner>,
+    active: bool,
+}
+
+impl Drop for NotificationDelivery<'_> {
+    fn drop(&mut self) {
+        if self.active {
+            self.inner
+                .lock()
+                .expect("auth state mutex poisoned")
+                .delivering = false;
+        }
+    }
+}
+
 impl AuthStateMachine {
     /// Create an auth state machine that reports transitions to `platform`.
     pub(super) fn new(platform: Arc<dyn Platform>) -> Self {
@@ -232,6 +250,10 @@ impl AuthStateMachine {
             }
             inner.delivering = true;
         }
+        let mut delivery = NotificationDelivery {
+            inner: &self.inner,
+            active: true,
+        };
         loop {
             let state = {
                 let mut inner = self.inner.lock().expect("auth state mutex poisoned");
@@ -239,6 +261,7 @@ impl AuthStateMachine {
                     Some(state) => state,
                     None => {
                         inner.delivering = false;
+                        delivery.active = false;
                         return;
                     }
                 }
@@ -252,6 +275,24 @@ impl AuthStateMachine {
 mod tests {
     use super::*;
     use crate::test_support::stub_platform;
+
+    #[test]
+    fn callback_unwind_releases_delivery_for_the_next_transition() {
+        let platform = stub_platform();
+        let machine = AuthStateMachine::new(platform.clone());
+        *platform.on_auth_state.lock().unwrap() = Some(Arc::new(|_| panic!("host callback")));
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            machine.pairing_started("pair".into());
+        }));
+        assert!(panic.is_err());
+        platform.on_auth_state.lock().unwrap().take();
+        machine.login_cancelled();
+        assert!(matches!(
+            platform.auth_states.lock().unwrap().last(),
+            Some(AuthState::Disconnected)
+        ));
+        assert!(!machine.inner.lock().unwrap().delivering);
+    }
 
     #[test]
     fn reentrant_transitions_queue_their_notifications() {
