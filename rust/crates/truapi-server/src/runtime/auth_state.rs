@@ -2,6 +2,7 @@
 //! the host funnels through [`AuthStateMachine`], so transitions stay ordered
 //! and a stale session-store tick can never tear down an in-flight pairing.
 
+use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use futures::channel::oneshot;
@@ -10,8 +11,8 @@ use truapi_platform::{AuthPresenter, AuthState, LoginFailureKind, Platform, Sess
 use crate::runtime::login_failure::classify_login_failure;
 
 /// Serialized auth-state machine bound to the platform's `auth_state_changed`
-/// sink. Each transition mutates under the lock, releases it, then emits the
-/// new state (when it actually changed), so `auth_state_changed` handlers may
+/// sink. Transitions enqueue notifications under the lock; a single drainer
+/// delivers them in order outside the lock, so `auth_state_changed` handlers may
 /// safely re-enter the runtime (e.g. a host cancelling the login it just
 /// observed). The cancel channel for an in-flight login lives inside the
 /// in-flight login states, making its registration atomic with the transition.
@@ -38,6 +39,8 @@ struct AuthStateInner {
     /// Whether the host has observed any state yet. Gates the opening
     /// announcement so it can only ever produce the first emission.
     announced: bool,
+    notifications: VecDeque<AuthState>,
+    delivering: bool,
 }
 
 impl AuthStateMachine {
@@ -203,8 +206,9 @@ impl AuthStateMachine {
         }
         inner.announced = true;
         let state = inner.state.clone();
+        inner.notifications.push_back(state);
         drop(inner);
-        AuthPresenter::auth_state_changed(self.platform.as_ref(), state);
+        self.drain_notifications();
     }
 
     /// Run `apply` under the lock; when it changed the state (returned
@@ -214,9 +218,33 @@ impl AuthStateMachine {
         let applied = apply(&mut inner)?;
         inner.announced = true;
         let state = inner.state.clone();
+        inner.notifications.push_back(state);
         drop(inner);
-        AuthPresenter::auth_state_changed(self.platform.as_ref(), state);
+        self.drain_notifications();
         Some(applied)
+    }
+
+    fn drain_notifications(&self) {
+        {
+            let mut inner = self.inner.lock().expect("auth state mutex poisoned");
+            if inner.delivering {
+                return;
+            }
+            inner.delivering = true;
+        }
+        loop {
+            let state = {
+                let mut inner = self.inner.lock().expect("auth state mutex poisoned");
+                match inner.notifications.pop_front() {
+                    Some(state) => state,
+                    None => {
+                        inner.delivering = false;
+                        return;
+                    }
+                }
+            };
+            AuthPresenter::auth_state_changed(self.platform.as_ref(), state);
+        }
     }
 }
 
@@ -224,6 +252,66 @@ impl AuthStateMachine {
 mod tests {
     use super::*;
     use crate::test_support::stub_platform;
+
+    #[test]
+    fn reentrant_transitions_queue_their_notifications() {
+        let platform = stub_platform();
+        let machine = AuthStateMachine::new(platform.clone());
+        let callback_machine = machine.clone();
+        let in_callback = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let active = in_callback.clone();
+        *platform.on_auth_state.lock().unwrap() = Some(Arc::new(move |state| {
+            assert!(!active.swap(true, std::sync::atomic::Ordering::SeqCst));
+            if matches!(state, AuthState::Pairing { .. }) {
+                callback_machine.login_cancelled();
+            }
+            active.store(false, std::sync::atomic::Ordering::SeqCst);
+        }));
+        let (_cancel_rx, _) = machine.pairing_started("pair".into()).unwrap();
+        assert_eq!(
+            *platform.auth_states.lock().unwrap(),
+            vec![
+                AuthState::Pairing {
+                    deeplink: "pair".into()
+                },
+                AuthState::Disconnected,
+            ]
+        );
+        platform.on_auth_state.lock().unwrap().take();
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn concurrent_transitions_cannot_overtake_a_blocked_callback() {
+        let platform = stub_platform();
+        let machine = AuthStateMachine::new(platform.clone());
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let callback_entered = entered.clone();
+        let callback_release = release.clone();
+        *platform.on_auth_state.lock().unwrap() = Some(Arc::new(move |state| {
+            if matches!(state, AuthState::Pairing { .. }) {
+                callback_entered.wait();
+                callback_release.wait();
+            }
+        }));
+        let first = machine.clone();
+        let thread = std::thread::spawn(move || first.pairing_started("pair".into()));
+        entered.wait();
+        machine.login_cancelled();
+        assert_eq!(platform.auth_states.lock().unwrap().len(), 1);
+        release.wait();
+        thread.join().unwrap();
+        assert_eq!(
+            *platform.auth_states.lock().unwrap(),
+            vec![
+                AuthState::Pairing {
+                    deeplink: "pair".into()
+                },
+                AuthState::Disconnected,
+            ]
+        );
+    }
 
     #[test]
     fn announcing_a_signed_out_boot_emits_disconnected_once() {
