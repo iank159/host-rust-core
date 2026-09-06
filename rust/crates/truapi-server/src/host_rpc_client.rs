@@ -24,6 +24,7 @@ use truapi_platform::JsonRpcConnection;
 
 use crate::subscription::Spawner;
 
+const MAX_PENDING_REQUESTS: usize = 1024;
 const MAX_BUFFERED_SUBSCRIPTIONS: usize = 64;
 const MAX_BUFFERED_ITEMS_PER_SUBSCRIPTION: usize = 256;
 
@@ -48,12 +49,50 @@ struct HostRpcClientLease {
 }
 
 struct PendingRequest {
-    tx: oneshot::Sender<Result<Box<RawValue>, RpcError>>,
+    tx: oneshot::Sender<Result<RpcReply, RpcError>>,
+    unsubscribe_method: Option<String>,
 }
 
-#[derive(Clone)]
+/// Ordinary cancellation removes its registration immediately. A cancelled
+/// subscribe retains only a bounded tombstone until its acknowledgement arrives,
+/// because that reply owns the identifier needed to release the remote resource.
+struct RequestRegistration<'a> {
+    client: &'a HostRpcClientInner,
+    id: String,
+}
+
+impl Drop for RequestRegistration<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.client.pending.lock().unwrap();
+        if pending
+            .get(&self.id)
+            .is_some_and(|p| p.unsubscribe_method.is_none())
+        {
+            pending.remove(&self.id);
+        }
+    }
+}
+
+struct RpcReply {
+    raw: Option<Box<RawValue>>,
+    cleanup: Option<(Arc<HostRpcClientInner>, String)>,
+}
+
+impl Drop for RpcReply {
+    fn drop(&mut self) {
+        if let Some((client, method)) = self.cleanup.take() {
+            if let Some(raw) = &self.raw {
+                if let Ok(id) = subscription_id_from_raw(raw) {
+                    client.unsubscribe(&id, &method, raw);
+                }
+            }
+        }
+    }
+}
+
 struct SubscriptionSink {
-    tx: mpsc::UnboundedSender<Result<Box<RawValue>, RpcError>>,
+    tx: mpsc::Sender<Result<Box<RawValue>, RpcError>>,
+    terminal_error: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, derive_more::Display, derive_more::Error)]
@@ -212,10 +251,23 @@ impl HostRpcClientInner {
     }
 
     async fn request(
-        &self,
+        self: &Arc<Self>,
         method: &str,
         params: Option<Box<RawValue>>,
     ) -> Result<Box<RawValue>, RpcError> {
+        let mut reply = self.request_reply(method, params, None).await?;
+        Ok(reply
+            .raw
+            .take()
+            .expect("successful reply contains a result"))
+    }
+
+    async fn request_reply(
+        self: &Arc<Self>,
+        method: &str,
+        params: Option<Box<RawValue>>,
+        unsubscribe_method: Option<&str>,
+    ) -> Result<RpcReply, RpcError> {
         let id = self.next_request_id();
         let (tx, rx) = oneshot::channel();
         {
@@ -223,14 +275,25 @@ impl HostRpcClientInner {
             if self.closed.load(Ordering::Relaxed) {
                 return Err(client_error("json-rpc connection is closed"));
             }
-            pending.insert(id.clone(), PendingRequest { tx });
+            if pending.len() >= MAX_PENDING_REQUESTS {
+                return Err(client_error("too many pending json-rpc requests"));
+            }
+            pending.insert(
+                id.clone(),
+                PendingRequest {
+                    tx,
+                    unsubscribe_method: unsubscribe_method.map(str::to_owned),
+                },
+            );
         }
-
+        let _registration = RequestRegistration {
+            client: self,
+            id: id.clone(),
+        };
         if let Err(error) = self.send_request(&id, method, params.as_deref()) {
             self.pending.lock().unwrap().remove(&id);
             return Err(error);
         }
-
         rx.await
             .map_err(|_| client_error("json-rpc request was cancelled"))?
     }
@@ -242,9 +305,12 @@ impl HostRpcClientInner {
         unsubscribe_method: &str,
         lease: HostRpcClientLease,
     ) -> Result<RawRpcSubscription, RpcError> {
-        let raw_id = self.request(method, params).await?;
-        let subscription_id = subscription_id_from_raw(raw_id.as_ref())?;
-        let (tx, rx) = mpsc::unbounded();
+        let mut reply = self
+            .request_reply(method, params, Some(unsubscribe_method))
+            .await?;
+        let subscription_id = subscription_id_from_raw(reply.raw.as_deref().unwrap())?;
+        let (mut tx, rx) = mpsc::channel(MAX_BUFFERED_ITEMS_PER_SUBSCRIPTION);
+        let terminal_error = Arc::new(Mutex::new(None));
         {
             // Notification delivery takes these locks in the same order. Keep
             // the buffered-items lock across activation and replay so a new
@@ -254,17 +320,27 @@ impl HostRpcClientInner {
             if self.closed.load(Ordering::Relaxed) {
                 return Err(client_error("json-rpc connection is closed"));
             }
-            subscriptions.insert(subscription_id.clone(), SubscriptionSink { tx: tx.clone() });
             for item in buffered.remove(&subscription_id).unwrap_or_default() {
-                let _ = tx.unbounded_send(Ok(item));
+                tx.try_send(Ok(item))
+                    .map_err(|_| client_error("subscription replay queue full"))?;
             }
+            subscriptions.insert(
+                subscription_id.clone(),
+                SubscriptionSink {
+                    tx,
+                    terminal_error: terminal_error.clone(),
+                },
+            );
         }
 
+        reply.cleanup = None;
         let stream = SubscriptionStream {
             inner: rx,
+            terminal_error,
             client: self,
             _lease: lease,
             subscription_id: subscription_id.clone(),
+            raw_id: reply.raw.take().unwrap(),
             unsubscribe_method: unsubscribe_method.to_string(),
             closed: false,
         };
@@ -274,23 +350,20 @@ impl HostRpcClientInner {
         })
     }
 
-    fn unsubscribe(&self, subscription_id: &str, unsubscribe_method: &str) {
+    fn unsubscribe(&self, subscription_id: &str, unsubscribe_method: &str, raw_id: &RawValue) {
         self.subscriptions.lock().unwrap().remove(subscription_id);
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
         let id = self.next_request_id();
-        let params = RawValue::from_string(format!(
-            "[{}]",
-            serde_json::to_string(subscription_id).unwrap_or_else(|_| "\"\"".to_string())
-        ));
+        let params = RawValue::from_string(format!("[{}]", raw_id.get()));
         if let Ok(params) = params {
             let _ = self.send_request(&id, unsubscribe_method, Some(params.as_ref()));
         }
     }
 
     #[instrument(skip_all, fields(runtime.method = "host_rpc_client.handle_frame"))]
-    fn handle_frame(&self, frame: &str) -> Result<(), RpcError> {
+    fn handle_frame(self: &Arc<Self>, frame: &str) -> Result<(), RpcError> {
         let value: serde_json::Value =
             serde_json::from_str(frame).map_err(RpcError::Deserialization)?;
 
@@ -308,7 +381,15 @@ impl HostRpcClientInner {
 
         if let Some(result) = value.get("result") {
             let raw = raw_value_from_json(result)?;
-            let _ = pending.tx.send(Ok(raw));
+            let reply = RpcReply {
+                raw: Some(raw),
+                cleanup: pending
+                    .unsubscribe_method
+                    .map(|method| (self.clone(), method)),
+            };
+            // On cancellation, either send fails or the receiver drops the
+            // buffered reply. Both paths drop the acknowledgement's cleanup.
+            let _ = pending.tx.send(Ok(reply));
             return Ok(());
         }
 
@@ -334,32 +415,32 @@ impl HostRpcClientInner {
             return Ok(());
         };
         let raw = raw_value_from_json(result)?;
-        self.deliver_or_buffer_subscription_item(subscription_id, raw);
-        Ok(())
+        self.deliver_or_buffer_subscription_item(subscription_id, raw)
     }
 
-    fn deliver_or_buffer_subscription_item(&self, subscription_id: String, item: Box<RawValue>) {
+    fn deliver_or_buffer_subscription_item(
+        &self,
+        subscription_id: String,
+        item: Box<RawValue>,
+    ) -> Result<(), RpcError> {
         let mut buffered = self.buffered_subscription_items.lock().unwrap();
-        let sink = self
-            .subscriptions
-            .lock()
-            .unwrap()
-            .get(&subscription_id)
-            .cloned();
-        if let Some(sink) = sink {
-            drop(buffered);
-            let _ = sink.tx.unbounded_send(Ok(item));
-            return;
+        let mut subscriptions = self.subscriptions.lock().unwrap();
+        if let Some(sink) = subscriptions.get_mut(&subscription_id) {
+            return sink
+                .tx
+                .try_send(Ok(item))
+                .map_err(|_| client_error("subscription consumer stalled or disconnected"));
         }
         let known = buffered.contains_key(&subscription_id);
         if !known && buffered.len() >= MAX_BUFFERED_SUBSCRIPTIONS {
-            return;
+            return Err(client_error("too many unclaimed subscriptions"));
         }
         let items = buffered.entry(subscription_id).or_default();
         if items.len() >= MAX_BUFFERED_ITEMS_PER_SUBSCRIPTION {
-            return;
+            return Err(client_error("unclaimed subscription queue full"));
         }
         items.push(item);
+        Ok(())
     }
 
     fn close_with_error(&self, error: RpcError) {
@@ -383,9 +464,8 @@ impl HostRpcClientInner {
 
         let subscriptions = mem::take(&mut *self.subscriptions.lock().unwrap());
         for (_, sink) in subscriptions {
-            let _ = sink.tx.unbounded_send(Err(client_error(format!(
-                "json-rpc connection closed: {error}"
-            ))));
+            *sink.terminal_error.lock().unwrap() =
+                Some(format!("json-rpc connection closed: {error}"));
         }
         self.buffered_subscription_items.lock().unwrap().clear();
     }
@@ -423,10 +503,12 @@ impl RpcClientT for HostRpcClient {
 }
 
 struct SubscriptionStream {
-    inner: mpsc::UnboundedReceiver<Result<Box<RawValue>, RpcError>>,
+    inner: mpsc::Receiver<Result<Box<RawValue>, RpcError>>,
+    terminal_error: Arc<Mutex<Option<String>>>,
     client: Arc<HostRpcClientInner>,
     _lease: HostRpcClientLease,
     subscription_id: String,
+    raw_id: Box<RawValue>,
     unsubscribe_method: String,
     closed: bool,
 }
@@ -435,8 +517,11 @@ impl Drop for SubscriptionStream {
     fn drop(&mut self) {
         if !self.closed {
             self.closed = true;
-            self.client
-                .unsubscribe(&self.subscription_id, &self.unsubscribe_method);
+            self.client.unsubscribe(
+                &self.subscription_id,
+                &self.unsubscribe_method,
+                &self.raw_id,
+            );
         }
     }
 }
@@ -449,7 +534,13 @@ impl Stream for SubscriptionStream {
         match Pin::new(&mut this.inner).poll_next(cx) {
             Poll::Ready(None) => {
                 this.closed = true;
-                Poll::Ready(None)
+                Poll::Ready(
+                    this.terminal_error
+                        .lock()
+                        .unwrap()
+                        .take()
+                        .map(|error| Err(client_error(error))),
+                )
             }
             other => other,
         }
@@ -586,6 +677,112 @@ mod tests {
         }
     }
 
+    fn poll_pending<F: std::future::Future + Unpin>(future: &mut F) {
+        let waker = futures::task::noop_waker();
+        assert!(
+            Pin::new(future)
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+    }
+
+    #[test]
+    fn cancelled_requests_release_their_registrations_without_a_response() {
+        let connection = TrackingConnection::new();
+        let client = HostRpcClient::new(connection, Arc::new(|_| {}));
+        for _ in 0..100 {
+            let mut request = client.request_raw("silent", None);
+            poll_pending(&mut request);
+            assert_eq!(client.inner.pending.lock().unwrap().len(), 1);
+            drop(request);
+            assert!(client.inner.pending.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn cancelled_subscription_unsubscribes_on_late_acknowledgement() {
+        let connection = TrackingConnection::new();
+        let client = HostRpcClient::new(connection.clone(), Arc::new(|_| {}));
+        let mut request = client.subscribe_raw("silent-subscribe", None, "unsubscribe");
+        poll_pending(&mut request);
+        drop(request);
+        let id = connection.sent()[0]["id"].clone();
+        client
+            .inner
+            .handle_frame(&json!({"id":id,"result":17}).to_string())
+            .unwrap();
+        assert!(client.inner.pending.lock().unwrap().is_empty());
+        assert_eq!(connection.sent()[1]["method"], "unsubscribe");
+        assert_eq!(connection.sent()[1]["params"], json!([17]));
+    }
+
+    #[test]
+    fn cancellation_after_acknowledgement_still_unsubscribes() {
+        let connection = TrackingConnection::new();
+        let client = HostRpcClient::new(connection.clone(), Arc::new(|_| {}));
+        let mut request = client.subscribe_raw("silent-subscribe", None, "unsubscribe");
+        poll_pending(&mut request);
+        let id = connection.sent()[0]["id"].clone();
+        client
+            .inner
+            .handle_frame(&json!({"id":id,"result":"late"}).to_string())
+            .unwrap();
+        drop(request);
+        assert_eq!(connection.sent()[1]["params"], json!(["late"]));
+    }
+
+    #[test]
+    fn cancelled_subscription_tombstones_are_bounded() {
+        let connection = TrackingConnection::new();
+        let client = HostRpcClient::new(connection, Arc::new(|_| {}));
+        for _ in 0..MAX_PENDING_REQUESTS {
+            let mut request = client.subscribe_raw("silent", None, "unsubscribe");
+            poll_pending(&mut request);
+        }
+        assert!(block_on(client.subscribe_raw("silent", None, "unsubscribe")).is_err());
+        assert_eq!(
+            client.inner.pending.lock().unwrap().len(),
+            MAX_PENDING_REQUESTS
+        );
+    }
+
+    #[test]
+    fn active_queue_overflow_ends_the_stream_with_an_error() {
+        let connection = TrackingConnection::new();
+        let client = HostRpcClient::new(connection.clone(), Arc::new(|_| {}));
+        let mut request = client.subscribe_raw("silent-subscribe", None, "unsubscribe");
+        poll_pending(&mut request);
+        let id = connection.sent()[0]["id"].clone();
+        client
+            .inner
+            .handle_frame(&json!({"id":id,"result":"slow"}).to_string())
+            .unwrap();
+        let mut subscription = block_on(request).unwrap();
+        let mut overflowed = false;
+        for _ in 0..MAX_BUFFERED_ITEMS_PER_SUBSCRIPTION + 2 {
+            let result = client.inner.handle_frame(
+                &json!({"method":"item","params":{
+                    "subscription":"slow","result":0
+                }})
+                .to_string(),
+            );
+            if let Err(error) = result {
+                client.inner.close_with_error(error);
+                overflowed = true;
+                break;
+            }
+        }
+        assert!(overflowed);
+        let mut saw_error = false;
+        while let Some(item) = block_on(subscription.stream.next()) {
+            if item.is_err() {
+                saw_error = true;
+            }
+        }
+        assert!(saw_error);
+        assert_eq!(connection.close_count(), 1);
+    }
+
     #[test]
     fn dropping_one_shot_client_closes_connection_lease() {
         let connection = TrackingConnection::new();
@@ -653,18 +850,20 @@ mod tests {
         let connection = TrackingConnection::new();
         let spawner: Spawner = Arc::new(|_| {});
         let client = HostRpcClient::new(connection, spawner);
-        let (tx, mut rx) = mpsc::unbounded();
-        client
-            .inner
-            .subscriptions
-            .lock()
-            .unwrap()
-            .insert("sub-1".to_string(), SubscriptionSink { tx });
+        let (tx, mut rx) = mpsc::channel(MAX_BUFFERED_ITEMS_PER_SUBSCRIPTION);
+        client.inner.subscriptions.lock().unwrap().insert(
+            "sub-1".to_string(),
+            SubscriptionSink {
+                tx,
+                terminal_error: Arc::new(Mutex::new(None)),
+            },
+        );
         let item = RawValue::from_string(r#"{"event":"initialized"}"#.to_string()).unwrap();
 
         client
             .inner
-            .deliver_or_buffer_subscription_item("sub-1".to_string(), item);
+            .deliver_or_buffer_subscription_item("sub-1".to_string(), item)
+            .unwrap();
 
         assert!(
             !client
