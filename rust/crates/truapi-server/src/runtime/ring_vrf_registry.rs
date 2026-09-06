@@ -450,6 +450,21 @@ fn invalid_registry_listing(reason: impl Into<String>) -> RingVrfError {
     }
 }
 
+pub(crate) fn require_owned_ring_vrf_key(
+    calling_product_id: &str,
+    handle: &ProductAccountId,
+) -> Result<(), RingVrfError> {
+    let caller = normalize_product_identifier(calling_product_id).map_err(|error| {
+        RingVrfError::Unknown {
+            reason: error.to_string(),
+        }
+    })?;
+    if caller != handle.dot_ns_identifier {
+        return Err(RingVrfError::NotAllowlisted);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,19 +677,4 @@ mod tests {
             Err(RingVrfError::Unknown { reason }) if reason.contains("duplicate key handle")
         ));
     }
-}
-
-pub(crate) fn require_owned_ring_vrf_key(
-    calling_product_id: &str,
-    handle: &ProductAccountId,
-) -> Result<(), RingVrfError> {
-    let caller = normalize_product_identifier(calling_product_id).map_err(|error| {
-        RingVrfError::Unknown {
-            reason: error.to_string(),
-        }
-    })?;
-    if caller != handle.dot_ns_identifier {
-        return Err(RingVrfError::NotAllowlisted);
-    }
-    Ok(())
 }

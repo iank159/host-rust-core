@@ -80,12 +80,11 @@ struct RpcReply {
 
 impl Drop for RpcReply {
     fn drop(&mut self) {
-        if let Some((client, method)) = self.cleanup.take() {
-            if let Some(raw) = &self.raw {
-                if let Ok(id) = subscription_id_from_raw(raw) {
-                    client.unsubscribe(&id, &method, raw);
-                }
-            }
+        if let Some((client, method)) = self.cleanup.take()
+            && let Some(raw) = &self.raw
+            && let Ok(id) = subscription_id_from_raw(raw)
+        {
+            client.unsubscribe(&id, &method, raw);
         }
     }
 }

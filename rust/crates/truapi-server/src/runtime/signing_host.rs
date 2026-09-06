@@ -361,8 +361,8 @@ impl SigningHost {
             .expect("local AutoSigning grant mutex poisoned");
         let session = state.session.as_ref()?;
         Some(AuthoritySession::from_session_info(
-            &session,
-            local_session_validation_id(&session, state.activation_generation),
+            session,
+            local_session_validation_id(session, state.activation_generation),
         ))
     }
 
@@ -375,7 +375,7 @@ impl SigningHost {
             .lock()
             .expect("local AutoSigning grant mutex poisoned");
         let current = state.session.as_ref().ok_or(AuthorityError::Disconnected)?;
-        if local_session_validation_id(&current, state.activation_generation)
+        if local_session_validation_id(current, state.activation_generation)
             != session.validation_id
         {
             return Err(AuthorityError::Disconnected);
@@ -773,7 +773,6 @@ impl ProductAuthority for SigningHost {
                 build_local_transaction(
                     self,
                     session,
-                    &self.services,
                     &keypair,
                     payload.genesis_hash,
                     &payload.call_data,
@@ -800,7 +799,6 @@ impl ProductAuthority for SigningHost {
                 build_local_transaction(
                     self,
                     session,
-                    &self.services,
                     &keypair,
                     request.genesis_hash,
                     &request.call_data,
@@ -821,7 +819,6 @@ impl ProductAuthority for SigningHost {
                 build_local_transaction(
                     self,
                     session,
-                    &self.services,
                     &keypair,
                     request.genesis_hash,
                     &request.call_data,
@@ -1206,7 +1203,6 @@ fn product_authority_error(err: ProductAccountError) -> AuthorityError {
 async fn build_local_transaction(
     signing_host: &SigningHost,
     session: &AuthoritySession,
-    services: &RuntimeServices,
     keypair: &schnorrkel::Keypair,
     genesis_hash: [u8; 32],
     call_data: &[u8],
@@ -1226,7 +1222,8 @@ async fn build_local_transaction(
         });
     }
 
-    let client = services
+    let client = signing_host
+        .services
         .chain
         .online_client(&genesis_hash)
         .await

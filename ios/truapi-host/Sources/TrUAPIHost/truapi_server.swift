@@ -5068,8 +5068,11 @@ public enum TargetRenewalStatus: Equatable, Hashable {
      */
     case failed(
         /**
-         * Failure detail.
-         */reason: String
+         * Failure detail for display; never parsed to make renewal decisions.
+         */reason: String,
+        /**
+         * Whether this failure exhausted the available allowance slots.
+         */slotsExhausted: Bool
     )
     /**
      * Not attempted: the host ran out of slots earlier in the pass.
@@ -5102,7 +5105,7 @@ public struct FfiConverterTypeTargetRenewalStatus: FfiConverterRustBuffer {
         case 2: return .alreadyAllocated(seq: try FfiConverterUInt32.read(from: &buf)
         )
 
-        case 3: return .failed(reason: try FfiConverterString.read(from: &buf)
+        case 3: return .failed(reason: try FfiConverterString.read(from: &buf), slotsExhausted: try FfiConverterBool.read(from: &buf)
         )
 
         case 4: return .skippedExhausted
@@ -5126,9 +5129,10 @@ public struct FfiConverterTypeTargetRenewalStatus: FfiConverterRustBuffer {
             FfiConverterUInt32.write(seq, into: &buf)
 
 
-        case let .failed(reason):
+        case let .failed(reason,slotsExhausted):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(reason, into: &buf)
+            FfiConverterBool.write(slotsExhausted, into: &buf)
 
 
         case .skippedExhausted:
