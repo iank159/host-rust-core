@@ -82,21 +82,27 @@ impl CliStoragePaths {
     }
 }
 
+/// Maps and persistence paths belong to one mounted identity.
+struct StorageNamespace {
+    products: HashMap<String, HashMap<String, Vec<u8>>>,
+    core: HashMap<Vec<u8>, Vec<u8>>,
+    product_dir: Option<PathBuf>,
+    core_path: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
+}
+
 /// Headless-host platform shared by both roles.
 pub struct CliPlatform {
     chain: WsChainProvider,
     /// Chain roles this host serves, answered by `Features::supported_chains`.
     chains: truapi_platform::HostChainSet,
-    product_storage: Mutex<HashMap<String, HashMap<String, Vec<u8>>>>,
-    core_storage: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
+    namespace: Mutex<StorageNamespace>,
     /// Device-scoped core slots, kept outside the per-user namespaces that
     /// [`Self::switch_pairing_user_storage`] swaps. Peers address this install
     /// by the key held here, so a user switch must not regenerate it.
     device_storage: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
-    product_storage_dir: Mutex<Option<PathBuf>>,
-    core_storage_path: Mutex<Option<PathBuf>>,
+
     device_storage_path: Option<PathBuf>,
-    state_dir: Mutex<Option<PathBuf>>,
     pairing_scope: Option<PairingStorageScope>,
     preimages: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
     next_notification_id: AtomicU32,
@@ -170,13 +176,15 @@ impl CliPlatform {
         Arc::new(Self {
             chain: WsChainProvider::new(network.people_ws, network.live_chain_endpoints),
             chains: network.host_chain_set(),
-            product_storage: Mutex::new(product_storage),
-            core_storage: Mutex::new(core_storage),
+            namespace: Mutex::new(StorageNamespace {
+                products: product_storage,
+                core: core_storage,
+                product_dir: product_storage_dir,
+                core_path: core_storage_path,
+                state_dir: storage.as_ref().map(|paths| paths.state_dir.clone()),
+            }),
             device_storage: Mutex::new(device_storage),
-            product_storage_dir: Mutex::new(product_storage_dir),
-            core_storage_path: Mutex::new(core_storage_path),
             device_storage_path,
-            state_dir: Mutex::new(storage.as_ref().map(|paths| paths.state_dir.clone())),
             pairing_scope: storage.and_then(|paths| paths.pairing_scope),
             preimages: Mutex::new(HashMap::new()),
             next_notification_id: AtomicU32::new(1),
@@ -209,60 +217,17 @@ impl CliPlatform {
         key.encode()
     }
 
-    fn persist_product_storage(
-        &self,
-        product_id: &str,
-        values: &HashMap<String, Vec<u8>>,
-    ) -> Result<(), String> {
-        let Some(directory) = self
-            .product_storage_dir
-            .lock()
-            .expect("product storage path mutex poisoned")
-            .clone()
-        else {
-            return Ok(());
-        };
-        save_product_storage(&directory, product_id, values)
-    }
-
     /// Whether a slot belongs to the install rather than the signed-in user.
     fn is_device_scoped(key: &CoreStorageKey) -> bool {
         matches!(key, CoreStorageKey::DeviceEncryptionKey)
     }
 
-    fn persist_device_storage(&self) -> Result<(), String> {
-        let Some(path) = self.device_storage_path.as_deref() else {
-            return Ok(());
-        };
-        let storage = self
-            .device_storage
-            .lock()
-            .expect("device storage mutex poisoned");
-        save_hex_key_map(path, &storage)
-    }
-
-    fn persist_core_storage(&self) -> Result<(), String> {
-        let Some(path) = self
-            .core_storage_path
-            .lock()
-            .expect("core storage path mutex poisoned")
-            .clone()
-        else {
-            return Ok(());
-        };
-        let storage = self
-            .core_storage
-            .lock()
-            .expect("core storage mutex poisoned");
-        save_hex_key_map(&path, &storage)
-    }
-
-    /// Current identity-owned state directory (or the pairing bootstrap before
-    /// a user has connected).
+    /// Current identity-owned state directory.
     pub fn state_dir(&self) -> Option<PathBuf> {
-        self.state_dir
+        self.namespace
             .lock()
-            .expect("state path mutex poisoned")
+            .expect("namespace mutex poisoned")
+            .state_dir
             .clone()
     }
 
@@ -271,95 +236,132 @@ impl CliPlatform {
             return Ok(());
         };
         let user_id = pairing_storage_name(user_id);
-        let user_id = user_id.as_ref();
         let target_state = scope.network_dir.join(format!("{user_id}_pairing_host"));
-        let current_state = self
-            .state_dir
-            .lock()
-            .expect("state path mutex poisoned")
-            .clone();
-        if current_state.as_ref() == Some(&target_state) {
-            persist_current_pairing_user(&scope.bootstrap_dir, user_id)?;
-            return Ok(());
+        let mut current = self.namespace.lock().expect("namespace mutex poisoned");
+        if current.state_dir.as_ref() == Some(&target_state) {
+            return persist_current_pairing_user(&scope.bootstrap_dir, &user_id);
         }
-
         fs::create_dir_all(&target_state)
             .map_err(|error| format!("create {}: {error}", target_state.display()))?;
-        let target_product_dir = target_state.join("storage");
-        let target_core_path = target_state.join("core-storage.json");
-        let migrating_bootstrap = current_state.as_ref() == Some(&scope.bootstrap_dir);
-
-        // A fresh login writes these values before its username is known.
-        // Carry only that pairing bootstrap across namespaces; permissions,
-        // allowances, and product KV remain isolated to their previous user.
-        let transient_keys = [
-            CoreStorageKey::AuthSession,
-            CoreStorageKey::PairingDeviceIdentity,
-            CoreStorageKey::LastProcessedPairingStatement,
-        ]
-        .map(|key| Self::core_key(&key));
-        let carried = {
-            // Keep the same path -> storage lock order used by persistence so
-            // an auth transition cannot deadlock with a concurrent core write.
-            let current_path = self
-                .core_storage_path
-                .lock()
-                .expect("core storage path mutex poisoned");
-            let mut current = self
-                .core_storage
-                .lock()
-                .expect("core storage mutex poisoned");
-            if migrating_bootstrap {
-                current.drain().collect::<Vec<_>>()
-            } else {
-                let carried = transient_keys
-                    .iter()
-                    .filter_map(|key| current.remove(key).map(|value| (key.clone(), value)))
-                    .collect::<Vec<_>>();
-                if let Some(path) = current_path.as_deref() {
-                    save_hex_key_map(path, &current)?;
-                }
-                carried
-            }
+        let product_dir = target_state.join("storage");
+        let core_path = target_state.join("core-storage.json");
+        let migrating_bootstrap = current.state_dir.as_ref() == Some(&scope.bootstrap_dir);
+        let core_values = match read_string_map(&core_path) {
+            Ok(values) => values,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(error) => return Err(format!("read {}: {error}", core_path.display())),
         };
-
-        let mut target_core = load_hex_key_map(&target_core_path);
-        target_core.extend(carried);
-        let mut target_products = load_product_storage(&target_product_dir);
+        let mut core = core_values
+            .into_iter()
+            .map(|(key, value)| {
+                hex::decode(key)
+                    .map(|key| (key, value))
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<HashMap<_, _>, _>>()?;
+        let mut products = load_product_storage(&product_dir);
         if migrating_bootstrap {
-            target_products.extend(
-                self.product_storage
-                    .lock()
-                    .expect("product storage mutex poisoned")
-                    .clone(),
-            );
-            for (product_id, values) in &target_products {
-                save_product_storage(&target_product_dir, product_id, values)?;
+            core.extend(current.core.clone());
+            products.extend(current.products.clone());
+        } else {
+            for key in [
+                CoreStorageKey::AuthSession,
+                CoreStorageKey::PairingDeviceIdentity,
+                CoreStorageKey::LastProcessedPairingStatement,
+            ]
+            .map(|key| Self::core_key(&key))
+            {
+                if let Some(value) = current.core.get(&key) {
+                    core.insert(key, value.clone());
+                }
             }
         }
-        {
-            let mut core_storage_path = self
-                .core_storage_path
-                .lock()
-                .expect("core storage path mutex poisoned");
-            let mut core_storage = self
-                .core_storage
-                .lock()
-                .expect("core storage mutex poisoned");
-            *core_storage = target_core;
-            *core_storage_path = Some(target_core_path);
+        // Finish every fallible write before publishing any map or path.
+        // Old stores are untouched on failure; target writes can safely be retried.
+        save_hex_key_map(&core_path, &core)?;
+        if migrating_bootstrap {
+            for (product, values) in &products {
+                save_product_storage(&product_dir, product, values)?;
+            }
         }
-        *self
-            .product_storage
-            .lock()
-            .expect("product storage mutex poisoned") = target_products;
-        *self
-            .product_storage_dir
-            .lock()
-            .expect("product storage path mutex poisoned") = Some(target_product_dir);
-        *self.state_dir.lock().expect("state path mutex poisoned") = Some(target_state);
-        self.persist_core_storage()?;
-        persist_current_pairing_user(&scope.bootstrap_dir, user_id)
+        persist_current_pairing_user(&scope.bootstrap_dir, &user_id)?;
+        *current = StorageNamespace {
+            products,
+            core,
+            product_dir: Some(product_dir),
+            core_path: Some(core_path),
+            state_dir: Some(target_state),
+        };
+        Ok(())
+    }
+
+    fn update_core_storage(
+        &self,
+        key: CoreStorageKey,
+        value: Option<Vec<u8>>,
+    ) -> Result<(), String> {
+        let encoded = Self::core_key(&key);
+        if Self::is_device_scoped(&key) {
+            let mut current = self
+                .device_storage
+                .lock()
+                .expect("device storage mutex poisoned");
+            let mut next = current.clone();
+            match value {
+                Some(value) => {
+                    next.insert(encoded, value);
+                }
+                None => {
+                    next.remove(&encoded);
+                }
+            }
+            if let Some(path) = &self.device_storage_path {
+                save_hex_key_map(path, &next)?;
+            }
+            *current = next;
+        } else {
+            let mut current = self.namespace.lock().expect("namespace mutex poisoned");
+            let mut next = current.core.clone();
+            match value {
+                Some(value) => {
+                    next.insert(encoded, value);
+                }
+                None => {
+                    next.remove(&encoded);
+                }
+            }
+            if let Some(path) = &current.core_path {
+                save_hex_key_map(path, &next)?;
+            }
+            current.core = next;
+        }
+        Ok(())
+    }
+
+    fn update_product_storage(
+        &self,
+        key: ProductStorageKey,
+        value: Option<Vec<u8>>,
+    ) -> Result<(), String> {
+        let mut current = self.namespace.lock().expect("namespace mutex poisoned");
+        let mut values = current
+            .products
+            .get(key.product_id())
+            .cloned()
+            .unwrap_or_default();
+        match value {
+            Some(value) => {
+                values.insert(key.key().to_owned(), value);
+            }
+            None => {
+                values.remove(key.key());
+            }
+        }
+        if let Some(directory) = &current.product_dir {
+            save_product_storage(directory, key.product_id(), &values)?;
+        }
+        current.products.insert(key.product_id().to_owned(), values);
+        Ok(())
     }
 
     /// Resolve a confirmation: auto-accept, or prompt y/n on the CLI.
@@ -436,14 +438,15 @@ async fn prompt_yes_no(action: &str, detail: &str) -> bool {
 #[async_trait]
 impl ProductStorage for CliPlatform {
     async fn read(&self, key: String) -> Result<Option<Vec<u8>>, api::HostLocalStorageReadError> {
-        let scoped = ProductStorageKey::decode(&key)
+        let key = ProductStorageKey::decode(&key)
             .map_err(|reason| api::HostLocalStorageReadError::Unknown { reason })?;
         Ok(self
-            .product_storage
+            .namespace
             .lock()
-            .expect("product storage mutex poisoned")
-            .get(scoped.product_id())
-            .and_then(|values| values.get(scoped.key()))
+            .expect("namespace mutex poisoned")
+            .products
+            .get(key.product_id())
+            .and_then(|values| values.get(key.key()))
             .cloned())
     }
 
@@ -452,28 +455,16 @@ impl ProductStorage for CliPlatform {
         key: String,
         value: Vec<u8>,
     ) -> Result<(), api::HostLocalStorageReadError> {
-        let scoped = ProductStorageKey::decode(&key)
+        let key = ProductStorageKey::decode(&key)
             .map_err(|reason| api::HostLocalStorageReadError::Unknown { reason })?;
-        let mut storage = self
-            .product_storage
-            .lock()
-            .expect("product storage mutex poisoned");
-        let values = storage.entry(scoped.product_id().to_string()).or_default();
-        values.insert(scoped.key().to_string(), value);
-        self.persist_product_storage(scoped.product_id(), values)
+        self.update_product_storage(key, Some(value))
             .map_err(|reason| api::HostLocalStorageReadError::Unknown { reason })
     }
 
     async fn clear(&self, key: String) -> Result<(), api::HostLocalStorageReadError> {
-        let scoped = ProductStorageKey::decode(&key)
+        let key = ProductStorageKey::decode(&key)
             .map_err(|reason| api::HostLocalStorageReadError::Unknown { reason })?;
-        let mut storage = self
-            .product_storage
-            .lock()
-            .expect("product storage mutex poisoned");
-        let values = storage.entry(scoped.product_id().to_string()).or_default();
-        values.remove(scoped.key());
-        self.persist_product_storage(scoped.product_id(), values)
+        self.update_product_storage(key, None)
             .map_err(|reason| api::HostLocalStorageReadError::Unknown { reason })
     }
 }
@@ -484,16 +475,21 @@ impl CoreStorage for CliPlatform {
         &self,
         key: CoreStorageKey,
     ) -> Result<Option<Vec<u8>>, api::GenericError> {
-        let store = if Self::is_device_scoped(&key) {
-            &self.device_storage
+        let encoded = Self::core_key(&key);
+        Ok(if Self::is_device_scoped(&key) {
+            self.device_storage
+                .lock()
+                .expect("device storage mutex poisoned")
+                .get(&encoded)
+                .cloned()
         } else {
-            &self.core_storage
-        };
-        Ok(store
-            .lock()
-            .expect("core storage mutex poisoned")
-            .get(&Self::core_key(&key))
-            .cloned())
+            self.namespace
+                .lock()
+                .expect("namespace mutex poisoned")
+                .core
+                .get(&encoded)
+                .cloned()
+        })
     }
 
     async fn write_core_storage(
@@ -501,45 +497,25 @@ impl CoreStorage for CliPlatform {
         key: CoreStorageKey,
         value: Vec<u8>,
     ) -> Result<(), api::GenericError> {
-        let device_scoped = Self::is_device_scoped(&key);
-        {
-            let store = if device_scoped {
-                &self.device_storage
-            } else {
-                &self.core_storage
-            };
-            store
-                .lock()
-                .expect("core storage mutex poisoned")
-                .insert(Self::core_key(&key), value);
-        }
-        if device_scoped {
-            self.persist_device_storage()
-        } else {
-            self.persist_core_storage()
-        }
-        .map_err(|reason| api::GenericError { reason })
+        self.update_core_storage(key, Some(value))
+            .map_err(|reason| api::GenericError { reason })
     }
 
     async fn clear_core_storage(&self, key: CoreStorageKey) -> Result<(), api::GenericError> {
-        let device_scoped = Self::is_device_scoped(&key);
-        {
-            let store = if device_scoped {
-                &self.device_storage
-            } else {
-                &self.core_storage
-            };
-            store
-                .lock()
-                .expect("core storage mutex poisoned")
-                .remove(&Self::core_key(&key));
+        self.update_core_storage(key, None)
+            .map_err(|reason| api::GenericError { reason })
+    }
+}
+
+impl truapi_server::session_storage::SessionStorage for CliPlatform {
+    fn activate(&self, session: &SessionUiInfo) -> Result<(), String> {
+        if self.pairing_scope.is_none() {
+            return Ok(());
         }
-        if device_scoped {
-            self.persist_device_storage()
-        } else {
-            self.persist_core_storage()
-        }
-        .map_err(|reason| api::GenericError { reason })
+        let user_id = storage_user_id(session)
+            .map(str::to_owned)
+            .unwrap_or_else(|| hex::encode(session.public_key));
+        self.switch_pairing_user_storage(&user_id)
     }
 }
 
@@ -712,12 +688,6 @@ impl Features for CliPlatform {
 
 impl truapi_platform::AuthPresenter for CliPlatform {
     fn auth_state_changed(&self, state: AuthState) {
-        if let AuthState::Connected(info) = &state
-            && let Some(user_id) = storage_user_id(info)
-            && let Err(reason) = self.switch_pairing_user_storage(user_id)
-        {
-            tracing::warn!(%reason, %user_id, "could not switch pairing-host user storage");
-        }
         let (connection, event) = match &state {
             AuthState::Pairing { deeplink } => (
                 "pairing".to_string(),
@@ -1168,13 +1138,8 @@ fn persist_current_pairing_user(bootstrap_dir: &Path, user_id: &str) -> Result<(
     fs::create_dir_all(bootstrap_dir)
         .map_err(|error| format!("create {}: {error}", bootstrap_dir.display()))?;
     let path = bootstrap_dir.join(CURRENT_PAIRING_USER_FILE);
-    let temporary = bootstrap_dir.join(format!(
-        ".{CURRENT_PAIRING_USER_FILE}.{}.tmp",
-        std::process::id()
-    ));
-    fs::write(&temporary, format!("{user_id}\n"))
-        .map_err(|error| format!("write {}: {error}", temporary.display()))?;
-    fs::rename(&temporary, &path).map_err(|error| format!("persist {}: {error}", path.display()))
+    crate::storage::write_private(&path, format!("{user_id}\n").as_bytes())
+        .map_err(|error| format!("persist {}: {error}", path.display()))
 }
 
 fn save_hex_key_map(path: &Path, values: &HashMap<Vec<u8>, Vec<u8>>) -> Result<(), String> {
@@ -1303,6 +1268,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_namespace_preparation_preserves_all_mounted_state() {
+        for failure in ["directory", "core", "pointer"] {
+            let dir = tempdir().unwrap();
+            let network_dir = dir.path().join("network");
+            let platform = CliPlatform::new(
+                test_network(),
+                Some(CliStoragePaths::pairing(network_dir.clone())),
+                ApprovalPolicy::AutoAccept,
+                None,
+            );
+            platform.switch_pairing_user_storage("alice").unwrap();
+            let key = ProductStorageKey::new("myapp.dot", "value").unwrap();
+            platform.write(key.encode(), vec![1]).await.unwrap();
+            platform
+                .write_core_storage(CoreStorageKey::AuthSession, vec![2])
+                .await
+                .unwrap();
+            let previous = platform.state_dir().unwrap();
+            let target = network_dir.join("bob_pairing_host");
+            match failure {
+                "directory" => fs::write(&target, b"occupied").unwrap(),
+                "core" => {
+                    fs::create_dir_all(target.join("core-storage.json")).unwrap();
+                }
+                "pointer" => {
+                    let pointer = network_dir.join("pairing-host/current-user");
+                    fs::remove_file(&pointer).unwrap();
+                    fs::create_dir(&pointer).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                platform.switch_pairing_user_storage("bob").is_err(),
+                "{failure}"
+            );
+            assert_eq!(platform.state_dir().unwrap(), previous);
+            assert_eq!(platform.read(key.encode()).await.unwrap(), Some(vec![1]));
+            assert_eq!(
+                platform
+                    .read_core_storage(CoreStorageKey::AuthSession)
+                    .await
+                    .unwrap(),
+                Some(vec![2])
+            );
+        }
+    }
+
+    #[test]
+    fn auth_presentation_does_not_switch_storage() {
+        use truapi_platform::AuthPresenter;
+        let dir = tempdir().unwrap();
+        let platform = CliPlatform::new(
+            test_network(),
+            Some(CliStoragePaths::pairing(dir.path().join("network"))),
+            ApprovalPolicy::AutoAccept,
+            None,
+        );
+        let previous = platform.state_dir();
+        platform.auth_state_changed(AuthState::Connected(SessionUiInfo {
+            lite_username: Some("alice".into()),
+            ..SessionUiInfo::default()
+        }));
+        assert_eq!(platform.state_dir(), previous);
+    }
+
+    #[tokio::test]
     async fn approval_policy_changes_apply_to_future_confirmations() {
         let platform = CliPlatform::new(test_network(), None, ApprovalPolicy::Prompt, None);
 
@@ -1372,17 +1403,10 @@ mod tests {
         assert!(crate::sessions::validate_name(&pairing_storage_name("Tarik Gul")).is_ok());
     }
 
-    /// The same thing through the lifecycle the core actually drives:
-    /// `AuthPresenter::auth_state_changed` with a `Connected` state. That path
-    /// only logs a `warn!` on failure, so a rejected id used to silently inherit
-    /// the previous identity's namespace.
-    ///
-    /// Asserts the isolation itself, not just that the paths differ: a value
-    /// written while alice is connected must not be readable by the next
-    /// identity.
+    /// Namespace activation is fallible; presentation only observes its outcome.
     #[tokio::test]
-    async fn auth_state_changed_does_not_inherit_storage_on_a_rejected_username() {
-        use truapi_platform::AuthPresenter;
+    async fn activation_does_not_inherit_storage_on_a_rejected_username() {
+        use truapi_server::session_storage::SessionStorage;
 
         let dir = tempdir().expect("tempdir");
         let network_dir = dir.path().join("paseo");
@@ -1403,7 +1427,10 @@ mod tests {
             })
         };
 
-        platform.auth_state_changed(connect(Some("alice"), None));
+        let AuthState::Connected(info) = connect(Some("alice"), None) else {
+            unreachable!()
+        };
+        platform.activate(&info).unwrap();
         let alice_dir = platform.state_dir().expect("alice state dir");
         assert!(alice_dir.ends_with("alice_pairing_host"));
 
@@ -1421,7 +1448,10 @@ mod tests {
             .expect("alice product write");
 
         // No lite username, so storage_user_id falls back to full_username.
-        platform.auth_state_changed(connect(None, Some("Tarik Gul")));
+        let AuthState::Connected(info) = connect(None, Some("Tarik Gul")) else {
+            unreachable!()
+        };
+        platform.activate(&info).unwrap();
 
         let after = platform.state_dir().expect("state dir after");
         assert_ne!(

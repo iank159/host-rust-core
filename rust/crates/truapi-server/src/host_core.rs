@@ -246,6 +246,20 @@ impl PairingHostRuntime {
     where
         P: Platform + 'static,
     {
+        Self::with_chat_and_session_storage(platform, config, spawner, chat_platform, None)
+    }
+
+    /// Construct with identity storage installed before boot restoration starts.
+    pub fn with_chat_and_session_storage<P>(
+        platform: Arc<P>,
+        config: PairingHostConfig,
+        spawner: Spawner,
+        chat_platform: Option<Arc<dyn ChatPlatform>>,
+        session_storage: Option<Arc<dyn crate::session_storage::SessionStorage>>,
+    ) -> Self
+    where
+        P: Platform + 'static,
+    {
         let platform: Arc<dyn Platform> = platform;
         let services = RuntimeServices::with_chat_platform(
             platform,
@@ -255,7 +269,8 @@ impl PairingHostRuntime {
             spawner.clone(),
             chat_platform,
         );
-        let pairing_host = PairingHostRole::new(services.clone(), config);
+        let pairing_host =
+            PairingHostRole::new_with_session_storage(services.clone(), config, session_storage);
         pairing_host.clone().start_session_store_sync(spawner);
         Self {
             services,

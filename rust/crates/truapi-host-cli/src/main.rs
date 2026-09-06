@@ -1059,11 +1059,12 @@ async fn run_pairing_host(
     let storage_platform = platform.clone();
     let chat_host = args.execution_kind.chat_host();
     let status_host = platform.clone() as Arc<dyn PermissionStatusHost>;
-    let pairing_runtime = Arc::new(PairingHostRuntime::with_chat_platform(
+    let pairing_runtime = Arc::new(PairingHostRuntime::with_chat_and_session_storage(
         platform,
         config,
         tokio_spawner(),
         chat_host.map(|chat| chat as Arc<dyn ChatPlatform>),
+        Some(storage_platform.clone()),
     ));
     pairing_runtime.set_permission_status_host(status_host);
 

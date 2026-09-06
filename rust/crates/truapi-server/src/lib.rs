@@ -31,6 +31,7 @@ pub mod host_logic;
 pub(crate) mod host_rpc_client;
 pub mod logging;
 pub(crate) mod runtime;
+pub mod session_storage;
 pub mod subscription;
 pub mod transport;
 

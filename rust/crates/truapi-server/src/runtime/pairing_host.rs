@@ -247,6 +247,8 @@ enum StoredSessionActivationError {
     Read(String),
     #[display("stored auth session changed during activation")]
     Changed,
+    #[display("session storage activation failed: {_0}")]
+    Storage(String),
 }
 
 /// State carried across the reconciles of one session store sync task.
@@ -272,6 +274,7 @@ impl SessionStoreSync {
 
 /// Remote account authority for a pairing host.
 pub(crate) struct PairingHost {
+    session_storage: Option<Arc<dyn crate::session_storage::SessionStorage>>,
     /// Host platform backing all syscalls.
     pub(super) platform: Arc<dyn Platform>,
     /// Pairing configuration supplied by the embedding host.
@@ -313,9 +316,18 @@ pub(crate) struct PairingHost {
 impl PairingHost {
     /// Build a pairing host over the shared runtime services.
     pub(crate) fn new(services: Arc<RuntimeServices>, host_config: PairingHostConfig) -> Arc<Self> {
+        Self::new_with_session_storage(services, host_config, None)
+    }
+
+    pub(crate) fn new_with_session_storage(
+        services: Arc<RuntimeServices>,
+        host_config: PairingHostConfig,
+        session_storage: Option<Arc<dyn crate::session_storage::SessionStorage>>,
+    ) -> Arc<Self> {
         let platform = services.platform.clone();
         let auth_state = AuthStateMachine::new(platform.clone());
         Arc::new_cyclic(|weak_self| Self {
+            session_storage,
             platform,
             host_config,
             chain: services.chain.clone(),
@@ -491,8 +503,13 @@ impl PairingHost {
         .await;
         #[cfg(test)]
         self.wait_at_external_session_activation_pause().await;
-        self.set_connected_session_if_current(resolved, activation_epoch, true)
-            .await;
+        if let Err(error) = self
+            .set_connected_session_if_current(resolved, activation_epoch, true)
+            .await
+        {
+            self.clear_disconnected_session(true).await;
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -591,7 +608,9 @@ impl PairingHost {
                 .write_core_storage(CoreStorageKey::AuthSession, resolved_blob)
                 .await;
         }
-        self.set_connected_session(resolved).await;
+        self.set_connected_session(resolved)
+            .await
+            .map_err(StoredSessionActivationError::Storage)?;
         Ok(())
     }
 
@@ -698,7 +717,12 @@ impl PairingHost {
                         v01::HostRequestLoginResponse::Rejected,
                     ));
                 }
-                self.set_connected_session(*session).await;
+                if let Err(reason) = self.set_connected_session(*session).await {
+                    login_owner.finish(Err(reason.clone()));
+                    return Err(CallError::Domain(HostRequestLoginError::V1(
+                        v01::HostRequestLoginError::Unknown { reason },
+                    )));
+                }
                 login_owner.finish(Ok(()));
                 Ok(HostRequestLoginResponse::V1(
                     v01::HostRequestLoginResponse::Success,
@@ -911,10 +935,16 @@ impl PairingHost {
         self.auth_state.store_disconnected();
     }
 
-    async fn set_connected_session(&self, session: SessionInfo) {
+    async fn set_connected_session(&self, session: SessionInfo) -> Result<(), String> {
         let activation_epoch = self.advance_session_lifecycle();
-        self.set_connected_session_if_current(session, activation_epoch, false)
-            .await;
+        if let Err(error) = self
+            .set_connected_session_if_current(session, activation_epoch, false)
+            .await
+        {
+            self.clear_disconnected_session(true).await;
+            return Err(error);
+        }
+        Ok(())
     }
 
     async fn set_connected_session_if_current(
@@ -922,9 +952,9 @@ impl PairingHost {
         session: SessionInfo,
         activation_epoch: u64,
         external_session: bool,
-    ) -> bool {
+    ) -> Result<bool, String> {
         if !self.is_session_lifecycle_current(activation_epoch) {
-            return false;
+            return Ok(false);
         }
         let previous = self.session_state.current();
         let identity_replaced = previous.as_ref().is_some_and(|previous| {
@@ -957,7 +987,10 @@ impl PairingHost {
                 .lock()
                 .expect("session lifecycle mutex poisoned");
             if lifecycle.epoch != activation_epoch {
-                return false;
+                return Ok(false);
+            }
+            if let Some(storage) = &self.session_storage {
+                storage.activate(&connected_session_ui_info(&session))?;
             }
             let previous = self.session_state.current();
             self.session_state.set_session(session.clone());
@@ -970,12 +1003,14 @@ impl PairingHost {
         self.start_disconnect_monitor(&session);
         self.auth_state
             .connected(&connected_session_ui_info(&session));
-        true
+        Ok(true)
     }
 
     #[cfg(test)]
     pub(crate) async fn set_connected_session_for_tests(&self, session: SessionInfo) {
-        self.set_connected_session(session).await;
+        self.set_connected_session(session)
+            .await
+            .expect("test session activation");
     }
 
     #[cfg(test)]
@@ -2611,5 +2646,67 @@ impl ProductAuthority for PairingHost {
         context: &[u8],
     ) -> Result<[u8; 32], AuthorityError> {
         PairingHost::derive_entropy(self, session, product_id, context)
+    }
+}
+
+#[cfg(test)]
+mod storage_activation_tests {
+    use super::*;
+    use crate::session_storage::SessionStorage;
+    use crate::test_support::{stub_platform, test_spawner};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct Storage {
+        fail: AtomicBool,
+    }
+    impl SessionStorage for Storage {
+        fn activate(&self, _session: &truapi_platform::SessionUiInfo) -> Result<(), String> {
+            if self.fail.load(Ordering::SeqCst) {
+                Err("injected storage failure".into())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_storage_activation_cannot_publish_a_connected_identity() {
+        let platform = stub_platform();
+        let config = super::super::ProductRuntimeHost::compat_host_config();
+        let services = RuntimeServices::new(
+            platform.clone(),
+            config.host.host_info.clone(),
+            config.people_chain_genesis_hash,
+            config.bulletin_chain_genesis_hash,
+            test_spawner(),
+        );
+        let storage = Arc::new(Storage {
+            fail: AtomicBool::new(false),
+        });
+        let host = PairingHost::new_with_session_storage(services, config, Some(storage.clone()));
+        let mut first = SessionInfo {
+            public_key: [0; 32],
+            sso: None,
+            root_entropy_source: None,
+            identity_account_id: None,
+            identity_chat_private_key: None,
+            device_enc_public_key: None,
+            lite_username: None,
+            full_username: None,
+        };
+        first.public_key = [1; 32];
+        first.lite_username = Some("alice".into());
+        futures::executor::block_on(host.set_connected_session(first.clone())).unwrap();
+        platform.auth_states.lock().unwrap().clear();
+        storage.fail.store(true, Ordering::SeqCst);
+        let mut second = first;
+        second.public_key = [2; 32];
+        second.lite_username = Some("bob".into());
+        assert!(futures::executor::block_on(host.set_connected_session(second)).is_err());
+        assert!(host.session_state.current().is_none());
+        assert_eq!(
+            *platform.auth_states.lock().unwrap(),
+            vec![truapi_platform::AuthState::Disconnected]
+        );
     }
 }
