@@ -87,6 +87,9 @@ struct LocalSessionState {
     session: Option<SessionInfo>,
     root_entropy: Option<Zeroizing<Vec<u8>>>,
     activation_generation: u64,
+    /// Invalidation ticks include same-wallet reactivation and grant revocation,
+    /// which can leave the public connection-status snapshot unchanged.
+    generation_changes: crate::host_logic::session_store::SessionStoreChangeNotifier,
     auto_signing_grants: HashSet<([u8; 32], String)>,
 }
 
@@ -97,6 +100,7 @@ impl LocalSessionState {
             .checked_add(1)
             .expect("local activation generation exhausted");
         self.auto_signing_grants.clear();
+        self.generation_changes.notify();
     }
 
     fn revoke_product(&mut self, product_id: &str) {
@@ -106,6 +110,7 @@ impl LocalSessionState {
             .expect("local activation generation exhausted");
         self.auto_signing_grants
             .retain(|(_, granted_product_id)| granted_product_id != product_id);
+        self.generation_changes.notify();
     }
 }
 
@@ -185,6 +190,7 @@ impl SigningHost {
 
     /// Current root entropy, or [`AuthorityError::Disconnected`] when no local
     /// session is active.
+    #[cfg(not(target_arch = "wasm32"))]
     fn root_entropy(&self) -> Result<Zeroizing<Vec<u8>>, AuthorityError> {
         self.local_session
             .lock()

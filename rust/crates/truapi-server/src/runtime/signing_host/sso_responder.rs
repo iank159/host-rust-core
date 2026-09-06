@@ -15,6 +15,7 @@ use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
+use futures::StreamExt;
 use parity_scale_codec::Encode;
 use tracing::{debug, instrument, warn};
 use truapi::{CallContext, latest as api, v01};
@@ -54,6 +55,7 @@ use crate::host_logic::statement_store::{
     build_signed_statement, current_unix_secs as statement_current_unix_secs,
     parse_new_statements_result,
 };
+use crate::runtime::authority::AuthoritySession;
 use crate::runtime::authority::{
     AccountAliasAuthorityRequest, AuthorityError, CreateProofAuthorityRequest,
     CreateTransactionAuthorityRequest, ListRingVrfKeysAuthorityRequest, ProductAuthority,
@@ -136,6 +138,7 @@ pub struct PairedSsoPeer {
 }
 
 struct EstablishedPairing {
+    authority_session: AuthoritySession,
     session: SsoSessionInfo,
     replay_scope: SsoReplayScope,
 }
@@ -163,6 +166,7 @@ pub(crate) async fn respond_to_pairing(
     serve_session(
         services,
         signing_host,
+        established.authority_session,
         established.session,
         established.replay_scope,
     )
@@ -185,9 +189,12 @@ async fn establish_pairing_session(
     deeplink: &str,
 ) -> Result<EstablishedPairing, String> {
     let peer = PairedSsoPeer::from_deeplink(deeplink)?;
+    let authority_session = signing_host
+        .current_session()
+        .ok_or_else(|| "signing host has no active local session".to_string())?;
     let entropy = signing_host
-        .root_entropy()
-        .map_err(|err| format!("signing host has no active local session: {err}"))?;
+        .session_entropy(&authority_session)
+        .map_err(|err| err.to_string())?;
     // Product accounts and the SSO statement identity derive from the
     // canonical root key; the identity is the RFC-0022 uid.dot default account.
     let root = derive_root_keypair_from_entropy(&entropy)
@@ -205,6 +212,9 @@ async fn establish_pairing_session(
         device_enc_pub_key,
         root_entropy_source: root_entropy_source(&entropy),
     }));
+    signing_host
+        .require_current_session(&authority_session)
+        .map_err(|err| err.to_string())?;
     let handshake = encrypt_v2_handshake_response(peer.encryption_public_key, &success)?;
     let topic = bootstrap_topic(peer.statement_account_id, peer.encryption_public_key);
     let statement = build_signed_statement(
@@ -220,7 +230,11 @@ async fn establish_pairing_session(
         .await?;
     debug!("answered pairing handshake");
 
+    signing_host
+        .require_current_session(&authority_session)
+        .map_err(|err| err.to_string())?;
     Ok(EstablishedPairing {
+        authority_session,
         session,
         replay_scope: SsoReplayScope {
             root_public_key: root.public.to_bytes(),
@@ -236,15 +250,19 @@ pub(crate) async fn resume_pairing(
     signing_host: Arc<SigningHost>,
     peer: PairedSsoPeer,
 ) -> Result<ResponderExit, String> {
+    let authority_session = signing_host
+        .current_session()
+        .ok_or_else(|| "signing host has no active local session".to_string())?;
     let entropy = signing_host
-        .root_entropy()
-        .map_err(|err| format!("signing host has no active local session: {err}"))?;
+        .session_entropy(&authority_session)
+        .map_err(|err| err.to_string())?;
     let root = derive_root_keypair_from_entropy(&entropy)
         .map_err(|err| format!("root account derivation failed: {err}"))?;
     let session = responder_session(&entropy, peer)?;
     serve_session(
         services,
         signing_host,
+        authority_session,
         session,
         SsoReplayScope {
             root_public_key: root.public.to_bytes(),
@@ -272,11 +290,67 @@ fn responder_session_from_identity(
     )
 }
 
-/// Serve inbound session statements until the session ends.
-#[instrument(skip_all, fields(runtime.method = "sso_responder.serve_session"))]
+/// Run a responder operation only while its captured signing generation is active.
+async fn run_for_session<T>(
+    signing_host: &SigningHost,
+    session: &AuthoritySession,
+    operation: impl std::future::Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    let mut changes = signing_host
+        .local_session
+        .lock()
+        .expect("local session mutex poisoned")
+        .generation_changes
+        .subscribe();
+    let ended = async {
+        loop {
+            signing_host
+                .require_current_session(session)
+                .map_err(|err| err.to_string())?;
+            if changes.next().await.is_none() {
+                return Err("signing host session stream ended".to_string());
+            }
+        }
+    };
+    futures::pin_mut!(operation, ended);
+    match futures::future::select(ended, operation).await {
+        futures::future::Either::Left((result, _)) => result,
+        futures::future::Either::Right((result, _)) => {
+            signing_host
+                .require_current_session(session)
+                .map_err(|err| err.to_string())?;
+            result
+        }
+    }
+}
+
 async fn serve_session(
     services: Arc<RuntimeServices>,
     signing_host: Arc<SigningHost>,
+    authority_session: AuthoritySession,
+    session: SsoSessionInfo,
+    replay_scope: SsoReplayScope,
+) -> Result<ResponderExit, String> {
+    run_for_session(
+        &signing_host,
+        &authority_session,
+        serve_session_inner(
+            services,
+            &signing_host,
+            &authority_session,
+            session,
+            replay_scope,
+        ),
+    )
+    .await
+}
+
+/// Serve inbound session statements until the session ends.
+#[instrument(skip_all, fields(runtime.method = "sso_responder.serve_session"))]
+async fn serve_session_inner(
+    services: Arc<RuntimeServices>,
+    signing_host: &Arc<SigningHost>,
+    authority_session: &AuthoritySession,
     session: SsoSessionInfo,
     replay_scope: SsoReplayScope,
 ) -> Result<ResponderExit, String> {
@@ -352,7 +426,15 @@ async fn serve_session(
                 &request_id,
                 expires_at_unix_secs,
                 statement_current_unix_secs(),
-                || serve_request(&services, &signing_host, &session, incoming),
+                || {
+                    serve_request(
+                        &services,
+                        signing_host,
+                        authority_session,
+                        &session,
+                        incoming,
+                    )
+                },
             )
             .await?;
             let exit = match execution {
@@ -374,6 +456,7 @@ async fn serve_session(
 async fn serve_request(
     services: &Arc<RuntimeServices>,
     signing_host: &Arc<SigningHost>,
+    authority_session: &AuthoritySession,
     session: &SsoSessionInfo,
     incoming: IncomingSsoRequest,
 ) -> Result<Option<ResponderExit>, String> {
@@ -388,8 +471,14 @@ async fn serve_request(
         let request_name = request.to_string();
         let responding_to = message.message_id.clone();
         let started = Instant::now();
-        let Some(answer) =
-            answer_remote_message(services, signing_host, message.message_id, request).await
+        let Some(answer) = answer_remote_message_for_session(
+            services,
+            signing_host,
+            Some(authority_session),
+            message.message_id,
+            request,
+        )
+        .await
         else {
             continue;
         };
@@ -699,49 +788,68 @@ pub(crate) async fn answer_remote_message(
     message_id: String,
     request: v1::RemoteMessage,
 ) -> Option<AnsweredRemoteMessage> {
+    let session = signing_host.current_session();
+    answer_remote_message_for_session(
+        services,
+        signing_host,
+        session.as_ref(),
+        message_id,
+        request,
+    )
+    .await
+}
+
+async fn answer_remote_message_for_session(
+    services: &Arc<RuntimeServices>,
+    signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
+    message_id: String,
+    request: v1::RemoteMessage,
+) -> Option<AnsweredRemoteMessage> {
     let response_id = format!("{message_id}:response");
     let mut response_result = None;
     let data = match request {
         v1::RemoteMessage::SignRequest(request) => v1::RemoteMessage::SignResponse(
-            sign_response(services, signing_host, &message_id, *request).await,
+            sign_response(services, signing_host, session, &message_id, *request).await,
         ),
         v1::RemoteMessage::RingVrfAliasRequest(request) => {
-            let payload = account_alias_response(signing_host, request).await;
+            let payload = account_alias_response(signing_host, session, request).await;
             v1::RemoteMessage::RingVrfAliasResponse(RingVrfAliasResponse {
                 responding_to: message_id,
                 payload,
             })
         }
         v1::RemoteMessage::RingVrfProofRequest(request) => {
-            let payload = create_proof_response(signing_host, request).await;
+            let payload = create_proof_response(signing_host, session, request).await;
             v1::RemoteMessage::RingVrfProofResponse(RingVrfProofResponse {
                 responding_to: message_id,
                 payload,
             })
         }
         v1::RemoteMessage::RegisterRingVrfKeyRequest(request) => {
-            let payload = register_ring_vrf_key_response(signing_host, request).await;
+            let payload = register_ring_vrf_key_response(signing_host, session, request).await;
             v1::RemoteMessage::RegisterRingVrfKeyResponse(messages::RegisterRingVrfKeyResponse {
                 responding_to: message_id,
                 payload,
             })
         }
         v1::RemoteMessage::ListRingVrfKeysRequest(request) => {
-            let payload = list_ring_vrf_keys_response(signing_host, request).await;
+            let payload = list_ring_vrf_keys_response(signing_host, session, request).await;
             v1::RemoteMessage::ListRingVrfKeysResponse(messages::ListRingVrfKeysResponse {
                 responding_to: message_id,
                 payload,
             })
         }
         v1::RemoteMessage::RingVrfSignRequest(request) => {
-            let payload = ring_vrf_sign_response(signing_host, request).await;
+            let payload = ring_vrf_sign_response(signing_host, session, request).await;
             v1::RemoteMessage::RingVrfSignResponse(RingVrfSignResponse {
                 responding_to: message_id,
                 payload,
             })
         }
         v1::RemoteMessage::ResourceAllocationRequest(request) => {
-            let answer = resource_allocation_response(services, signing_host, request).await;
+            let answer =
+                resource_allocation_response(services, signing_host, session, request).await;
             if let Err(reason) = &answer.payload {
                 warn!(%reason, "resource allocation request failed");
             }
@@ -759,6 +867,7 @@ pub(crate) async fn answer_remote_message(
             let signed_transaction = create_transaction_response(
                 services,
                 signing_host,
+                session,
                 CreateTransactionReview::Product(payload.clone()),
                 CreateTransactionAuthorityRequest::Product(payload),
             )
@@ -773,6 +882,7 @@ pub(crate) async fn answer_remote_message(
             let signed_transaction = create_transaction_response(
                 services,
                 signing_host,
+                session,
                 CreateTransactionReview::LegacyAccount(payload.clone()),
                 CreateTransactionAuthorityRequest::IdentityAccount(payload),
             )
@@ -783,21 +893,23 @@ pub(crate) async fn answer_remote_message(
             })
         }
         v1::RemoteMessage::SignRawLegacyRequest(request) => {
-            let signature = sign_raw_legacy_response(services, signing_host, request).await;
+            let signature =
+                sign_raw_legacy_response(services, signing_host, session, request).await;
             v1::RemoteMessage::SignRawLegacyResponse(SignRawLegacyResponse {
                 responding_to: message_id,
                 signature,
             })
         }
         v1::RemoteMessage::SignVrfRequest(request) => {
-            let payload = sign_vrf_response(signing_host, message_id.clone(), request).await;
+            let payload =
+                sign_vrf_response(signing_host, session, message_id.clone(), request).await;
             v1::RemoteMessage::SignVrfResponse(SignVrfResponse {
                 responding_to: message_id,
                 payload,
             })
         }
         v1::RemoteMessage::ProductSubtreeRequest(request) => {
-            let product_public_key = match signing_host.current_session() {
+            let product_public_key = match session.cloned() {
                 Some(session) => signing_host
                     .product_subtree_public_key(
                         &CallContext::with_request_id(message_id.clone()),
@@ -838,9 +950,10 @@ pub(crate) async fn answer_remote_message(
 async fn resource_allocation_response(
     services: &Arc<RuntimeServices>,
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     request: messages::ResourceAllocationRequest,
 ) -> ResourceAllocationAnswer {
-    let Some(session) = signing_host.current_session() else {
+    let Some(session) = session.cloned() else {
         return ResourceAllocationAnswer {
             payload: Err("signing host session is not active".into()),
             item_failures: Vec::new(),
@@ -973,10 +1086,11 @@ fn public_allocatable_resource(resource: &SsoAllocatableResource) -> api::Alloca
 async fn sign_response(
     services: &Arc<RuntimeServices>,
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     message_id: &str,
     request: SigningRequest,
 ) -> SigningResponse {
-    let payload = serve_sign_request(services, signing_host, request).await;
+    let payload = serve_sign_request(services, signing_host, session, request).await;
     if let Err(reason) = &payload {
         warn!(%reason, "sign request failed");
     }
@@ -989,10 +1103,11 @@ async fn sign_response(
 async fn serve_sign_request(
     services: &Arc<RuntimeServices>,
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     request: SigningRequest,
 ) -> Result<SigningPayloadResponseData, String> {
-    let session = signing_host
-        .current_session()
+    let session = session
+        .cloned()
         .ok_or_else(|| "signing host session is not active".to_string())?;
     let cx = CallContext::default();
     let response = match request {
@@ -1029,10 +1144,11 @@ async fn serve_sign_request(
 async fn sign_raw_legacy_response(
     services: &Arc<RuntimeServices>,
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     request: messages::SignRawLegacyRequest,
 ) -> Result<Vec<u8>, String> {
-    let session = signing_host
-        .current_session()
+    let session = session
+        .cloned()
         .ok_or_else(|| "signing host session is not active".to_string())?;
     let public_request = api::HostSignRawWithLegacyAccountRequest {
         signer: product_public_key_to_address(request.account),
@@ -1067,11 +1183,12 @@ fn sign_vrf_error_reason(error: &v01::HostAccountSignVrfError) -> String {
 
 async fn sign_vrf_response(
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     message_id: String,
     request: messages::SignVrfRequest,
 ) -> Result<v01::VrfSignature, v01::HostAccountSignVrfError> {
-    let session = signing_host
-        .current_session()
+    let session = session
+        .cloned()
         .ok_or(v01::HostAccountSignVrfError::NotConnected)?;
     signing_host
         .sign_vrf(
@@ -1099,11 +1216,12 @@ async fn sign_vrf_response(
 async fn create_transaction_response(
     services: &Arc<RuntimeServices>,
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     review: CreateTransactionReview,
     request: CreateTransactionAuthorityRequest,
 ) -> Result<Vec<u8>, String> {
-    let session = signing_host
-        .current_session()
+    let session = session
+        .cloned()
         .ok_or_else(|| "signing host session is not active".to_string())?;
     confirm(services, UserConfirmationReview::CreateTransaction(review)).await?;
     let cx = CallContext::default();
@@ -1116,11 +1234,10 @@ async fn create_transaction_response(
 
 async fn account_alias_response(
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     request: messages::RingVrfAliasRequest,
 ) -> Result<api::HostAccountGetAliasResponse, RingVrfError> {
-    let session = signing_host
-        .current_session()
-        .ok_or_else(disconnected_ring_vrf)?;
+    let session = session.cloned().ok_or_else(disconnected_ring_vrf)?;
     let cx = CallContext::default();
     signing_host
         .account_alias(
@@ -1138,11 +1255,10 @@ async fn account_alias_response(
 
 async fn create_proof_response(
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     request: messages::RingVrfProofRequest,
 ) -> Result<api::HostAccountCreateProofResponse, RingVrfError> {
-    let session = signing_host
-        .current_session()
-        .ok_or_else(disconnected_ring_vrf)?;
+    let session = session.cloned().ok_or_else(disconnected_ring_vrf)?;
     let cx = CallContext::default();
     signing_host
         .create_proof(
@@ -1161,11 +1277,10 @@ async fn create_proof_response(
 
 async fn register_ring_vrf_key_response(
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     request: messages::RegisterRingVrfKeyRequest,
 ) -> Result<api::RingVrfPublicKey, RingVrfError> {
-    let session = signing_host
-        .current_session()
-        .ok_or_else(disconnected_ring_vrf)?;
+    let session = session.cloned().ok_or_else(disconnected_ring_vrf)?;
     signing_host
         .register_ring_vrf_key(
             &CallContext::default(),
@@ -1181,11 +1296,10 @@ async fn register_ring_vrf_key_response(
 
 async fn list_ring_vrf_keys_response(
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     request: messages::ListRingVrfKeysRequest,
 ) -> Result<Vec<api::RegisteredRingVrfKey>, RingVrfError> {
-    let session = signing_host
-        .current_session()
-        .ok_or_else(disconnected_ring_vrf)?;
+    let session = session.cloned().ok_or_else(disconnected_ring_vrf)?;
     signing_host
         .list_ring_vrf_keys(
             &CallContext::default(),
@@ -1201,11 +1315,10 @@ async fn list_ring_vrf_keys_response(
 
 async fn ring_vrf_sign_response(
     signing_host: &Arc<SigningHost>,
+    session: Option<&AuthoritySession>,
     request: messages::RingVrfSignRequest,
 ) -> Result<Vec<u8>, RingVrfError> {
-    let session = signing_host
-        .current_session()
-        .ok_or_else(disconnected_ring_vrf)?;
+    let session = session.cloned().ok_or_else(disconnected_ring_vrf)?;
     signing_host
         .ring_vrf_sign(
             &CallContext::default(),
@@ -1276,6 +1389,91 @@ mod tests {
         futures::executor::block_on(signing_host.activate_local_session(ENTROPY.to_vec()))
             .expect("activation succeeds");
         (services, signing_host)
+    }
+
+    #[test]
+    fn old_sso_channel_cannot_select_a_replacement_wallet() {
+        let (services, signing_host) = signing_fixture(Arc::new(StubPlatform::default()));
+        let original = signing_host.current_session().unwrap();
+        futures::executor::block_on(signing_host.activate_local_session(vec![0xcd; 16])).unwrap();
+        let request = || {
+            v1::RemoteMessage::ProductSubtreeRequest(messages::ProductSubtreeRequest {
+                product_id: "myapp.dot".into(),
+            })
+        };
+        let stale = futures::executor::block_on(answer_remote_message_for_session(
+            &services,
+            &signing_host,
+            Some(&original),
+            "old-channel".into(),
+            request(),
+        ))
+        .unwrap();
+        let RemoteMessageData::V1(v1::RemoteMessage::ProductSubtreeResponse(stale)) =
+            stale.response.data
+        else {
+            panic!("expected subtree response");
+        };
+        assert!(stale.product_public_key.is_err());
+        let current = futures::executor::block_on(answer_remote_message(
+            &services,
+            &signing_host,
+            "current-channel".into(),
+            request(),
+        ))
+        .unwrap();
+        let RemoteMessageData::V1(v1::RemoteMessage::ProductSubtreeResponse(current)) =
+            current.response.data
+        else {
+            panic!("expected subtree response");
+        };
+        assert!(current.product_public_key.is_ok());
+    }
+
+    #[test]
+    fn stale_sso_generation_cannot_allocate_replacement_wallet_secrets() {
+        let (services, signing_host) = signing_fixture(Arc::new(StubPlatform {
+            resource_allocation_confirmed: true,
+            ..Default::default()
+        }));
+        let original = signing_host.current_session().unwrap();
+        futures::executor::block_on(signing_host.activate_local_session(vec![0xcd; 16])).unwrap();
+        let answer = futures::executor::block_on(resource_allocation_response(
+            &services,
+            &signing_host,
+            Some(&original),
+            messages::ResourceAllocationRequest {
+                calling_product_id: "myapp.dot".into(),
+                resources: vec![SsoAllocatableResource::AutoSigning],
+                on_existing: OnExistingAllowancePolicy::Ignore,
+            },
+        ));
+        assert!(answer.payload.is_err());
+    }
+
+    #[test]
+    fn responder_cancels_suspended_work_on_logout_or_same_wallet_reactivation() {
+        use std::future::Future;
+        use std::task::{Context, Poll};
+        for reactivate in [false, true] {
+            let (_, signing_host) = signing_fixture(Arc::new(StubPlatform::default()));
+            let session = signing_host.current_session().unwrap();
+            let mut work = Box::pin(run_for_session(
+                &signing_host,
+                &session,
+                futures::future::pending::<Result<(), String>>(),
+            ));
+            let waker = futures::task::noop_waker();
+            let mut cx = Context::from_waker(&waker);
+            assert!(work.as_mut().poll(&mut cx).is_pending());
+            if reactivate {
+                futures::executor::block_on(signing_host.activate_local_session(ENTROPY.to_vec()))
+                    .unwrap();
+            } else {
+                futures::executor::block_on(signing_host.disconnect());
+            }
+            assert!(matches!(work.as_mut().poll(&mut cx), Poll::Ready(Err(_))));
+        }
     }
 
     /// Metadata for the People chain the signing fixture is configured for.
