@@ -14,6 +14,7 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod allowance_renewal;
+mod allowances;
 mod local_activation;
 pub(super) mod ring_vrf;
 mod sso_replay;
@@ -193,8 +194,12 @@ impl SigningHost {
             .ok_or(AuthorityError::Disconnected)
     }
 
-    fn product_subtree_secret(&self, product_id: &str) -> Result<[u8; 64], AuthorityError> {
-        let entropy = self.root_entropy()?;
+    fn product_subtree_secret(
+        &self,
+        session: &AuthoritySession,
+        product_id: &str,
+    ) -> Result<[u8; 64], AuthorityError> {
+        let entropy = self.session_entropy(session)?;
         let root = derive_root_keypair_from_entropy(&entropy).map_err(product_authority_error)?;
         let product_id = normalize_product_identifier(product_id).map_err(|err| {
             AuthorityError::Unavailable {
@@ -1009,9 +1014,10 @@ impl ProductAuthority for SigningHost {
         for resource in request.resources {
             let outcome = match resource {
                 v01::AllocatableResource::StatementStoreAllowance => {
-                    sso_responder::allocate_statement_store_allowance(
+                    allowances::allocate_statement_store_allowance(
                         &self.services,
                         self,
+                        session,
                         &product_id,
                         OnExistingAllowancePolicy::Increase,
                     )
@@ -1019,9 +1025,10 @@ impl ProductAuthority for SigningHost {
                     .map(|_| v01::AllocationOutcome::Allocated)
                 }
                 v01::AllocatableResource::BulletinAllowance => {
-                    sso_responder::allocate_bulletin_allowance(
+                    allowances::allocate_bulletin_allowance(
                         &self.services,
                         self,
+                        session,
                         &product_id,
                         OnExistingAllowancePolicy::Increase,
                     )
@@ -1029,9 +1036,10 @@ impl ProductAuthority for SigningHost {
                     .map(|_| v01::AllocationOutcome::Allocated)
                 }
                 v01::AllocatableResource::SmartContractAllowance(index) => {
-                    sso_responder::allocate_smart_contract_allowance(
+                    allowances::allocate_smart_contract_allowance(
                         &self.services,
                         self,
+                        session,
                         &product_id,
                         index,
                         OnExistingAllowancePolicy::Increase,
@@ -1042,7 +1050,7 @@ impl ProductAuthority for SigningHost {
                 v01::AllocatableResource::AutoSigning => self
                     .grant_auto_signing(session, &product_id)
                     .map(|_| v01::AllocationOutcome::Allocated)
-                    .map_err(sso_responder::AllowanceAllocationError::Authority),
+                    .map_err(allowances::AllowanceAllocationError::Authority),
             };
             match outcome {
                 Ok(outcome) => outcomes.push(outcome),
@@ -1062,14 +1070,15 @@ impl ProductAuthority for SigningHost {
         product_id: String,
     ) -> Result<StatementStoreAllowanceKey, AuthorityError> {
         self.require_current_session(session)?;
-        let secret = sso_responder::allocate_statement_store_allowance(
+        let secret = allowances::allocate_statement_store_allowance(
             &self.services,
             self,
+            session,
             &product_id,
             OnExistingAllowancePolicy::Ignore,
         )
         .await
-        .map_err(sso_responder::AllowanceAllocationError::into_authority_error)?;
+        .map_err(allowances::AllowanceAllocationError::into_authority_error)?;
         self.require_current_session(session)?;
         StatementStoreAllowanceKey::from_secret_bytes(secret)
     }
@@ -1081,14 +1090,15 @@ impl ProductAuthority for SigningHost {
         product_id: String,
     ) -> Result<BulletinAllowanceKey, AuthorityError> {
         self.require_current_session(session)?;
-        let secret = sso_responder::allocate_bulletin_allowance(
+        let secret = allowances::allocate_bulletin_allowance(
             &self.services,
             self,
+            session,
             &product_id,
             OnExistingAllowancePolicy::Ignore,
         )
         .await
-        .map_err(sso_responder::AllowanceAllocationError::into_authority_error)?;
+        .map_err(allowances::AllowanceAllocationError::into_authority_error)?;
         self.require_current_session(session)?;
         BulletinAllowanceKey::from_secret_bytes(secret)
     }
@@ -1100,14 +1110,15 @@ impl ProductAuthority for SigningHost {
         product_id: String,
     ) -> Result<BulletinAllowanceKey, AuthorityError> {
         self.require_current_session(session)?;
-        let secret = sso_responder::allocate_bulletin_allowance(
+        let secret = allowances::allocate_bulletin_allowance(
             &self.services,
             self,
+            session,
             &product_id,
             OnExistingAllowancePolicy::Increase,
         )
         .await
-        .map_err(sso_responder::AllowanceAllocationError::into_authority_error)?;
+        .map_err(allowances::AllowanceAllocationError::into_authority_error)?;
         self.require_current_session(session)?;
         BulletinAllowanceKey::from_secret_bytes(secret)
     }

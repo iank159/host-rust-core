@@ -17,7 +17,7 @@ use tracing::{debug, info, warn};
 use truapi_platform::{CoreStorage, CoreStorageKey};
 
 use super::SigningHost;
-use super::sso_responder::current_unix_secs;
+use super::allowances::current_unix_secs;
 use crate::host_logic::product_account::{
     derive_identity_keypair, derive_root_keypair_from_entropy, derive_sr25519_hard_path,
 };
@@ -278,7 +278,18 @@ pub(super) async fn track(
     signing_host: &SigningHost,
     targets: Vec<StatementRenewalTarget>,
 ) -> Result<(), String> {
-    let entropy = signing_host.root_entropy().map_err(|err| err.to_string())?;
+    let session = signing_host.current_session().ok_or("no active session")?;
+    track_for_session(signing_host, &session, targets).await
+}
+
+pub(super) async fn track_for_session(
+    signing_host: &SigningHost,
+    session: &crate::runtime::authority::AuthoritySession,
+    targets: Vec<StatementRenewalTarget>,
+) -> Result<(), String> {
+    let entropy = signing_host
+        .session_entropy(session)
+        .map_err(|err| err.to_string())?;
     track_targets(
         signing_host.platform.as_ref(),
         signing_host.renewal.ledger_lock(),
@@ -372,7 +383,12 @@ pub(super) async fn renew_now(
     services: &Arc<RuntimeServices>,
     signing_host: &SigningHost,
 ) -> Result<StatementRenewalReport, String> {
-    let entropy = signing_host.root_entropy().map_err(|err| err.to_string())?;
+    let session = signing_host
+        .current_session()
+        .ok_or_else(|| "no active session for statement-store renewal".to_string())?;
+    let entropy = signing_host
+        .session_entropy(&session)
+        .map_err(|err| err.to_string())?;
     let period = statement_allowance::slot::current_period(
         current_unix_secs().map_err(|err| err.to_string())?,
     );
@@ -394,9 +410,6 @@ pub(super) async fn renew_now(
 
     // The same accessor on-demand allocation uses, so a change to the reserved
     // key reaches renewal too — and it revalidates the session first.
-    let session = signing_host
-        .current_session()
-        .ok_or_else(|| "no active session for statement-store renewal".to_string())?;
     let candidates = signing_host
         .reserved_person_collection_candidates(&session)
         .map_err(|err| err.to_string())?;
