@@ -133,15 +133,21 @@ pub trait Signing: Send + Sync {
     /// Sign raw bytes with a non-product account.
     ///
     /// ```ts
-    /// const accountsResult = await truapi.account.getLegacyAccounts();
-    /// assert(accountsResult.isOk(), "getLegacyAccounts failed:", accountsResult);
-    /// const identityAccount =
-    ///   accountsResult.value.accounts.find((account) => account.name === "Identity") ??
-    ///   accountsResult.value.accounts[0];
-    /// assert(identityAccount, "no legacy accounts available");
+    /// const productContext = await truapi.system.getProductContext();
+    /// assert(productContext.isOk(), "getProductContext failed:", productContext);
+    ///
+    /// // Hosts support explicitly addressed compatibility accounts without
+    /// // enumerating them through getLegacyAccounts.
+    /// const accountResult = await truapi.account.getAccount({
+    ///   productAccountId: {
+    ///     dotNsIdentifier: productContext.value.productId,
+    ///     derivationIndex: { tag: "Index", value: 0 },
+    ///   },
+    /// });
+    /// assert(accountResult.isOk(), "getAccount failed:", accountResult);
     ///
     /// const result = await truapi.signing.signRawWithLegacyAccount({
-    ///   signer: identityAccount.publicKey,
+    ///   signer: accountResult.value.account.publicKey,
     ///   payload: {
     ///     tag: "Bytes",
     ///     value: { bytes: "0x48656c6c6f" },
