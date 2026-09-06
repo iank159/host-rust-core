@@ -2219,8 +2219,16 @@ async fn discard_new_pairing_candidate(
     }
 }
 
+#[derive(Debug, derive_more::Display, derive_more::Error)]
+#[display("{reason}")]
+struct PairingAllowanceFailure {
+    reason: String,
+    slots_exhausted: bool,
+}
+
 fn is_statement_slot_exhaustion(err: &anyhow::Error) -> bool {
-    truapi_server::reports_exhausted_period(&err.to_string())
+    err.downcast_ref::<PairingAllowanceFailure>()
+        .is_some_and(|failure| failure.slots_exhausted)
 }
 
 fn signer_identity_may_rotate(auto_managed: bool, paired_host_count: usize) -> bool {
@@ -2299,14 +2307,21 @@ async fn renew_pairing_allowances(
         match status {
             TargetRenewalStatus::Registered { .. }
             | TargetRenewalStatus::AlreadyAllocated { .. } => {}
-            TargetRenewalStatus::Failed { reason } => {
+            TargetRenewalStatus::Failed {
+                reason,
+                slots_exhausted,
+            } => {
                 if !candidate_is_existing {
                     let _ = session
                         .runtime
                         .untrack_statement_renewal_account(&candidate_id)
                         .await;
                 }
-                bail!("pairing allowance renewal for {label} failed: {reason}");
+                return Err(PairingAllowanceFailure {
+                    reason: format!("pairing allowance renewal for {label} failed: {reason}"),
+                    slots_exhausted: *slots_exhausted,
+                }
+                .into());
             }
             TargetRenewalStatus::SkippedExhausted => {
                 if !candidate_is_existing {
@@ -2315,7 +2330,11 @@ async fn renew_pairing_allowances(
                         .untrack_statement_renewal_account(&candidate_id)
                         .await;
                 }
-                bail!("no free StatementStore slot for {label}");
+                return Err(PairingAllowanceFailure {
+                    reason: format!("no free StatementStore slot for {label}"),
+                    slots_exhausted: true,
+                }
+                .into());
             }
         }
     }
@@ -2355,7 +2374,7 @@ async fn run_renew(session: &mut SigningHostSession) -> Result<()> {
                     already_allocated: true,
                 });
             }
-            TargetRenewalStatus::Failed { reason } => {
+            TargetRenewalStatus::Failed { reason, .. } => {
                 failed += 1;
                 terminal_ui::output_event(SystemEvent::AllowanceRenewalFailed {
                     target: target.clone(),
@@ -3662,6 +3681,23 @@ fn default_base_path() -> PathBuf {
 mod cli_tests {
     use super::*;
     use parity_scale_codec::Encode;
+
+    #[test]
+    fn local_slot_exhaustion_uses_the_category_through_error_context() {
+        let exhausted = anyhow::Error::new(PairingAllowanceFailure {
+            reason: "diagnostic wording may change".into(),
+            slots_exhausted: true,
+        })
+        .context("pairing failed");
+        assert!(is_statement_slot_exhaustion(&exhausted));
+        let unrelated = anyhow::anyhow!("no free StatementStore slot");
+        assert!(!is_statement_slot_exhaustion(&unrelated));
+        let typed_other = anyhow::Error::new(PairingAllowanceFailure {
+            reason: "no free StatementStore slot".into(),
+            slots_exhausted: false,
+        });
+        assert!(!is_statement_slot_exhaustion(&typed_other));
+    }
 
     #[test]
     fn pairing_deeplink_becomes_a_public_persistable_host_record() {

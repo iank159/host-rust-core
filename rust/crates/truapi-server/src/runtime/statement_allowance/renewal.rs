@@ -102,8 +102,10 @@ pub enum TargetRenewalStatus {
     },
     /// Registration failed; the target is retried on the next tick.
     Failed {
-        /// Failure detail.
+        /// Failure detail for display; never parsed to make renewal decisions.
         reason: String,
+        /// Whether this failure exhausted the available allowance slots.
+        slots_exhausted: bool,
     },
     /// Not attempted: the host ran out of slots earlier in the pass.
     SkippedExhausted,
@@ -338,6 +340,7 @@ fn fold_outcomes(
                     slots_exhausted |= failure.slots_exhausted;
                     TargetRenewalStatus::Failed {
                         reason: failure.reason,
+                        slots_exhausted: failure.slots_exhausted,
                     }
                 }
                 None => TargetRenewalStatus::SkippedExhausted,
@@ -766,7 +769,8 @@ mod tests {
                     outcome(
                         "b",
                         TargetRenewalStatus::Failed {
-                            reason: "rpc timeout".to_string()
+                            reason: "rpc timeout".to_string(),
+                            slots_exhausted: false
                         }
                     ),
                     outcome(
@@ -806,7 +810,8 @@ mod tests {
                     outcome(
                         "b",
                         TargetRenewalStatus::Failed {
-                            reason: exhausted_failure().reason
+                            reason: exhausted_failure().reason,
+                            slots_exhausted: true
                         }
                     ),
                     outcome("c", TargetRenewalStatus::SkippedExhausted),
