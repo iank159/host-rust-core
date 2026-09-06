@@ -1307,10 +1307,13 @@ pub(super) async fn allocate_smart_contract_allowance(
 
     // PGAS credits the product account the caller named.
     let target = signing_host
-        .product_keypair(&v01::ProductAccountId {
-            dot_ns_identifier: product_id.to_string(),
-            derivation_index,
-        })?
+        .product_keypair(
+            &session,
+            &v01::ProductAccountId {
+                dot_ns_identifier: product_id.to_string(),
+                derivation_index,
+            },
+        )?
         .public
         .to_bytes();
 
@@ -1477,6 +1480,9 @@ async fn sign_raw_legacy_response(
     signing_host: &Arc<SigningHost>,
     request: messages::SignRawLegacyRequest,
 ) -> Result<Vec<u8>, String> {
+    let session = signing_host
+        .current_session()
+        .ok_or_else(|| "signing host session is not active".to_string())?;
     let public_request = api::HostSignRawWithLegacyAccountRequest {
         signer: product_public_key_to_address(request.account),
         payload: request.data.into(),
@@ -1486,9 +1492,6 @@ async fn sign_raw_legacy_response(
         UserConfirmationReview::SignRaw(SignRawReview::LegacyAccount(public_request.clone())),
     )
     .await?;
-    let session = signing_host
-        .current_session()
-        .ok_or_else(|| "signing host session is not active".to_string())?;
     signing_host
         .sign_raw(
             &CallContext::default(),

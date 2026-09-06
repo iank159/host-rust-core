@@ -82,12 +82,14 @@ const BYTES_WRAP_PREFIX: &[u8] = b"<Bytes>";
 const BYTES_WRAP_SUFFIX: &[u8] = b"</Bytes>";
 
 #[derive(Default)]
-struct LocalGrantState {
+struct LocalSessionState {
+    session: Option<SessionInfo>,
+    root_entropy: Option<Zeroizing<Vec<u8>>>,
     activation_generation: u64,
     auto_signing_grants: HashSet<([u8; 32], String)>,
 }
 
-impl LocalGrantState {
+impl LocalSessionState {
     fn advance_activation(&mut self) {
         self.activation_generation = self
             .activation_generation
@@ -113,12 +115,10 @@ pub(crate) struct SigningHost {
     session_state: Arc<SessionState>,
     auth_state: AuthStateMachine,
     ring_resolver: Arc<dyn RingResolver>,
-    /// Root BIP-39 entropy held only while a session is active.
-    root_entropy: Mutex<Option<Zeroizing<Vec<u8>>>>,
     /// In-memory grants and the activation generation that owns them. The
     /// lifecycle mutex also makes session replacement and snapshot creation
     /// atomic with respect to generation changes.
-    local_grants: Mutex<LocalGrantState>,
+    local_session: Mutex<LocalSessionState>,
     /// Durable RFC-0024 registry, scoped by the active wallet root.
     ring_vrf_registry: Arc<RingVrfRegistryStore>,
     /// Serializes replay-ledger updates within each wallet and peer scope.
@@ -138,8 +138,7 @@ impl SigningHost {
             session_state: SessionState::new(),
             auth_state: AuthStateMachine::new(platform.clone()),
             ring_resolver,
-            root_entropy: Mutex::new(None),
-            local_grants: Mutex::new(LocalGrantState::default()),
+            local_session: Mutex::new(LocalSessionState::default()),
             ring_vrf_registry: RingVrfRegistryStore::new(platform),
             sso_replay_locks: SsoReplayLocks::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -170,8 +169,7 @@ impl SigningHost {
             session_state: SessionState::new(),
             auth_state: AuthStateMachine::new(platform.clone()),
             ring_resolver,
-            root_entropy: Mutex::new(None),
-            local_grants: Mutex::new(LocalGrantState::default()),
+            local_session: Mutex::new(LocalSessionState::default()),
             ring_vrf_registry: RingVrfRegistryStore::new(platform),
             sso_replay_locks: SsoReplayLocks::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -187,9 +185,10 @@ impl SigningHost {
     /// Current root entropy, or [`AuthorityError::Disconnected`] when no local
     /// session is active.
     fn root_entropy(&self) -> Result<Zeroizing<Vec<u8>>, AuthorityError> {
-        self.root_entropy
+        self.local_session
             .lock()
-            .expect("signing host entropy mutex poisoned")
+            .expect("local session mutex poisoned")
+            .root_entropy
             .clone()
             .ok_or(AuthorityError::Disconnected)
     }
@@ -217,7 +216,7 @@ impl SigningHost {
         product_id: &str,
     ) -> Result<(), AuthorityError> {
         let (_, activation_generation) = self.require_current_session(session)?;
-        let entropy = self.root_entropy()?;
+        let entropy = self.session_entropy(session)?;
         let root = derive_root_keypair_from_entropy(&entropy).map_err(product_authority_error)?;
         let owner = root.public.to_bytes();
         if owner != session.public_key {
@@ -231,7 +230,7 @@ impl SigningHost {
         derive_product_subtree_keypair(&root, &product_id).map_err(product_authority_error)?;
 
         let mut state = self
-            .local_grants
+            .local_session
             .lock()
             .expect("local AutoSigning grant mutex poisoned");
         if state.activation_generation != activation_generation {
@@ -259,7 +258,7 @@ impl SigningHost {
         }
 
         let state = self
-            .local_grants
+            .local_session
             .lock()
             .expect("local AutoSigning grant mutex poisoned");
         state.activation_generation == activation_generation
@@ -276,7 +275,7 @@ impl SigningHost {
                 reason: error.to_string(),
             }
         })?;
-        self.local_grants
+        self.local_session
             .lock()
             .expect("local AutoSigning grant mutex poisoned")
             .revoke_product(&product_id);
@@ -290,9 +289,10 @@ impl SigningHost {
     /// raw, zeroizable entropy, never an expanded secret key.
     fn product_keypair_with_owner(
         &self,
+        session: &AuthoritySession,
         account: &v01::ProductAccountId,
     ) -> Result<([u8; 32], schnorrkel::Keypair), AuthorityError> {
-        let entropy = self.root_entropy()?;
+        let entropy = self.session_entropy(session)?;
         let root = derive_root_keypair_from_entropy(&entropy).map_err(product_authority_error)?;
         let owner = root.public.to_bytes();
         let product_id =
@@ -312,49 +312,49 @@ impl SigningHost {
 
     fn product_keypair(
         &self,
+        session: &AuthoritySession,
         account: &v01::ProductAccountId,
     ) -> Result<schnorrkel::Keypair, AuthorityError> {
-        self.product_keypair_with_owner(account)
+        self.product_keypair_with_owner(session, account)
             .map(|(_, keypair)| keypair)
     }
 
-    fn identity_keypair(&self) -> Result<schnorrkel::Keypair, AuthorityError> {
-        let entropy = self.root_entropy()?;
+    fn identity_keypair(
+        &self,
+        session: &AuthoritySession,
+    ) -> Result<schnorrkel::Keypair, AuthorityError> {
+        let entropy = self.session_entropy(session)?;
         derive_identity_keypair(&entropy).map_err(product_authority_error)
     }
 
     fn install_local_session(&self, secret: Zeroizing<Vec<u8>>, session: SessionInfo) {
         let mut state = self
-            .local_grants
+            .local_session
             .lock()
             .expect("local AutoSigning grant mutex poisoned");
         state.advance_activation();
-        *self
-            .root_entropy
-            .lock()
-            .expect("signing host entropy mutex poisoned") = Some(secret);
+        state.root_entropy = Some(secret);
+        state.session = Some(session.clone());
         self.session_state.set_session(session);
     }
 
     fn clear_local_session(&self) {
         let mut state = self
-            .local_grants
+            .local_session
             .lock()
-            .expect("local AutoSigning grant mutex poisoned");
+            .expect("local session mutex poisoned");
         state.advance_activation();
-        self.root_entropy
-            .lock()
-            .expect("signing host entropy mutex poisoned")
-            .take();
+        state.root_entropy = None;
+        state.session = None;
         self.session_state.clear_session();
     }
 
     fn current_local_session(&self) -> Option<AuthoritySession> {
         let state = self
-            .local_grants
+            .local_session
             .lock()
             .expect("local AutoSigning grant mutex poisoned");
-        let session = self.session_state.current()?;
+        let session = state.session.as_ref()?;
         Some(AuthoritySession::from_session_info(
             &session,
             local_session_validation_id(&session, state.activation_generation),
@@ -366,19 +366,40 @@ impl SigningHost {
         session: &AuthoritySession,
     ) -> Result<(SessionInfo, u64), AuthorityError> {
         let state = self
-            .local_grants
+            .local_session
             .lock()
             .expect("local AutoSigning grant mutex poisoned");
-        let current = self
-            .session_state
-            .current()
-            .ok_or(AuthorityError::Disconnected)?;
+        let current = state.session.as_ref().ok_or(AuthorityError::Disconnected)?;
         if local_session_validation_id(&current, state.activation_generation)
             != session.validation_id
         {
             return Err(AuthorityError::Disconnected);
         }
-        Ok((current, state.activation_generation))
+        Ok((current.clone(), state.activation_generation))
+    }
+
+    /// Admission copies the secret under the same lock that validates its
+    /// identity and generation. Synchronous operations may finish with this
+    /// owned secret; operations that suspend must validate again before signing
+    /// or returning sensitive material. No lifecycle lock crosses an await.
+    fn session_entropy(
+        &self,
+        session: &AuthoritySession,
+    ) -> Result<Zeroizing<Vec<u8>>, AuthorityError> {
+        let state = self
+            .local_session
+            .lock()
+            .expect("local session mutex poisoned");
+        let current = state.session.as_ref().ok_or(AuthorityError::Disconnected)?;
+        if local_session_validation_id(current, state.activation_generation)
+            != session.validation_id
+        {
+            return Err(AuthorityError::Disconnected);
+        }
+        state
+            .root_entropy
+            .clone()
+            .ok_or(AuthorityError::Disconnected)
     }
 
     fn ring_vrf_entropy(
@@ -387,7 +408,7 @@ impl SigningHost {
         handle: &v01::ProductAccountId,
     ) -> Result<Zeroizing<[u8; 32]>, RingVrfError> {
         self.require_current_session(session)?;
-        let root = self.root_entropy()?;
+        let root = self.session_entropy(session)?;
         derive_ring_vrf_entropy(&root, &handle.dot_ns_identifier, &handle.derivation_index)
             .map(Zeroizing::new)
             .map_err(|err| RingVrfError::Unknown {
@@ -412,7 +433,7 @@ impl SigningHost {
         session: &AuthoritySession,
     ) -> Result<Vec<CollectionCandidate>, AuthorityError> {
         self.require_current_session(session)?;
-        let root = self.root_entropy()?;
+        let root = self.session_entropy(session)?;
         Ok(vec![
             CollectionCandidate {
                 collection: PersonhoodCollection::People,
@@ -630,7 +651,7 @@ impl ProductAuthority for SigningHost {
                 reason: err.to_string(),
             }
         })?;
-        let entropy = self.root_entropy()?;
+        let entropy = self.session_entropy(session)?;
         let root = derive_root_keypair_from_entropy(&entropy).map_err(product_authority_error)?;
         derive_product_subtree_keypair(&root, &product_id)
             .map(|keypair| keypair.public.to_bytes())
@@ -656,7 +677,7 @@ impl ProductAuthority for SigningHost {
     ) -> Result<v01::VrfSignature, AuthorityError> {
         let (_, activation_generation) = self.require_current_session(session)?;
         validate_vrf_transcript(&request).map_err(|reason| AuthorityError::Unknown { reason })?;
-        let (owner, keypair) = self.product_keypair_with_owner(&request.account)?;
+        let (owner, keypair) = self.product_keypair_with_owner(session, &request.account)?;
         if !self.has_auto_signing_grant(
             activation_generation,
             owner,
@@ -677,6 +698,7 @@ impl ProductAuthority for SigningHost {
                 return Err(AuthorityError::Rejected);
             }
         }
+        self.require_current_session(session)?;
         let (pre_output, proof) = crate::dynamic_vrf::sign_dynamic_vrf(
             &keypair,
             &request.transcript_label,
@@ -696,13 +718,17 @@ impl ProductAuthority for SigningHost {
     ) -> Result<v01::HostSignPayloadResponse, AuthorityError> {
         self.require_current_session(session)?;
         let (keypair, payload) = match request {
-            SignPayloadAuthorityRequest::Product(request) => {
-                (self.product_keypair(&request.account)?, request.payload)
-            }
+            SignPayloadAuthorityRequest::Product(request) => (
+                self.product_keypair(session, &request.account)?,
+                request.payload,
+            ),
             SignPayloadAuthorityRequest::LegacyAccount {
                 product_account,
                 request,
-            } => (self.product_keypair(&product_account)?, request.payload),
+            } => (
+                self.product_keypair(session, &product_account)?,
+                request.payload,
+            ),
         };
         sign_extrinsic_payload(&keypair, payload)
     }
@@ -714,11 +740,12 @@ impl ProductAuthority for SigningHost {
         request: SignRawAuthorityRequest,
     ) -> Result<v01::HostSignPayloadResponse, AuthorityError> {
         let (keypair, payload) = match request {
-            SignRawAuthorityRequest::Product(request) => {
-                (self.product_keypair(&request.account)?, request.payload)
-            }
+            SignRawAuthorityRequest::Product(request) => (
+                self.product_keypair(session, &request.account)?,
+                request.payload,
+            ),
             SignRawAuthorityRequest::LegacyAccount { account, request } => {
-                let keypair = self.identity_keypair()?;
+                let keypair = self.identity_keypair(session)?;
                 if keypair.public.to_bytes() != account {
                     return Err(AuthorityError::Unavailable {
                         reason: "signing host: the requested legacy account is not available in \
@@ -752,8 +779,10 @@ impl ProductAuthority for SigningHost {
             CreateTransactionAuthorityRequest::Product(payload) => {
                 // The product account is authoritative and caller-scoping is
                 // enforced upstream, so the derived key defines the signer.
-                let keypair = self.product_keypair(&payload.signer)?;
+                let keypair = self.product_keypair(session, &payload.signer)?;
                 build_local_transaction(
+                    self,
+                    session,
                     &self.services,
                     &keypair,
                     payload.genesis_hash,
@@ -767,7 +796,7 @@ impl ProductAuthority for SigningHost {
                 product_account,
                 request,
             } => {
-                let keypair = self.product_keypair(&product_account)?;
+                let keypair = self.product_keypair(session, &product_account)?;
                 // Defense-in-depth: the slot-zero key must match the legacy
                 // signer the caller asked for (also validated upstream). Never
                 // sign with a diverging key.
@@ -779,6 +808,8 @@ impl ProductAuthority for SigningHost {
                     });
                 }
                 build_local_transaction(
+                    self,
+                    session,
                     &self.services,
                     &keypair,
                     request.genesis_hash,
@@ -789,7 +820,7 @@ impl ProductAuthority for SigningHost {
                 .await
             }
             CreateTransactionAuthorityRequest::IdentityAccount(request) => {
-                let keypair = self.identity_keypair()?;
+                let keypair = self.identity_keypair(session)?;
                 if keypair.public.to_bytes() != request.signer {
                     return Err(AuthorityError::Unavailable {
                         reason: "signing host: the requested identity account is not available in \
@@ -798,6 +829,8 @@ impl ProductAuthority for SigningHost {
                     });
                 }
                 build_local_transaction(
+                    self,
+                    session,
                     &self.services,
                     &keypair,
                     request.genesis_hash,
@@ -839,6 +872,7 @@ impl ProductAuthority for SigningHost {
             .resolve_ring_vrf_key_for_ring(session, &request.key_handle, &request.ring_location)
             .await?;
         self.ring_resolver.validate(&request.ring_location).await?;
+        self.require_current_session(session)?;
         let context = development_context_bytes(&request.context);
         let alias = alias_from_entropy(&entropy, &context)?;
         Ok(v01::ContextualAlias {
@@ -959,6 +993,7 @@ impl ProductAuthority for SigningHost {
         let entropy = self
             .resolve_registered_ring_vrf_key(session, &request.key_handle)
             .await?;
+        self.require_current_session(session)?;
         sign_from_entropy(&entropy, &request.message)
     }
 
@@ -1035,6 +1070,7 @@ impl ProductAuthority for SigningHost {
         )
         .await
         .map_err(sso_responder::AllowanceAllocationError::into_authority_error)?;
+        self.require_current_session(session)?;
         StatementStoreAllowanceKey::from_secret_bytes(secret)
     }
 
@@ -1053,6 +1089,7 @@ impl ProductAuthority for SigningHost {
         )
         .await
         .map_err(sso_responder::AllowanceAllocationError::into_authority_error)?;
+        self.require_current_session(session)?;
         BulletinAllowanceKey::from_secret_bytes(secret)
     }
 
@@ -1071,6 +1108,7 @@ impl ProductAuthority for SigningHost {
         )
         .await
         .map_err(sso_responder::AllowanceAllocationError::into_authority_error)?;
+        self.require_current_session(session)?;
         BulletinAllowanceKey::from_secret_bytes(secret)
     }
 
@@ -1082,7 +1120,7 @@ impl ProductAuthority for SigningHost {
         payload: Vec<u8>,
     ) -> Result<[u8; 64], AuthorityError> {
         self.require_current_session(session)?;
-        let keypair = self.product_keypair(&account)?;
+        let keypair = self.product_keypair(session, &account)?;
         Ok(keypair
             .secret
             .sign_simple(SR25519_SIGNING_CONTEXT, &payload, &keypair.public)
@@ -1096,7 +1134,7 @@ impl ProductAuthority for SigningHost {
         context: &[u8],
     ) -> Result<[u8; 32], AuthorityError> {
         self.require_current_session(session)?;
-        let entropy = self.root_entropy()?;
+        let entropy = self.session_entropy(session)?;
         derive_product_entropy(&entropy, product_id, context).map_err(|err| {
             AuthorityError::Unknown {
                 reason: err.to_string(),
@@ -1164,6 +1202,8 @@ fn product_authority_error(err: ProductAccountError) -> AuthorityError {
 /// V5 is signed with the local key only when `extensions` omits
 /// `VerifyMultiSignature`; callers that supply it are assembled unsigned.
 async fn build_local_transaction(
+    signing_host: &SigningHost,
+    session: &AuthoritySession,
     services: &RuntimeServices,
     keypair: &schnorrkel::Keypair,
     genesis_hash: [u8; 32],
@@ -1198,6 +1238,7 @@ async fn build_local_transaction(
             .map_err(|error| AuthorityError::Unavailable {
                 reason: format!("signing host: cannot select a V5 metadata block: {error}"),
             })?;
+    signing_host.require_current_session(session)?;
     let transaction = build_signed_extrinsic_v5(
         &signer,
         genesis_hash,
@@ -1446,6 +1487,62 @@ mod tests {
             },
         ))
         .expect("full person key registration succeeds");
+    }
+
+    #[test]
+    fn approval_after_disconnect_or_replacement_cannot_sign() {
+        use futures::FutureExt;
+        for replace in [false, true] {
+            let platform = Arc::new(StubPlatform {
+                sign_vrf_confirmed: true,
+                ..StubPlatform::default()
+            });
+            let (_services, authority) = signing_runtime_with_platform(platform.clone());
+            futures::executor::block_on(authority.activate_local_session(ENTROPY.to_vec()))
+                .unwrap();
+            let session = authority.current_session().unwrap();
+            let (release, gate) = futures::channel::oneshot::channel();
+            *platform.confirmation_gate.lock().unwrap() = Some(gate);
+            let cx = CallContext::default();
+            let mut signing = Box::pin(authority.sign_vrf(
+                &cx,
+                &session,
+                "myapp.dot".into(),
+                vrf_request("myapp.dot"),
+            ));
+            assert!(signing.as_mut().now_or_never().is_none());
+            if replace {
+                futures::executor::block_on(authority.activate_local_session(vec![0xCD; 16]))
+                    .unwrap();
+            } else {
+                futures::executor::block_on(authority.disconnect());
+            }
+            release.send(()).unwrap();
+            assert!(matches!(
+                futures::executor::block_on(signing),
+                Err(AuthorityError::Disconnected)
+            ));
+        }
+    }
+
+    #[test]
+    fn a_session_bound_entropy_copy_never_selects_a_replacement_wallet() {
+        let (_services, authority) = signing_runtime();
+        futures::executor::block_on(authority.activate_local_session(ENTROPY.to_vec())).unwrap();
+        let session = authority.current_session().unwrap();
+        let admitted = authority.session_entropy(&session).unwrap();
+        futures::executor::block_on(authority.activate_local_session(vec![0xCD; 16])).unwrap();
+        assert_eq!(&*admitted, &ENTROPY);
+        assert!(matches!(
+            authority.session_entropy(&session),
+            Err(AuthorityError::Disconnected)
+        ));
+        assert_eq!(
+            &*authority
+                .session_entropy(&authority.current_session().unwrap())
+                .unwrap(),
+            &[0xCD; 16]
+        );
     }
 
     #[test]

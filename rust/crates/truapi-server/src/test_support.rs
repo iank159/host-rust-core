@@ -121,6 +121,7 @@ pub(crate) struct StubPlatform {
     /// Invoked after each recorded auth state, outside any stub lock, so a
     /// test can react to a transition (e.g. cancel the login it observes).
     pub(crate) on_auth_state: Arc<Mutex<Option<AuthStateHook>>>,
+    pub(crate) confirmation_gate: Arc<Mutex<Option<futures::channel::oneshot::Receiver<()>>>>,
     /// When true, `subscribe_theme` returns a never-ending stream.
     pub(crate) theme_stream_pending: bool,
     /// Set when the pending theme stream is dropped.
@@ -1495,6 +1496,10 @@ impl UserConfirmation for StubPlatform {
         &self,
         review: UserConfirmationReview,
     ) -> Result<bool, v01::GenericError> {
+        let gate = self.confirmation_gate.lock().unwrap().take();
+        if let Some(gate) = gate {
+            let _ = gate.await;
+        }
         let (error, confirmed) = match review {
             UserConfirmationReview::SignPayload(_) => {
                 (self.sign_payload_error, self.sign_payload_confirmed)
