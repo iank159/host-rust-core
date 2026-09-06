@@ -364,19 +364,15 @@ fn emit_plain_method(method: &PlatformMethod, ok: &TypeRef, ctx: &BridgeCtx<'_>)
 }
 
 fn emit_unit_method(method: &PlatformMethod, ctx: &BridgeCtx<'_>) -> Result<String> {
-    let args = js_arg_vec(method, ctx)?;
     let params = rust_params(method, ctx)?;
     let body = if method.return_shape.is_async {
+        let args = js_arg_vec(method, ctx)?;
         format!(
             "if let Err(reason) = {}\n    .await\n{{\n    web_sys::console::error_1(&JsValue::from_str(&reason));\n}}",
             bridge_call("invoke_unit", &method.name, &args, &[])
         )
     } else {
-        let args = if args == "Vec::new()" {
-            "&[]".to_string()
-        } else {
-            format!("&{args}")
-        };
+        let args = format!("&[{}]", js_args(method, ctx)?.join(", "));
         format!(
             "if let Err(reason) = {} {{\n    web_sys::console::error_1(&JsValue::from_str(&reason));\n}}",
             bridge_call("call_js_function", &method.name, &args, &[])
@@ -564,12 +560,16 @@ fn rust_type(ty: &TypeRef, ctx: &BridgeCtx<'_>) -> Result<String> {
     }
 }
 
-fn js_arg_vec(method: &PlatformMethod, ctx: &BridgeCtx<'_>) -> Result<String> {
-    let args = method
+fn js_args(method: &PlatformMethod, ctx: &BridgeCtx<'_>) -> Result<Vec<String>> {
+    method
         .params
         .iter()
         .map(|param| js_arg_expr(&param.name, &param.type_ref, ctx))
-        .collect::<Result<Vec<_>>>()?;
+        .collect()
+}
+
+fn js_arg_vec(method: &PlatformMethod, ctx: &BridgeCtx<'_>) -> Result<String> {
+    let args = js_args(method, ctx)?;
     if args.is_empty() {
         Ok("Vec::new()".to_string())
     } else if args.len() == 1 {
