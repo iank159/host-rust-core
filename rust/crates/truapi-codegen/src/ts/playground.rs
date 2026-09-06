@@ -12,7 +12,6 @@ pub fn generate_playground_services(
 ) -> Result<()> {
     let codegen_dir = Path::new(output_dir).join("codegen");
     fs::create_dir_all(&codegen_dir)?;
-    validate_versioned_wrapper_shapes(api)?;
 
     let code = generate_playground_services_code(api, target_version, strip_examples)?;
     fs::write(codegen_dir.join("services.ts"), code)?;
@@ -25,9 +24,9 @@ fn generate_playground_services_code(
     target_version: u32,
     strip_examples: bool,
 ) -> Result<String> {
-    let wrappers = collect_versioned_wrappers(api);
-    let emit_versions = versioned_wrapper_emit_versions(api, &wrappers, target_version)?;
-    let aliases = selected_public_aliases(api, &wrappers, &emit_versions, target_version);
+    let wrappers = &api.wrappers;
+    let emit_versions = versioned_wrapper_emit_versions(api, wrappers, target_version)?;
+    let aliases = selected_public_aliases(api, wrappers, &emit_versions, target_version);
     let ctx = codec_context(&[]);
     let services = public_services(api)?;
     let explorer_type_ids = explorer_type_id_set(api, &aliases);
@@ -46,7 +45,7 @@ fn generate_playground_services_code(
 
     for service in services {
         let trait_def = service.trait_def;
-        let mut methods = included_methods(trait_def, &wrappers, target_version)?;
+        let mut methods = included_methods(trait_def, target_version);
         methods.sort_by_key(|method| (method_wire_sort_id(method), method.name.as_str()));
         if methods.is_empty() {
             continue;
@@ -72,15 +71,14 @@ fn generate_playground_services_code(
         writeln!(out, "    methods: [").unwrap();
 
         for method in methods {
-            let wire_version = method_wire_version(method, &wrappers, target_version)?;
-            let payload = emit_payload(&method.params, &wrappers, &ctx, wire_version)?;
+            let wire_version = method.wire_version(target_version);
+            let payload = emit_payload(&method.params, wrappers, &ctx, wire_version)?;
             let docs = split_playground_docs(method.docs.as_deref())?;
             let method_type = match method.kind {
                 MethodKind::Request => "unary",
                 MethodKind::Subscription | MethodKind::ResultSubscription => "subscription",
             };
-            let signature =
-                build_method_signature(method, &payload, &wrappers, &ctx, wire_version)?;
+            let signature = build_method_signature(method, &payload, wrappers, &ctx, wire_version)?;
             let doc_url = build_doc_url(trait_def, method);
 
             writedoc!(
@@ -98,7 +96,7 @@ fn generate_playground_services_code(
                 doc_url = ts_string_literal(&doc_url),
             )
             .unwrap();
-            if method.wire.host_initiated {
+            if method.host_initiated {
                 writeln!(out, "        hostInitiated: true,").unwrap();
             }
             if let Some(description) = docs.description {
@@ -136,7 +134,7 @@ fn generate_playground_services_code(
                 writeln!(out, "        requestType: {},", ts_string_literal(&id)).unwrap();
             }
             let (response_inner, error_inner) =
-                method_response_inner_ts(method, &wrappers, &ctx, wire_version)?;
+                method_response_inner_ts(method, wrappers, &ctx, wire_version)?;
             if let Some(id) = response_inner.as_deref().and_then(data_type_id_from_ts)
                 && explorer_type_ids.contains(&id)
             {
@@ -216,14 +214,10 @@ pub(super) fn split_playground_docs(docs: Option<&str>) -> Result<PlaygroundDocs
 /// doc comment. Every method renders an EXAMPLE tab in the playground from
 /// the extracted `exampleSource`; a missing or mis-fenced example would
 /// silently leave that tab empty and dump the snippet into the description.
-pub(super) fn validate_method_examples(
-    api: &ApiDefinition,
-    wrappers: &HashMap<String, VersionedWrapper>,
-    target_version: u32,
-) -> Result<()> {
+pub(super) fn validate_method_examples(api: &ApiDefinition, target_version: u32) -> Result<()> {
     for service in public_services(api)? {
         let trait_def = service.trait_def;
-        for method in included_methods(trait_def, wrappers, target_version)? {
+        for method in included_methods(trait_def, target_version) {
             validate_example_docs(&trait_def.name, &method.name, method.docs.as_deref())?;
         }
     }

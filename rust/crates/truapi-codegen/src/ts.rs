@@ -10,6 +10,10 @@ use convert_case::{Case, Casing};
 use indoc::{formatdoc, writedoc};
 
 use crate::RESERVED_PROTOCOL_ERROR_ID;
+use crate::protocol::{
+    ApiDefinition, ExpandedWireIds, MethodDef, TraitDef, VersionedKind, VersionedWrapper,
+    detect_versioned_wrapper, version_number,
+};
 use crate::rustdoc::*;
 
 mod examples;
@@ -67,24 +71,6 @@ fn qualify_named(resolved: &str, mode: NameMode<'_>) -> String {
 #[derive(Debug, Clone)]
 struct PublicService<'a> {
     trait_def: &'a TraitDef,
-}
-
-/// A versioned enum wrapper like `enum HostSignPayloadRequest { V2(Inner) }`,
-/// `enum HostCreateTransactionRequest { V2(CreateTransactionRequest) }`,
-/// or a multi-version enum `enum HostDevicePermissionRequest { V1(_), V2(_) }`.
-///
-/// The client generator selects the latest wrapper variant up to its target
-/// protocol version, so a V2 package emits V2 wire payloads when available and
-/// falls back to V1 for wrappers whose shape did not change.
-#[derive(Debug, Clone)]
-struct VersionedWrapper {
-    variants: BTreeMap<u32, VersionedWrapperVariant>,
-}
-
-#[derive(Debug, Clone)]
-struct VersionedWrapperVariant {
-    version: u32,
-    kind: VersionedKind,
 }
 
 fn versioned_wrapper_ts_name(name: &str) -> String {
@@ -285,92 +271,17 @@ fn collect_preserved_version_prefixed_type_refs(
     }
 }
 
-#[derive(Debug, Clone)]
-enum VersionedKind {
-    Unit,
-    Tuple(TypeRef),
-}
-
-fn detect_versioned_wrapper(ty: &TypeDef) -> Option<VersionedWrapper> {
-    if !ty.generic_params.is_empty() {
-        return None;
-    }
-    let TypeDefKind::Enum(variants) = &ty.kind else {
-        return None;
-    };
-    if variants.is_empty() || !variants.iter().all(|v| is_versioned_variant_name(&v.name)) {
-        return None;
-    }
-    let mut version_variants = BTreeMap::new();
-    for variant in variants {
-        let version = version_number(&variant.name)?;
-        let kind = match &variant.fields {
-            VariantFields::Unit => VersionedKind::Unit,
-            VariantFields::Unnamed(types) if types.len() == 1 => {
-                VersionedKind::Tuple(types[0].clone())
-            }
-            _ => return None,
-        };
-        version_variants.insert(version, VersionedWrapperVariant { version, kind });
-    }
-
-    Some(VersionedWrapper {
-        variants: version_variants,
-    })
-}
-
-fn is_versioned_variant_name(name: &str) -> bool {
-    version_number(name).is_some()
-}
-
-fn version_number(name: &str) -> Option<u32> {
-    let rest = name.strip_prefix('V')?;
-    if rest.is_empty() {
-        return None;
-    }
-    rest.parse().ok()
-}
-
-fn collect_versioned_wrappers(api: &ApiDefinition) -> HashMap<String, VersionedWrapper> {
-    api.types
-        .iter()
-        .filter_map(|ty| detect_versioned_wrapper(ty).map(|w| (ty.name.clone(), w)))
-        .collect()
-}
-
 /// Return the highest protocol version exposed by any versioned wrapper in
 /// `api`, falling back to `1` if the API has none. Used as the default for
 /// the client target version when the caller did not pass `--client-version`,
 /// so an unconfigured codegen run produces a client that speaks the latest
 /// wire format the Rust trait surface has shipped.
 pub fn latest_wire_version(api: &ApiDefinition) -> u32 {
-    collect_versioned_wrappers(api)
+    api.wrappers
         .values()
         .flat_map(|wrapper| wrapper.variants.keys().copied())
         .max()
         .unwrap_or(1)
-}
-
-fn validate_versioned_wrapper_shapes(api: &ApiDefinition) -> Result<()> {
-    for ty in &api.types {
-        let TypeDefKind::Enum(variants) = &ty.kind else {
-            continue;
-        };
-        if variants.is_empty() || !variants.iter().all(|v| is_versioned_variant_name(&v.name)) {
-            continue;
-        }
-        for variant in variants {
-            if matches!(variant.fields, VariantFields::Named(_)) {
-                bail!(
-                    "versioned wrapper `{}` variant `{}` uses named fields; define a request/response struct in the v0x module and wrap it as `{}`(v0x::MyStruct)",
-                    ty.name,
-                    variant.name,
-                    variant.name
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 fn versioned_wrapper_for<'a>(
@@ -474,9 +385,7 @@ pub fn generate(
     codec_version: u8,
 ) -> Result<()> {
     fs::create_dir_all(output_dir)?;
-    validate_versioned_wrapper_shapes(api)?;
-    let wrappers = collect_versioned_wrappers(api);
-    playground::validate_method_examples(api, &wrappers, target_version)?;
+    playground::validate_method_examples(api, target_version)?;
 
     let types_code = generate_types(api, target_version)?;
     fs::write(Path::new(output_dir).join("types.ts"), types_code)?;
@@ -501,52 +410,6 @@ pub fn generate(
 
 fn generate_index() -> String {
     "export * from './types.js';\nexport * from './client.js';\n".to_string()
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExpandedWireIds {
-    Request {
-        request_id: u8,
-        response_id: u8,
-    },
-    Subscription {
-        start_id: u8,
-        stop_id: u8,
-        interrupt_id: u8,
-        receive_id: u8,
-    },
-}
-
-impl ExpandedWireIds {
-    fn sort_id(self) -> u8 {
-        match self {
-            ExpandedWireIds::Request { request_id, .. } => request_id,
-            ExpandedWireIds::Subscription { start_id, .. } => start_id,
-        }
-    }
-
-    fn entries(self, method_name: &str) -> Vec<(u8, String)> {
-        match self {
-            ExpandedWireIds::Request {
-                request_id,
-                response_id,
-            } => vec![
-                (request_id, format!("{method_name}_request")),
-                (response_id, format!("{method_name}_response")),
-            ],
-            ExpandedWireIds::Subscription {
-                start_id,
-                stop_id,
-                interrupt_id,
-                receive_id,
-            } => vec![
-                (start_id, format!("{method_name}_start")),
-                (stop_id, format!("{method_name}_stop")),
-                (interrupt_id, format!("{method_name}_interrupt")),
-                (receive_id, format!("{method_name}_receive")),
-            ],
-        }
-    }
 }
 
 fn trim_doc_lines(lines: &[&str]) -> Option<String> {
@@ -574,40 +437,22 @@ fn ts_string_literal(value: &str) -> String {
     serde_json::to_string(value).expect("string serialization is infallible")
 }
 
-fn wire_const_name(trait_name: &str, method_name: &str) -> String {
-    format!("{trait_name}_{method_name}").to_case(Case::UpperSnake)
-}
-
 /// Sort key for stable, wire-id-ordered method emission shared by the
 /// playground and examples submodules.
 fn method_wire_sort_id(method: &MethodDef) -> u8 {
-    method
-        .wire
-        .request_id
-        .or(method.wire.start_id)
-        .unwrap_or(u8::MAX)
+    method.wire_ids.sort_id()
 }
 
 fn generate_wire_table(api: &ApiDefinition, target_version: u32) -> Result<String> {
-    let wrappers = collect_versioned_wrappers(api);
-    let mut seen = BTreeMap::from([(
-        RESERVED_PROTOCOL_ERROR_ID,
-        "reserved for protocol errors".to_string(),
-    )]);
     let mut constants: Vec<(String, ExpandedWireIds)> = Vec::new();
 
     for trait_def in &api.traits {
         for method in &trait_def.methods {
-            let wire_ids = wire_ids_for_method(trait_def, method)?;
-            for (id, tag) in wire_ids.entries(&method.name) {
-                if let Some(existing) = seen.insert(id, tag.clone()) {
-                    bail!("wire id {id} reused: `{existing}` and `{tag}` collide");
-                }
-            }
-            if !method_is_included(trait_def, method, &wrappers, target_version)? {
+            let wire_ids = method.wire_ids;
+            if !method.is_included(target_version) {
                 continue;
             }
-            constants.push((wire_const_name(&trait_def.name, &method.name), wire_ids));
+            constants.push((method.wire_constant.clone(), wire_ids));
         }
     }
 
@@ -677,10 +522,9 @@ type WireIdRow = (u8, String, bool, bool, String);
 /// strictly more consequential than `sensitive`, which changes no runtime
 /// behaviour at all.
 fn wire_id_rows(api: &ApiDefinition, target_version: u32) -> Result<Vec<WireIdRow>> {
-    let wrappers = collect_versioned_wrappers(api);
     let types = types_by_name(api);
     // Seed the reserved discriminant so the fingerprint moves if it ever moves.
-    // `generate_wire_table` reserves it in its own collision map, but that map is
+    // The protocol model reserves it during validation, but that reservation is
     // not what the hash folds over, so without this row the reserved id could be
     // reassigned and every already-built debugger would keep confirming the table.
     // It carries no payload and no method, so its facts are fixed.
@@ -695,10 +539,10 @@ fn wire_id_rows(api: &ApiDefinition, target_version: u32) -> Result<Vec<WireIdRo
     )]);
     for trait_def in &api.traits {
         for method in &trait_def.methods {
-            if !method_is_included(trait_def, method, &wrappers, target_version)? {
+            if !method.is_included(target_version) {
                 continue;
             }
-            let wire_ids = wire_ids_for_method(trait_def, method)?;
+            let wire_ids = method.wire_ids;
             let payload = method_payload_signature(method, &types);
             // Qualify the tag with the trait. The tag is what the schema hash folds
             // in, and the debugger's method label is derived from the generated
@@ -714,8 +558,8 @@ fn wire_id_rows(api: &ApiDefinition, target_version: u32) -> Result<Vec<WireIdRo
                     id,
                     (
                         tag.clone(),
-                        method.wire.sensitive,
-                        method.wire.host_initiated,
+                        method.sensitive,
+                        method.host_initiated,
                         payload.clone(),
                     ),
                 ) {
@@ -961,144 +805,8 @@ pub(crate) fn wire_schema_hash(
     Ok(format!("{hash:016x}"))
 }
 
-fn method_is_included(
-    trait_def: &TraitDef,
-    method: &MethodDef,
-    wrappers: &HashMap<String, VersionedWrapper>,
-    target_version: u32,
-) -> Result<bool> {
-    wire_ids_for_method(trait_def, method)?;
-
-    let wrapper_names = method_versioned_wrappers(method, wrappers);
-    Ok(
-        wrapper_names.is_empty()
-            || method_wire_version(method, wrappers, target_version)?.is_some(),
-    )
-}
-
-fn wire_ids_for_method(trait_def: &TraitDef, method: &MethodDef) -> Result<ExpandedWireIds> {
-    let wire = &method.wire;
-    match method.kind {
-        MethodKind::Request => {
-            if wire.start_id.is_some()
-                || wire.stop_id.is_some()
-                || wire.interrupt_id.is_some()
-                || wire.receive_id.is_some()
-            {
-                bail!(
-                    "method `{}::{}` is a request and must not use subscription wire ids",
-                    trait_def.name,
-                    method.name
-                );
-            }
-            let request_id = wire.request_id.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "method `{}::{}` is missing #[wire(request_id = N)] annotation",
-                    trait_def.name,
-                    method.name
-                )
-            })?;
-            let response_id =
-                infer_wire_id(wire.response_id, request_id, 1, &method.name, "response_id")?;
-            Ok(ExpandedWireIds::Request {
-                request_id,
-                response_id,
-            })
-        }
-        MethodKind::Subscription | MethodKind::ResultSubscription => {
-            if wire.request_id.is_some() || wire.response_id.is_some() {
-                bail!(
-                    "method `{}::{}` is a subscription and must not use request wire ids",
-                    trait_def.name,
-                    method.name
-                );
-            }
-            let start_id = wire.start_id.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "method `{}::{}` is missing #[wire(start_id = N)] annotation",
-                    trait_def.name,
-                    method.name
-                )
-            })?;
-            let stop_id = infer_wire_id(wire.stop_id, start_id, 1, &method.name, "stop_id")?;
-            let interrupt_id =
-                infer_wire_id(wire.interrupt_id, start_id, 2, &method.name, "interrupt_id")?;
-            let receive_id =
-                infer_wire_id(wire.receive_id, start_id, 3, &method.name, "receive_id")?;
-            Ok(ExpandedWireIds::Subscription {
-                start_id,
-                stop_id,
-                interrupt_id,
-                receive_id,
-            })
-        }
-    }
-}
-
-fn infer_wire_id(
-    explicit: Option<u8>,
-    anchor_id: u8,
-    offset: u8,
-    method_name: &str,
-    field_name: &str,
-) -> Result<u8> {
-    explicit.map_or_else(
-        || {
-            anchor_id.checked_add(offset).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "wire id overflow on `{method_name}` while inferring `{field_name}` from {anchor_id}"
-                )
-            })
-        },
-        Ok,
-    )
-}
-
-/// Picks the wrapper variant the generated client emits on the wire for a
-/// given method. Returns the highest variant supported by every wrapper the
-/// method touches and that is ≤ `target_version`. Returns `None` when no
-/// shared variant exists at or below the cap (the method is not exposed by
-/// the client).
-///
-/// Picking the **highest** variant exposes the newest request/response shape
-/// the host is known to support. Hosts that only implement an older codec
-/// version still receive a wire envelope they understand because every
-/// wrapper keeps each `Vn` variant at `#[codec(index = n - 1)]`.
-fn method_wire_version(
-    method: &MethodDef,
-    wrappers: &HashMap<String, VersionedWrapper>,
-    target_version: u32,
-) -> Result<Option<u32>> {
-    let wrapper_names = method_versioned_wrappers(method, wrappers);
-    if wrapper_names.is_empty() {
-        return Ok(None);
-    }
-
-    let mut candidates: Option<Vec<u32>> = None;
-    for wrapper_name in wrapper_names {
-        let wrapper = wrappers
-            .get(&wrapper_name)
-            .expect("method_versioned_wrappers only returns known wrappers");
-        let versions = wrapper
-            .variants
-            .keys()
-            .filter(|version| **version <= target_version)
-            .copied()
-            .collect::<Vec<_>>();
-        candidates = Some(match candidates {
-            Some(current) => current
-                .into_iter()
-                .filter(|version| versions.contains(version))
-                .collect(),
-            None => versions,
-        });
-    }
-
-    Ok(candidates.and_then(|versions| versions.into_iter().max()))
-}
-
 /// For each versioned wrapper, the set of wire versions the generated client
-/// actually emits. Each method picks one wire version via [`method_wire_version`];
+/// actually emits. Each method picks one wire version via [`MethodDef::wire_version`];
 /// every wrapper it touches gets that version recorded here. Wrappers that no
 /// included method references end up absent from the map and can be elided
 /// from the emitted types altogether.
@@ -1110,10 +818,10 @@ fn versioned_wrapper_emit_versions(
     let mut emit: HashMap<String, BTreeSet<u32>> = HashMap::new();
     for trait_def in &api.traits {
         for method in &trait_def.methods {
-            if !method_is_included(trait_def, method, wrappers, target_version)? {
+            if !method.is_included(target_version) {
                 continue;
             }
-            let Some(wire_version) = method_wire_version(method, wrappers, target_version)? else {
+            let Some(wire_version) = method.wire_version(target_version) else {
                 continue;
             };
             for wrapper_name in method_versioned_wrappers(method, wrappers) {
@@ -1128,66 +836,18 @@ fn method_versioned_wrappers(
     method: &MethodDef,
     wrappers: &HashMap<String, VersionedWrapper>,
 ) -> Vec<String> {
-    let mut names = Vec::new();
-    for param in &method.params {
-        collect_type_versioned_wrappers(&param.type_ref, wrappers, &mut names);
-    }
-    match &method.return_type {
-        ReturnType::Result { ok, err } => {
-            collect_type_versioned_wrappers(ok, wrappers, &mut names);
-            collect_type_versioned_wrappers(
-                call_error_inner(err).unwrap_or(err),
-                wrappers,
-                &mut names,
-            );
-        }
-        ReturnType::Subscription(item) => {
-            collect_type_versioned_wrappers(item, wrappers, &mut names);
-        }
-        ReturnType::ResultSubscription { item, err } => {
-            collect_type_versioned_wrappers(item, wrappers, &mut names);
-            collect_type_versioned_wrappers(
-                call_error_inner(err).unwrap_or(err),
-                wrappers,
-                &mut names,
-            );
-        }
-    }
-    names.sort();
-    names.dedup();
-    names
+    method
+        .referenced_types
+        .iter()
+        .filter(|name| wrappers.contains_key(*name))
+        .cloned()
+        .collect()
 }
 
 fn call_error_inner(ty: &TypeRef) -> Option<&TypeRef> {
     match ty {
         TypeRef::Named { name, args } if name == "CallError" && args.len() == 1 => Some(&args[0]),
         _ => None,
-    }
-}
-
-fn collect_type_versioned_wrappers(
-    ty: &TypeRef,
-    wrappers: &HashMap<String, VersionedWrapper>,
-    names: &mut Vec<String>,
-) {
-    match ty {
-        TypeRef::Named { name, args } => {
-            if args.is_empty() && wrappers.contains_key(name) {
-                names.push(name.clone());
-            }
-            for arg in args {
-                collect_type_versioned_wrappers(arg, wrappers, names);
-            }
-        }
-        TypeRef::Vec(inner) | TypeRef::Option(inner) | TypeRef::Array(inner, _) => {
-            collect_type_versioned_wrappers(inner, wrappers, names);
-        }
-        TypeRef::Tuple(items) => {
-            for item in items {
-                collect_type_versioned_wrappers(item, wrappers, names);
-            }
-        }
-        TypeRef::Primitive(_) | TypeRef::Generic(_) | TypeRef::Unit => {}
     }
 }
 
@@ -1205,11 +865,11 @@ fn generate_types(api: &ApiDefinition, target_version: u32) -> Result<String> {
     )
     .unwrap();
 
-    let wrappers = collect_versioned_wrappers(api);
-    let emit_versions = versioned_wrapper_emit_versions(api, &wrappers, target_version)?;
-    let aliases = selected_public_aliases(api, &wrappers, &emit_versions, target_version);
+    let wrappers = &api.wrappers;
+    let emit_versions = versioned_wrapper_emit_versions(api, wrappers, target_version)?;
+    let aliases = selected_public_aliases(api, wrappers, &emit_versions, target_version);
     let mut preserved_version_prefixed_types =
-        emitted_version_prefixed_types(&wrappers, &emit_versions, &aliases);
+        emitted_version_prefixed_types(wrappers, &emit_versions, &aliases);
     preserve_version_prefixed_types_referenced_by_emitted_types(
         api,
         &aliases,
@@ -1233,8 +893,6 @@ fn generate_types(api: &ApiDefinition, target_version: u32) -> Result<String> {
 }
 
 fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) -> Result<String> {
-    validate_versioned_wrapper_shapes(api)?;
-
     let schema_hash = wire_schema_hash(api, target_version, codec_version)?;
     let mut out = String::new();
     writedoc!(
@@ -1275,12 +933,12 @@ fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) 
     write_observable_helper(&mut out);
 
     let ctx = codec_context(&[]);
-    let wrappers = collect_versioned_wrappers(api);
+    let wrappers = &api.wrappers;
     let services = public_services(api)?;
 
     for service in &services {
         let trait_def = service.trait_def;
-        let methods = included_methods(trait_def, &wrappers, target_version)?;
+        let methods = included_methods(trait_def, target_version);
         if methods.is_empty() {
             continue;
         }
@@ -1291,9 +949,9 @@ fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) 
         for method in methods
             .iter()
             .copied()
-            .filter(|method| method.wire.host_initiated)
+            .filter(|method| method.host_initiated)
         {
-            emit_host_initiated_field(&mut out, method, &wrappers, &ctx, target_version)?;
+            emit_host_initiated_field(&mut out, method, wrappers, &ctx, target_version)?;
         }
         writeln!(
             out,
@@ -1303,13 +961,13 @@ fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) 
         for method in methods
             .iter()
             .copied()
-            .filter(|method| method.wire.host_initiated)
+            .filter(|method| method.host_initiated)
         {
             emit_host_initiated_registration(
                 &mut out,
                 trait_def,
                 method,
-                &wrappers,
+                wrappers,
                 &ctx,
                 target_version,
             )?;
@@ -1317,7 +975,7 @@ fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) 
         writeln!(out, "  }}\n").unwrap();
 
         for method in methods {
-            emit_method(&mut out, trait_def, method, &wrappers, &ctx, target_version)?;
+            emit_method(&mut out, trait_def, method, wrappers, &ctx, target_version)?;
             writeln!(out).unwrap();
         }
 
@@ -1327,7 +985,7 @@ fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) 
     writeln!(out, "export interface TrUApiClient {{").unwrap();
     for service in &services {
         let trait_def = service.trait_def;
-        if included_methods(trait_def, &wrappers, target_version)?.is_empty() {
+        if included_methods(trait_def, target_version).is_empty() {
             continue;
         }
         let field = to_camel_case(&trait_def.name);
@@ -1365,7 +1023,7 @@ fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) 
     .unwrap();
     for service in &services {
         let trait_def = service.trait_def;
-        if included_methods(trait_def, &wrappers, target_version)?.is_empty() {
+        if included_methods(trait_def, target_version).is_empty() {
             continue;
         }
         let field = to_camel_case(&trait_def.name);
@@ -1398,7 +1056,7 @@ fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) 
 /// covered; `stop`/`interrupt` frames are intentionally skipped.
 fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<String> {
     let ctx = codec_context(&[]);
-    let wrappers = collect_versioned_wrappers(api);
+    let wrappers = &api.wrappers;
     let services = public_services(api)?;
 
     // (wire id, emitted table line) pairs, sorted by wire id for a stable,
@@ -1407,11 +1065,11 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
 
     for service in &services {
         let trait_def = service.trait_def;
-        for method in included_methods(trait_def, &wrappers, target_version)? {
-            let wire_const = wire_const_name(&trait_def.name, &method.name);
-            let wire_version = method_wire_version(method, &wrappers, target_version)?;
-            let payload = emit_payload(&method.params, &wrappers, &ctx, wire_version)?;
-            let wire_ids = wire_ids_for_method(trait_def, method)?;
+        for method in included_methods(trait_def, target_version) {
+            let wire_const = method.wire_constant.clone();
+            let wire_version = method.wire_version(target_version);
+            let payload = emit_payload(&method.params, wrappers, &ctx, wire_version)?;
+            let wire_ids = method.wire_ids;
 
             match (&method.kind, &method.return_type) {
                 (MethodKind::Request, ReturnType::Result { ok, err }) => {
@@ -1422,8 +1080,8 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
                     else {
                         unreachable!("request method resolved to subscription wire ids");
                     };
-                    let response = emit_response(ok, &wrappers, &ctx, wire_version)?;
-                    let error = emit_error_response(err, &wrappers, &ctx, wire_version)?;
+                    let response = emit_response(ok, wrappers, &ctx, wire_version)?;
+                    let error = emit_error_response(err, wrappers, &ctx, wire_version)?;
                     let response_codec = match wire_version {
                         Some(version) => versioned_result_codec_expr(
                             version,
@@ -1451,7 +1109,7 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
                     ));
                 }
                 (MethodKind::Subscription, ReturnType::Subscription(ty)) => {
-                    let response = emit_response(ty, &wrappers, &ctx, wire_version)?;
+                    let response = emit_response(ty, wrappers, &ctx, wire_version)?;
                     push_subscription_entries(
                         &mut entries,
                         &wire_const,
@@ -1462,7 +1120,7 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
                     )?;
                 }
                 (MethodKind::ResultSubscription, ReturnType::ResultSubscription { item, .. }) => {
-                    let response = emit_response(item, &wrappers, &ctx, wire_version)?;
+                    let response = emit_response(item, wrappers, &ctx, wire_version)?;
                     push_subscription_entries(
                         &mut entries,
                         &wire_const,
@@ -1667,21 +1325,11 @@ fn write_observable_helper(out: &mut String) {
     .unwrap();
 }
 
-fn included_methods<'a>(
-    trait_def: &'a TraitDef,
-    wrappers: &HashMap<String, VersionedWrapper>,
-    target_version: u32,
-) -> Result<Vec<&'a MethodDef>> {
+fn included_methods(trait_def: &TraitDef, target_version: u32) -> Vec<&MethodDef> {
     trait_def
         .methods
         .iter()
-        .filter_map(|method| {
-            match method_is_included(trait_def, method, wrappers, target_version) {
-                Ok(true) => Some(Ok(method)),
-                Ok(false) => None,
-                Err(err) => Some(Err(err)),
-            }
-        })
+        .filter(|method| method.is_included(target_version))
         .collect()
 }
 
@@ -1937,12 +1585,12 @@ fn emit_method(
     target_version: u32,
 ) -> Result<()> {
     let ts_method_name = to_camel_case(&strip_prefix(&method.name));
-    let wire_const = wire_const_name(&trait_def.name, &method.name);
-    let wire_version = method_wire_version(method, wrappers, target_version)?;
+    let wire_const = method.wire_constant.clone();
+    let wire_version = method.wire_version(target_version);
     let payload = emit_payload(&method.params, wrappers, ctx, wire_version)?;
     write_jsdoc(out, "  ", method.docs.as_deref());
 
-    if method.wire.host_initiated {
+    if method.host_initiated {
         return emit_host_initiated_method(out, method, &payload, wrappers, ctx, wire_version);
     }
 
@@ -2057,7 +1705,7 @@ fn emit_host_initiated_types(
     ctx: &CodecContext,
     target_version: u32,
 ) -> Result<(PayloadEmission, ResponseEmission, u32)> {
-    let wire_version = method_wire_version(method, wrappers, target_version)?.ok_or_else(|| {
+    let wire_version = method.wire_version(target_version).ok_or_else(|| {
         anyhow::anyhow!("host-initiated method `{}` is not versioned", method.name)
     })?;
     let payload = emit_payload(&method.params, wrappers, ctx, Some(wire_version))?;
@@ -2092,7 +1740,7 @@ fn emit_host_initiated_field(
 
 fn emit_host_initiated_registration(
     out: &mut String,
-    trait_def: &TraitDef,
+    _trait_def: &TraitDef,
     method: &MethodDef,
     wrappers: &HashMap<String, VersionedWrapper>,
     ctx: &CodecContext,
@@ -2100,7 +1748,7 @@ fn emit_host_initiated_registration(
 ) -> Result<()> {
     let (payload, response, version) =
         emit_host_initiated_types(method, wrappers, ctx, target_version)?;
-    let wire_const = wire_const_name(&trait_def.name, &method.name);
+    let wire_const = method.wire_constant.clone();
     writedoc!(
         out,
         "
@@ -2948,7 +2596,7 @@ fn codec_param_name(name: &str) -> String {
     format!("{}Codec", to_camel_case(name))
 }
 
-fn service_display_name(trait_def: &TraitDef) -> String {
+fn service_display_name(trait_def: &crate::rustdoc::TraitDef) -> String {
     humanize_service_name(&trait_def.name)
 }
 
@@ -2990,6 +2638,26 @@ fn to_camel_case(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rustdoc::{ApiDefinition, MethodDef, TraitDef};
+
+    fn generate_wire_table(api: &ApiDefinition, version: u32) -> Result<String> {
+        super::generate_wire_table(&crate::protocol::ApiDefinition::new(api)?, version)
+    }
+    fn generate_decode_table(api: &ApiDefinition, version: u32) -> Result<String> {
+        super::generate_decode_table(&crate::protocol::ApiDefinition::new(api)?, version)
+    }
+    fn generate_types(api: &ApiDefinition, version: u32) -> Result<String> {
+        super::generate_types(&crate::protocol::ApiDefinition::new(api)?, version)
+    }
+    fn generate_client(api: &ApiDefinition, version: u32, codec: u8) -> Result<String> {
+        super::generate_client(&crate::protocol::ApiDefinition::new(api)?, version, codec)
+    }
+    fn wire_schema_hash(api: &ApiDefinition, version: u32, codec: u8) -> Result<String> {
+        super::wire_schema_hash(&crate::protocol::ApiDefinition::new(api)?, version, codec)
+    }
+    fn latest_wire_version(api: &ApiDefinition) -> u32 {
+        super::latest_wire_version(&crate::protocol::ApiDefinition::new(api).unwrap())
+    }
 
     fn request_wire(request_id: Option<u8>) -> WireAttrs {
         WireAttrs {

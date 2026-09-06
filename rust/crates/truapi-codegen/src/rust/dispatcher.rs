@@ -19,30 +19,14 @@ use std::fmt::Write;
 use anyhow::{Context, Result, bail};
 use indoc::{formatdoc, indoc, writedoc};
 
+use crate::protocol::{ApiDefinition, MethodDef, TraitDef};
 use crate::rustdoc::*;
 
-use super::{const_name, module_for_trait, wire_method_name};
+use super::{const_name, module_for_trait};
 
 /// Emit the contents of `dispatcher.rs`.
 pub fn generate_dispatcher(api: &ApiDefinition) -> Result<String> {
     let traits = order_traits(api)?;
-
-    // Reject any duplicate wire method name across traits before emission, so
-    // a future addition can't silently overwrite a handler in the HashMap.
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    for trait_def in &traits {
-        for method in &trait_def.methods {
-            let key = wire_method_name(&trait_def.name, &method.name);
-            if !seen.insert(key.clone()) {
-                bail!(
-                    "Wire method name `{key}` registered twice; \
-                     change `{}::{}` or its sibling trait to disambiguate",
-                    trait_def.name,
-                    method.name
-                );
-            }
-        }
-    }
 
     let mut modules = Vec::with_capacity(traits.len());
     let mut uses_raw_err_payload = false;
@@ -53,7 +37,6 @@ pub fn generate_dispatcher(api: &ApiDefinition) -> Result<String> {
         uses_raw_unit_ok_payload |= module.uses_raw_unit_ok_payload;
         modules.push(module.code);
     }
-
     let mut out = String::new();
     write_header(&mut out);
     write_imports(
@@ -109,9 +92,9 @@ fn build_module(api: &ApiDefinition, trait_def: &TraitDef) -> Result<ModuleEmiss
     for method in trait_def
         .methods
         .iter()
-        .filter(|method| !method.wire.host_initiated)
+        .filter(|method| !method.host_initiated)
     {
-        let wire_method = wire_method_name(&trait_def.name, &method.name);
+        let wire_method = method.wire_name.clone();
         methods.push(MethodEmission::build(
             api,
             &module,
@@ -161,7 +144,7 @@ fn write_host_initiated_callers(
         for method in trait_def
             .methods
             .iter()
-            .filter(|method| method.wire.host_initiated)
+            .filter(|method| method.host_initiated)
         {
             let [request] = method.params.as_slice() else {
                 bail!(
@@ -183,7 +166,7 @@ fn write_host_initiated_callers(
             };
             let item =
                 versioned_wrapper_root(&method.name, "host-initiated item", item, &wrappers)?;
-            let wire_name = wire_method_name(&trait_def.name, &method.name);
+            let wire_name = method.wire_name.clone();
             let ids = const_name(&wire_name);
             writedoc!(
                 out,

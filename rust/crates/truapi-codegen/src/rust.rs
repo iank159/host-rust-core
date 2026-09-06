@@ -9,9 +9,9 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use convert_case::{Case, Casing};
-
 use crate::platform::PlatformDefinition;
+use crate::protocol::ApiDefinition;
+#[cfg(test)]
 use crate::rustdoc::*;
 
 mod dispatcher;
@@ -86,25 +86,9 @@ fn module_for_trait(trait_name: &str) -> String {
 /// `{trait_snake}_{method}` so collisions between sibling traits (e.g.
 /// `StatementStore::submit` and `Preimage::submit`) become distinct keys
 /// (`statement_store_submit`, `preimage_submit`).
-pub(crate) fn wire_method_name(trait_name: &str, method_name: &str) -> String {
-    format!("{}_{}", snake_case(trait_name), method_name)
-}
-
-/// The `SCREAMING_SNAKE_CASE` const name holding a wire method's ids.
-/// Routed through [`convert_case::Case::UpperSnake`] so it follows the same
-/// casing rules as the TS wire-table emitter (`ts.rs`).
-pub(crate) fn const_name(wire_method: &str) -> String {
-    wire_method.to_case(Case::UpperSnake)
-}
-
-/// Const name for a trait/method pair's wire ids. Both the Rust and TS
-/// wire-table emitters apply `Case::UpperSnake`, so for the real
-/// (single-capital PascalCase trait, snake_case method) surface the two
-/// generated const names agree.
+pub(crate) use crate::protocol::const_name;
 #[cfg(test)]
-pub(crate) fn wire_const_name(trait_name: &str, method_name: &str) -> String {
-    const_name(&wire_method_name(trait_name, method_name))
-}
+pub(crate) use crate::protocol::wire_const_name;
 
 /// Convert a PascalCase identifier into snake_case.
 fn snake_case(name: &str) -> String {
@@ -125,6 +109,14 @@ fn snake_case(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rustdoc::{ApiDefinition, MethodDef, TraitDef};
+
+    fn generate_dispatcher(api: &ApiDefinition) -> Result<String> {
+        super::generate_dispatcher(&crate::protocol::ApiDefinition::new(api)?)
+    }
+    fn generate_wire_table(api: &ApiDefinition, hash: &str) -> Result<String> {
+        super::generate_wire_table(&crate::protocol::ApiDefinition::new(api)?, hash)
+    }
 
     fn make_request_method(name: &str, request_id: u8) -> MethodDef {
         MethodDef {
@@ -383,7 +375,7 @@ mod tests {
         let err = generate_dispatcher(&api).expect_err("duplicate wire method name must error");
         let msg = format!("{err}");
         assert!(
-            msg.contains("Wire method name `foo_bar_baz` registered twice"),
+            msg.contains("wire method name `foo_bar_baz` reused"),
             "unexpected dispatcher error message: {msg}",
         );
     }
@@ -518,10 +510,7 @@ mod tests {
     fn wire_const_name_pins_digits_and_acronyms() {
         assert_eq!(wire_const_name("Preimage", "submit"), "PREIMAGE_SUBMIT");
         assert_eq!(wire_const_name("Signing", "sign_v2"), "SIGNING_SIGN_V_2");
-        assert_eq!(
-            wire_const_name("HTTPServer", "serve"),
-            "H_T_T_P_SERVER_SERVE"
-        );
+        assert_eq!(wire_const_name("HTTPServer", "serve"), "HTTP_SERVER_SERVE");
         assert_eq!(
             wire_const_name("StatementStore", "create_proof"),
             "STATEMENT_STORE_CREATE_PROOF"

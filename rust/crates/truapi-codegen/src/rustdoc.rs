@@ -53,7 +53,7 @@ pub struct ItemPath {
 }
 
 /// Extracted API definition ready for code generation.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiDefinition {
     /// Service traits extracted from the crate.
     pub traits: Vec<TraitDef>,
@@ -72,7 +72,7 @@ pub struct ApiDefinition {
 }
 
 /// Trait extracted from the rustdoc index: name, methods, and rustdoc.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitDef {
     /// Trait name as it appears in source.
     pub name: String,
@@ -99,7 +99,7 @@ impl TraitDef {
 }
 
 /// Trait method extracted from rustdoc, including its wire ids.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodDef {
     /// Method name as it appears in source.
     pub name: String,
@@ -151,7 +151,7 @@ pub enum MethodKind {
 }
 
 /// Trait method parameter (name + type).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamDef {
     /// Parameter name as written in the trait method signature.
     pub name: String,
@@ -161,7 +161,7 @@ pub struct ParamDef {
 
 /// Return shape of a trait method, after stripping wrappers like `Result` /
 /// `Pin<Box<dyn Future>>` that rustdoc surfaces literally.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReturnType {
     /// `Result<ok, err>`-shaped return.
     Result { ok: TypeRef, err: TypeRef },
@@ -198,7 +198,7 @@ pub enum TypeRef {
 }
 
 /// User-defined type (struct/enum/alias) discovered while walking the API.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeDef {
     /// Type name as it appears in source.
     pub name: String,
@@ -215,7 +215,7 @@ pub struct TypeDef {
 }
 
 /// Body shape of a [`TypeDef`].
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeDefKind {
     /// `type Foo = Bar;`-style alias.
     Alias(TypeRef),
@@ -239,7 +239,7 @@ pub struct FieldDef {
 }
 
 /// Enum variant extracted from rustdoc.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VariantDef {
     /// Variant name.
     pub name: String,
@@ -257,7 +257,7 @@ pub struct VariantDef {
 }
 
 /// Payload shape of an enum variant.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VariantFields {
     /// `VariantName,`
     Unit,

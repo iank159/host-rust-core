@@ -18,9 +18,9 @@ pub fn generate_explorer(api: &ApiDefinition, output_dir: &str, target_version: 
 }
 
 fn generate_explorer_types_code(api: &ApiDefinition, target_version: u32) -> Result<String> {
-    let wrappers = collect_versioned_wrappers(api);
-    let emit_versions = versioned_wrapper_emit_versions(api, &wrappers, target_version)?;
-    let aliases = selected_public_aliases(api, &wrappers, &emit_versions, target_version);
+    let wrappers = &api.wrappers;
+    let emit_versions = versioned_wrapper_emit_versions(api, wrappers, target_version)?;
+    let aliases = selected_public_aliases(api, wrappers, &emit_versions, target_version);
 
     let mut out = String::new();
     writedoc!(

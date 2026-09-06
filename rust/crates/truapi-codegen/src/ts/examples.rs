@@ -81,14 +81,12 @@ pub fn generate_client_examples(
     }
     fs::create_dir_all(output_path)?;
     fs::write(output_path.join("__ambient.d.ts"), EXAMPLE_AMBIENT_DTS)?;
-    validate_versioned_wrapper_shapes(api)?;
 
-    let wrappers = collect_versioned_wrappers(api);
     let services = public_services(api)?;
 
     for service in services {
         let trait_def = service.trait_def;
-        let mut methods = included_methods(trait_def, &wrappers, target_version)?;
+        let mut methods = included_methods(trait_def, target_version);
         methods.sort_by_key(|method| (method_wire_sort_id(method), method.name.as_str()));
 
         for method in methods {

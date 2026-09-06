@@ -8,6 +8,7 @@ use std::str::FromStr;
 
 mod platform;
 mod platform_callbacks;
+mod protocol;
 mod rust;
 mod rustdoc;
 mod ts;
@@ -130,6 +131,7 @@ fn main() -> Result<()> {
     let krate = rustdoc::parse(&json).with_context(|| format!("parsing {input}"))?;
     let api = rustdoc::extract_api(&krate)
         .with_context(|| format!("extracting API definition from {input}"))?;
+    let api = protocol::ApiDefinition::new(&api).context("validating protocol")?;
     let output = &cli.output;
     let client_version = cli
         .client_version
