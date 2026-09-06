@@ -350,7 +350,14 @@ impl HostRpcClientInner {
     }
 
     fn unsubscribe(&self, subscription_id: &str, unsubscribe_method: &str, raw_id: &RawValue) {
-        self.subscriptions.lock().unwrap().remove(subscription_id);
+        // Match activation/delivery lock order and release any notifications
+        // buffered before a cancelled setup received its acknowledgement.
+        {
+            let mut buffered = self.buffered_subscription_items.lock().unwrap();
+            let mut subscriptions = self.subscriptions.lock().unwrap();
+            buffered.remove(subscription_id);
+            subscriptions.remove(subscription_id);
+        }
         if self.closed.load(Ordering::Relaxed) {
             return;
         }
@@ -708,11 +715,35 @@ mod tests {
         let id = connection.sent()[0]["id"].clone();
         client
             .inner
+            .handle_frame(
+                &json!({"method":"subscription", "params":{"subscription":17,"result":"early"}})
+                    .to_string(),
+            )
+            .unwrap();
+        assert_eq!(
+            client
+                .inner
+                .buffered_subscription_items
+                .lock()
+                .unwrap()
+                .len(),
+            1
+        );
+        client
+            .inner
             .handle_frame(&json!({"id":id,"result":17}).to_string())
             .unwrap();
         assert!(client.inner.pending.lock().unwrap().is_empty());
         assert_eq!(connection.sent()[1]["method"], "unsubscribe");
         assert_eq!(connection.sent()[1]["params"], json!([17]));
+        assert!(
+            client
+                .inner
+                .buffered_subscription_items
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
