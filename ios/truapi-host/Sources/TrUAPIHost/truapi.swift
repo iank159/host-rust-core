@@ -2017,6 +2017,203 @@ public func FfiConverterTypeHostLocaleSubscribeItem_lower(_ value: HostLocaleSub
 
 
 /**
+ * An action the user triggered on one of the calling product's card faces.
+ */
+public struct HostPocketActionSubscribeItem: Equatable, Hashable {
+    /**
+     * Card whose face carried the action.
+     */
+    public var cardId: String
+    /**
+     * `Button.click_action` or `TextField.value_change_action` from the face tree.
+     */
+    public var actionId: String
+    /**
+     * Optional additional data, such as the new text-field value.
+     */
+    public var payload: Data?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Card whose face carried the action.
+         */cardId: String,
+        /**
+         * `Button.click_action` or `TextField.value_change_action` from the face tree.
+         */actionId: String,
+        /**
+         * Optional additional data, such as the new text-field value.
+         */payload: Data?) {
+        self.cardId = cardId
+        self.actionId = actionId
+        self.payload = payload
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HostPocketActionSubscribeItem: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHostPocketActionSubscribeItem: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HostPocketActionSubscribeItem {
+        return
+            try HostPocketActionSubscribeItem(
+                cardId: FfiConverterString.read(from: &buf),
+                actionId: FfiConverterString.read(from: &buf),
+                payload: FfiConverterOptionData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HostPocketActionSubscribeItem, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.cardId, into: &buf)
+        FfiConverterString.write(value.actionId, into: &buf)
+        FfiConverterOptionData.write(value.payload, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostPocketActionSubscribeItem_lift(_ buf: RustBuffer) throws -> HostPocketActionSubscribeItem {
+    return try FfiConverterTypeHostPocketActionSubscribeItem.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostPocketActionSubscribeItem_lower(_ value: HostPocketActionSubscribeItem) -> RustBuffer {
+    return FfiConverterTypeHostPocketActionSubscribeItem.lower(value)
+}
+
+
+/**
+ * The calling product's cards: the whole set on subscribe and after every change.
+ */
+public struct HostPocketListSubscribeItem: Equatable, Hashable {
+    /**
+     * Cards currently in Pocket for the calling product.
+     */
+    public var cards: [PocketCard]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Cards currently in Pocket for the calling product.
+         */cards: [PocketCard]) {
+        self.cards = cards
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HostPocketListSubscribeItem: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHostPocketListSubscribeItem: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HostPocketListSubscribeItem {
+        return
+            try HostPocketListSubscribeItem(
+                cards: FfiConverterSequenceTypePocketCard.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HostPocketListSubscribeItem, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypePocketCard.write(value.cards, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostPocketListSubscribeItem_lift(_ buf: RustBuffer) throws -> HostPocketListSubscribeItem {
+    return try FfiConverterTypeHostPocketListSubscribeItem.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostPocketListSubscribeItem_lower(_ value: HostPocketListSubscribeItem) -> RustBuffer {
+    return FfiConverterTypeHostPocketListSubscribeItem.lower(value)
+}
+
+
+/**
+ * Request to remove one of the calling product's cards.
+ */
+public struct HostPocketRemoveCardRequest: Equatable, Hashable {
+    /**
+     * Card to remove. A card that is not present is already removed.
+     */
+    public var cardId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Card to remove. A card that is not present is already removed.
+         */cardId: String) {
+        self.cardId = cardId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HostPocketRemoveCardRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHostPocketRemoveCardRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HostPocketRemoveCardRequest {
+        return
+            try HostPocketRemoveCardRequest(
+                cardId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HostPocketRemoveCardRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.cardId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostPocketRemoveCardRequest_lift(_ buf: RustBuffer) throws -> HostPocketRemoveCardRequest {
+    return try FfiConverterTypeHostPocketRemoveCardRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostPocketRemoveCardRequest_lower(_ value: HostPocketRemoveCardRequest) -> RustBuffer {
+    return FfiConverterTypeHostPocketRemoveCardRequest.lower(value)
+}
+
+
+/**
  * Push notification payload.
  *
  * When `scheduled_at` is `Some`, the notification is deferred to the given
@@ -2754,6 +2951,75 @@ public func FfiConverterTypeLegacyAccountTxPayload_lower(_ value: LegacyAccountT
 
 
 /**
+ * One of the calling product's Pocket cards.
+ */
+public struct PocketCard: Equatable, Hashable {
+    /**
+     * Card label declared by the product, unique within the product.
+     */
+    public var cardId: String
+    /**
+     * Placed by the host itself; removable by neither the user nor the product.
+     */
+    public var privileged: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Card label declared by the product, unique within the product.
+         */cardId: String,
+        /**
+         * Placed by the host itself; removable by neither the user nor the product.
+         */privileged: Bool) {
+        self.cardId = cardId
+        self.privileged = privileged
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PocketCard: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePocketCard: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PocketCard {
+        return
+            try PocketCard(
+                cardId: FfiConverterString.read(from: &buf),
+                privileged: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PocketCard, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.cardId, into: &buf)
+        FfiConverterBool.write(value.privileged, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePocketCard_lift(_ buf: RustBuffer) throws -> PocketCard {
+    return try FfiConverterTypePocketCard.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePocketCard_lower(_ value: PocketCard) -> RustBuffer {
+    return FfiConverterTypePocketCard.lower(value)
+}
+
+
+/**
  * Identifies a product-specific account by combining a dotNS domain name with a
  * derivation index.
  */
@@ -2923,6 +3189,65 @@ public func FfiConverterTypeProductAccountTxPayload_lift(_ buf: RustBuffer) thro
 #endif
 public func FfiConverterTypeProductAccountTxPayload_lower(_ value: ProductAccountTxPayload) -> RustBuffer {
     return FfiConverterTypeProductAccountTxPayload.lower(value)
+}
+
+
+/**
+ * Render work sent by the host while a card's face is on screen.
+ */
+public struct ProductPocketCardRenderRequest: Equatable, Hashable {
+    /**
+     * Card whose face to stream.
+     */
+    public var cardId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Card whose face to stream.
+         */cardId: String) {
+        self.cardId = cardId
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ProductPocketCardRenderRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeProductPocketCardRenderRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ProductPocketCardRenderRequest {
+        return
+            try ProductPocketCardRenderRequest(
+                cardId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: ProductPocketCardRenderRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.cardId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProductPocketCardRenderRequest_lift(_ buf: RustBuffer) throws -> ProductPocketCardRenderRequest {
+    return try FfiConverterTypeProductPocketCardRenderRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeProductPocketCardRenderRequest_lower(_ value: ProductPocketCardRenderRequest) -> RustBuffer {
+    return FfiConverterTypeProductPocketCardRenderRequest.lower(value)
 }
 
 
@@ -5676,6 +6001,87 @@ public func FfiConverterTypeHostPlatform_lower(_ value: HostPlatform) -> RustBuf
 
 
 /**
+ * Card removal failure.
+ */
+
+public enum HostPocketRemoveCardError: Equatable, Hashable {
+
+    /**
+     * The card is privileged and stays in Pocket.
+     */
+    case privileged
+    /**
+     * Catch-all.
+     */
+    case unknown(
+        /**
+         * Human-readable reason.
+         */reason: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension HostPocketRemoveCardError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHostPocketRemoveCardError: FfiConverterRustBuffer {
+    typealias SwiftType = HostPocketRemoveCardError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HostPocketRemoveCardError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .privileged
+
+        case 2: return .unknown(reason: try FfiConverterString.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: HostPocketRemoveCardError, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .privileged:
+            writeInt(&buf, Int32(1))
+
+
+        case let .unknown(reason):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(reason, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostPocketRemoveCardError_lift(_ buf: RustBuffer) throws -> HostPocketRemoveCardError {
+    return try FfiConverterTypeHostPocketRemoveCardError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHostPocketRemoveCardError_lower(_ value: HostPocketRemoveCardError) -> RustBuffer {
+    return FfiConverterTypeHostPocketRemoveCardError.lower(value)
+}
+
+
+
+/**
  * Layout and styling modifiers applied to custom renderer components.
  */
 
@@ -7006,6 +7412,31 @@ fileprivate struct FfiConverterSequenceTypeChatMedia: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeChatMedia.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypePocketCard: FfiConverterRustBuffer {
+    typealias SwiftType = [PocketCard]
+
+    public static func write(_ value: [PocketCard], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypePocketCard.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [PocketCard] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [PocketCard]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypePocketCard.read(from: &buf))
         }
         return seq
     }

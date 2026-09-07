@@ -6046,7 +6046,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_truapi_server_checksum_constructor_nativetruapihostruntime_with_runtime_config() != 39293) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_truapi_server_checksum_method_nativecustomrendererobserver_on_update() != 1079) {
+    if (uniffi_truapi_server_checksum_method_nativecustomrendererobserver_on_update() != 58105) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_truapi_server_checksum_method_nativecustomrendererobserver_on_complete() != 32694) {
