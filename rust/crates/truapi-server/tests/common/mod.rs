@@ -7,8 +7,8 @@ use futures::stream::{self, BoxStream};
 use truapi::v01;
 use truapi_platform::{
     AuthPresenter, ChainProvider, CoreStorage, CoreStorageKey, Features, HostInfo,
-    JsonRpcConnection, Navigation, Notifications, PairingHostConfig, Permissions, PlatformInfo,
-    PreimageHost, ProductContext, ProductStorage, ThemeHost, UserConfirmation,
+    JsonRpcConnection, LocaleHost, Navigation, Notifications, PairingHostConfig, Permissions,
+    PlatformInfo, PreimageHost, ProductContext, ProductStorage, ThemeHost, UserConfirmation,
     UserConfirmationReview,
 };
 use truapi_server::frame::ProtocolMessage;
@@ -54,10 +54,12 @@ pub fn test_runtime_config() -> (PairingHostConfig, ProductContext) {
                 name: "Polkadot Web".to_string(),
                 icon: Some("https://dot.li/dotli.png".to_string()),
                 version: None,
+                platform: truapi::latest::HostPlatform::Web,
             },
             PlatformInfo::default(),
             [0xa2; 32],
             [0xbb; 32],
+            [0xcc; 32],
             "polkadotapp".to_string(),
         )
         .expect("test host runtime config is valid"),
@@ -196,7 +198,17 @@ impl UserConfirmation for WireShapePlatform {
 }
 
 impl ThemeHost for WireShapePlatform {
-    fn subscribe_theme(&self) -> BoxStream<'static, Result<v01::ThemeVariant, v01::GenericError>> {
+    fn subscribe_theme(
+        &self,
+    ) -> BoxStream<'static, Result<v01::HostThemeSubscribeItem, v01::GenericError>> {
+        Box::pin(stream::empty())
+    }
+}
+
+impl LocaleHost for WireShapePlatform {
+    fn subscribe_locale(
+        &self,
+    ) -> BoxStream<'static, Result<v01::HostLocaleSubscribeItem, v01::GenericError>> {
         Box::pin(stream::empty())
     }
 }

@@ -4,13 +4,9 @@
 // the sibling `truapi_server.swift` file) owns wire decoding, request
 // routing, subscription lifecycle, and platform trait dispatch.
 //
-// This file exposes:
-//
-//   * `TrUAPIHostCore` - owning wrapper around the UniFFI-generated
-//     `NativeTrUApiCore`. Takes `HostCallbacks` directly and exposes
-//     session + WS-bridge controls.
-//   * `LocalhostBridgeBootstrap` - small JS snippet that publishes the WS
-//     bridge endpoint to the product page so it can dial back in.
+// This file exposes the process-owned `TrUAPIHostRuntime`, its independently
+// scoped `TrUAPIProductExecution` connections, and the
+// `LocalhostBridgeBootstrap` helper used to publish an execution's WS endpoint.
 //
 // Products running inside a `WKWebView` connect to the Rust core via the
 // localhost WebSocket bridge. The bootstrap script publishes the URL
@@ -22,88 +18,6 @@ import Foundation
 /// Package metadata.
 public enum TrUAPIHost {
     public static let version = "0.1.0"
-}
-
-/// Deeplink scheme used when the Rust core builds SSO pairing payloads.
-public enum PairingDeeplinkScheme: Sendable {
-    case polkadotApp
-    case polkadotAppDev
-
-    fileprivate var native: NativePairingDeeplinkScheme {
-        switch self {
-        case .polkadotApp:
-            return .polkadotApp
-        case .polkadotAppDev:
-            return .polkadotAppDev
-        }
-    }
-}
-
-/// Static product and pairing config supplied before the Rust core handles
-/// product calls. One core instance represents one product identity.
-///
-/// `hostName`, `hostIcon`, `hostVersion`, `platformType`, and
-/// `platformVersion` describe the host to the wallet during SSO pairing.
-/// `peopleChainGenesisHash` and `bulletinChainGenesisHash` must each be
-/// exactly 32 bytes.
-public struct RuntimeConfig: Sendable {
-    public let productId: String
-    public let executionKind: ProductExecutionKind
-    public let hostName: String
-    public let hostIcon: String?
-    public let hostVersion: String?
-    public let platformType: String?
-    public let platformVersion: String?
-    public let peopleChainGenesisHash: Data
-    public let bulletinChainGenesisHash: Data
-    public let localSessionSecret: Data?
-    public let localSessionLiteUsername: String?
-    public let pairingDeeplinkScheme: PairingDeeplinkScheme
-
-    public init(
-        productId: String,
-        executionKind: ProductExecutionKind = .spa,
-        hostName: String,
-        hostIcon: String? = nil,
-        hostVersion: String? = nil,
-        platformType: String? = nil,
-        platformVersion: String? = nil,
-        peopleChainGenesisHash: Data,
-        bulletinChainGenesisHash: Data,
-        localSessionSecret: Data? = nil,
-        localSessionLiteUsername: String? = nil,
-        pairingDeeplinkScheme: PairingDeeplinkScheme = .polkadotApp
-    ) {
-        self.productId = productId
-        self.executionKind = executionKind
-        self.hostName = hostName
-        self.hostIcon = hostIcon
-        self.hostVersion = hostVersion
-        self.platformType = platformType
-        self.platformVersion = platformVersion
-        self.peopleChainGenesisHash = peopleChainGenesisHash
-        self.bulletinChainGenesisHash = bulletinChainGenesisHash
-        self.localSessionSecret = localSessionSecret
-        self.localSessionLiteUsername = localSessionLiteUsername
-        self.pairingDeeplinkScheme = pairingDeeplinkScheme
-    }
-
-    fileprivate var native: NativeRuntimeConfig {
-        NativeRuntimeConfig(
-            productId: productId,
-            executionKind: executionKind,
-            hostName: hostName,
-            hostIcon: hostIcon,
-            hostVersion: hostVersion,
-            platformType: platformType,
-            platformVersion: platformVersion,
-            peopleChainGenesisHash: peopleChainGenesisHash,
-            bulletinChainGenesisHash: bulletinChainGenesisHash,
-            localSessionSecret: localSessionSecret,
-            localSessionLiteUsername: localSessionLiteUsername,
-            pairingDeeplinkScheme: pairingDeeplinkScheme.native
-        )
-    }
 }
 
 /// Immutable process-wide configuration shared by all product executions.
@@ -145,6 +59,7 @@ public struct HostRuntimeConfig: Sendable, Equatable {
             hostName: hostName,
             hostIcon: hostIcon,
             hostVersion: hostVersion,
+            hostPlatform: .ios,
             platformType: platformType,
             platformVersion: platformVersion,
             peopleChainGenesisHash: peopleChainGenesisHash,
@@ -173,18 +88,28 @@ public struct ProductExecutionConfig: Sendable, Equatable {
     }
 }
 
-/// Bootstrap helper for the native localhost WebSocket bridge that the Rust
-/// core stands up via `NativeTrUApiCore.startWsBridge(bindPort:)` when the
-/// cdylib is built with the `ws-bridge` feature.
+/// Bootstrap helper for the native localhost WebSocket bridge that a product
+/// execution starts when the cdylib is built with the `ws-bridge` feature.
 public enum LocalhostBridgeBootstrap {
     /// Returns a `<script>`-injectable snippet that publishes the endpoint
-    /// metadata on `window.__truapi_localhost`, exposes the legacy
+    /// metadata on `window.__truapi_localhost`, the pre-resolved permission
+    /// decisions on `window.__truapi_policy__`, exposes the legacy
     /// `window.__HOST_API_PORT__` webview transport shape, and fires a
     /// `truapi-native-ready` event.
-    public static func script(port: UInt16, token: String) -> String {
+    ///
+    /// `webRtcAllowed` must come from `permissionAuthorizationStatus` for
+    /// `RemotePermission.remote(.webRtc)` — a peek, never a prompt. It is baked
+    /// in as a literal because the container enforces it inside the product's
+    /// own realm, where an asynchronous permission request would be forgeable:
+    /// product script can hook the primitives such a request's bookkeeping
+    /// relies on and resolve it itself. A settled value has nothing to steal.
+    /// The consequence is that a fresh grant only takes effect once the web
+    /// view reloads.
+    public static func script(port: UInt16, token: String, webRtcAllowed: Bool) -> String {
         let url = "ws://127.0.0.1:\(port)/?t=\(token)"
         let safeUrl = jsStringLiteral(url)
         let safeToken = jsStringLiteral(token)
+        let safeWebRtc = webRtcAllowed ? "true" : "false"
         return """
         (function() {
           var endpoint = { url: \(safeUrl), token: \(safeToken) };
@@ -256,6 +181,7 @@ public enum LocalhostBridgeBootstrap {
           }
 
           window.__truapi_localhost = endpoint;
+          window.__truapi_policy__ = { webRtcAllowed: \(safeWebRtc) };
           window.__HOST_WEBVIEW_MARK__ = true;
           window.__HOST_API_PORT__ = createWebSocketMessagePort(endpoint.url);
           window.dispatchEvent(new Event('truapi-native-ready'));
@@ -279,28 +205,6 @@ public enum LocalhostBridgeBootstrap {
             .replacingOccurrences(of: "\u{2028}", with: "\\u2028")
             .replacingOccurrences(of: "\u{2029}", with: "\\u2029")
     }
-}
-
-/// Session + WS-bridge controls of the Rust core, abstracted so hosts and
-/// runtimes can depend on the interface (and tests can mock it) without
-/// booting the Rust cdylib.
-public protocol TrUAPIHostCoreProtocol: AnyObject {
-    func startWsBridge(bindPort: UInt16) throws -> WsBridgeEndpoint
-    func stopWsBridge()
-    func disconnect()
-    func cancelLogin()
-    func activateLocalSession(secret: Data, liteUsername: String?) throws
-    func permissionAuthorizationStatus(
-        request: PermissionAuthorizationRequest
-    ) throws -> PermissionAuthorizationStatus
-    func setPermissionAuthorizationStatus(
-        request: PermissionAuthorizationRequest,
-        status: PermissionAuthorizationStatus
-    ) throws
-    func notifyThemeChanged(theme: ThemeVariant)
-    func notifyPreimageChanged(key: Data, value: Data?)
-    func notifyChainResponse(connectionId: UInt32, json: String)
-    func notifyChainClosed(connectionId: UInt32)
 }
 
 /// Product-scoped key-value storage provided by the embedding host.
@@ -365,19 +269,37 @@ public protocol HostBridge: AnyObject, Sendable {
     /// not stall other TrUAPI traffic.
     func devicePermission(request: HostDevicePermissionRequest) async throws -> Bool
 
+    /// Report the OS status of a device capability without prompting. Answer
+    /// from the platform's authorization APIs, for example
+    /// `AVCaptureDevice.authorizationStatus(for:)` or
+    /// `UNUserNotificationCenter.getNotificationSettings`.
+    ///
+    /// The core calls this before every device-permission request and status
+    /// read, so it must not show UI. A capability your app has no OS gate for
+    /// answers `.notApplicable`, which leaves the stored product decision
+    /// governing. Defaults to `.notApplicable`, so an app that does not
+    /// implement it keeps today's behaviour.
+    func devicePermissionStatus(request: HostDevicePermissionRequest) async throws
+        -> NativeDevicePermissionStatus
+
     /// Prompt for a remote (product-scoped) permission bundle. Invoked on a
     /// blocking-pool thread; present the prompt on the main thread and block
     /// the calling thread until the user decides. Blocking here does not
     /// stall other TrUAPI traffic.
     func remotePermission(request: RemotePermission) async throws -> Bool
 
-    /// Observe an auth state change. The core emits states only when they
-    /// actually change, in transition order: render `.pairing` as the pairing
-    /// QR UI, `.connected`/`.disconnected` as the account badge, and
-    /// `.loginFailed` as a retryable error. Report a user dismissal of the
-    /// pairing UI through ``TrUAPIHostCore/cancelLogin()``. Invoked on the
-    /// dispatcher thread; hand the state to the main thread and return
-    /// promptly.
+    /// Observe an auth state change, in transition order: render `.pairing` as
+    /// the pairing QR UI, `.connected`/`.disconnected` as the account badge,
+    /// and `.loginFailed` as a retryable error, unless its `kind` is
+    /// `.noFreeAllowanceSlots`, which is unlikely to succeed before the period
+    /// rolls over, so retry should not be the primary action. A pairing host's
+    /// session activation reports its outcome even
+    /// when it is the default `.disconnected`, so a host that awaits activation
+    /// before routing never has to read silence as "signed out"; every other
+    /// emission, and every emission on a host role that has no session
+    /// activation, happens only when the state actually changes.
+    /// Invoked on the dispatcher thread; hand the state to the main thread and
+    /// return promptly.
     func authStateChanged(state: AuthState)
 
     /// Open a JSON-RPC chain connection and return a host-assigned id, or nil if unsupported.
@@ -395,16 +317,20 @@ public protocol HostBridge: AnyObject, Sendable {
     /// Return the current preimage value for `key`, or nil for a miss.
     func lookupPreimage(key: Data) async throws -> Data?
 
-    /// Return the current host theme.
-    func currentTheme() throws -> ThemeVariant
+    /// Return the current host theme. Hosts with no named themes report
+    /// `ThemeName.default`.
+    func currentTheme() throws -> HostThemeSubscribeItem
+
+    /// Return the language this host presents its interface in, as a BCP 47
+    /// tag. Hosts with no in-app language picker report the system language.
+    func currentLocale() throws -> HostLocaleSubscribeItem
 
     /// Answer a feature-support query. Invoked on the dispatcher thread; must
     /// return promptly.
     func featureSupported(request: HostFeatureSupportedRequest) async throws -> Bool
 
     /// Enumerate the chains this host serves: its environment plus one entry
-    /// per chain role. Must match exactly what ``chainConnect(genesisHash:)``
-    /// accepts. Invoked on the dispatcher thread; must return promptly.
+    /// per chain role. Invoked on the dispatcher thread; must return promptly.
     func supportedChains() throws -> HostChainSet
 
     /// Scoped key-value storage for the Rust core.
@@ -417,22 +343,40 @@ public protocol HostBridge: AnyObject, Sendable {
 }
 
 /// Native Chat storage and UI surface. Implement and pass to
-/// ``TrUAPIHostRuntime/openProductExecution(bridge:chat:configuration:)``
+/// ``TrUAPIHostRuntime/openProductExecution(bridge:configuration:chat:)``
 /// when the host supports the Chat modality; hosts without it pass nothing.
+/// Native Chat storage and UI surface, called from the process-wide dispatch
+/// pool shared by every product execution: implementations must be safe to
+/// enter concurrently, and one that blocks stalls the others.
+///
+/// Throw ``HostRejection`` (or an error conforming to `LocalizedError`) to
+/// decline a call. A plain `Error` reaches the product as its type name alone,
+/// because a value's stored properties would otherwise cross to it.
 public protocol ChatHostBridge: AnyObject, Sendable {
-    /// Create or resolve a native product Chat room.
+    /// Create or resolve a native product Chat room. The core has bounded and
+    /// normalized these arguments and screened the icon scheme; escaping them
+    /// for the surface that renders them is still the host's job.
     func createRoom(roomId: String, name: String, icon: String) throws
         -> ChatRoomRegistrationStatus
 
-    /// Persist a text message in native Chat storage.
-    func postTextMessage(roomId: String, text: String) throws -> String
+    /// Register or resolve a native product Chat bot. The core has bounded and
+    /// normalized these arguments and screened the icon scheme; escaping them
+    /// for the surface that renders them is still the host's job.
+    func registerBot(botId: String, name: String, icon: String) throws
+        -> ChatBotRegistrationStatus
 
-    /// Persist a custom message in native Chat storage.
-    func postCustomMessage(
-        roomId: String,
-        messageType: String,
-        payload: Data
-    ) throws -> String
+    /// Persist a product-authored message in native Chat storage. Throw for a
+    /// content variant this host cannot render.
+    ///
+    /// The core has bounded and screened every field, but a body passes
+    /// through byte-for-byte and `ChatFile.sizeBytes` is an unverified product
+    /// assertion, so escaping and sizing remain the host's job.
+    ///
+    /// The returned id is what `ActionTrigger.messageId` carries back, so it
+    /// must name this message for as long as the host stores it. An id
+    /// arriving in a `reaction` or `reactionRemoved` is product-chosen and
+    /// untrusted: it may name a message in another room, or none at all.
+    func postMessage(roomId: String, content: ChatMessageContent) throws -> String
 
     /// Return the current product-scoped native Chat rooms.
     func listRooms() throws -> [ChatRoom]
@@ -449,8 +393,17 @@ public extension HostBridge {
     func chainClose(connectionId: UInt32) throws {}
     func confirmUserAction(review: UserConfirmationReview) async throws -> Bool { false }
     func lookupPreimage(key: Data) async throws -> Data? { nil }
-    func currentTheme() throws -> ThemeVariant { .dark }
+    func currentTheme() throws -> HostThemeSubscribeItem {
+        HostThemeSubscribeItem(name: .default, variant: .dark)
+    }
+    func currentLocale() throws -> HostLocaleSubscribeItem {
+        HostLocaleSubscribeItem(
+            languageTag: Locale.current.language.languageCode?.identifier ?? "en"
+        )
+    }
     func supportedChains() throws -> HostChainSet { HostChainSet(network: "", chains: []) }
+    func devicePermissionStatus(request: HostDevicePermissionRequest) async throws
+        -> NativeDevicePermissionStatus { .notApplicable }
 }
 
 /// Adapter that bridges the public `ChatHostBridge` to the generated UniFFI
@@ -472,23 +425,19 @@ private final class ChatCallbackAdapter: NativeChatCallbacks, @unchecked Sendabl
         }
     }
 
-    func postTextMessage(roomId: String, text: String) throws -> String {
+    func registerBot(
+        botId: String,
+        name: String,
+        icon: String
+    ) throws -> ChatBotRegistrationStatus {
         try withHostRejection {
-            try bridge.postTextMessage(roomId: roomId, text: text)
+            try bridge.registerBot(botId: botId, name: name, icon: icon)
         }
     }
 
-    func postCustomMessage(
-        roomId: String,
-        messageType: String,
-        payload: Data
-    ) throws -> String {
+    func postMessage(roomId: String, content: ChatMessageContent) throws -> String {
         try withHostRejection {
-            try bridge.postCustomMessage(
-                roomId: roomId,
-                messageType: messageType,
-                payload: payload
-            )
+            try bridge.postMessage(roomId: roomId, content: content)
         }
     }
 
@@ -502,7 +451,7 @@ private final class ChatCallbackAdapter: NativeChatCallbacks, @unchecked Sendabl
         } catch let error as HostRejection {
             throw error
         } catch {
-            throw HostRejection.Rejected(reason: error.localizedDescription)
+            throw HostRejection.Rejected(reason: hostRejectionReason(error))
         }
     }
 }
@@ -542,6 +491,14 @@ private final class HostCallbackAdapter: HostCallbacks, @unchecked Sendable {
     func devicePermission(request: HostDevicePermissionRequest) async throws -> Bool {
         try await withHostRejection {
             try await bridge.devicePermission(request: request)
+        }
+    }
+
+    func devicePermissionStatus(request: HostDevicePermissionRequest) async throws
+        -> NativeDevicePermissionStatus
+    {
+        try await withHostRejection {
+            try await bridge.devicePermissionStatus(request: request)
         }
     }
 
@@ -603,9 +560,15 @@ private final class HostCallbackAdapter: HostCallbacks, @unchecked Sendable {
         }
     }
 
-    func currentTheme() throws -> ThemeVariant {
+    func currentTheme() throws -> HostThemeSubscribeItem {
         try withHostRejection {
             try bridge.currentTheme()
+        }
+    }
+
+    func currentLocale() throws -> HostLocaleSubscribeItem {
+        try withHostRejection {
+            try bridge.currentLocale()
         }
     }
 
@@ -645,7 +608,7 @@ private final class HostCallbackAdapter: HostCallbacks, @unchecked Sendable {
         } catch let error as HostRejection {
             throw error
         } catch {
-            throw HostRejection.Rejected(reason: error.localizedDescription)
+            throw HostRejection.Rejected(reason: hostRejectionReason(error))
         }
     }
 
@@ -655,7 +618,7 @@ private final class HostCallbackAdapter: HostCallbacks, @unchecked Sendable {
         } catch let error as HostRejection {
             throw error
         } catch {
-            throw HostRejection.Rejected(reason: error.localizedDescription)
+            throw HostRejection.Rejected(reason: hostRejectionReason(error))
         }
     }
 
@@ -665,7 +628,7 @@ private final class HostCallbackAdapter: HostCallbacks, @unchecked Sendable {
         } catch let error as HostNavigateRejection {
             throw error
         } catch {
-            throw HostNavigateRejection.Navigate(.unknown(reason: error.localizedDescription))
+            throw HostNavigateRejection.Navigate(.unknown(reason: hostRejectionReason(error)))
         }
     }
 
@@ -675,7 +638,7 @@ private final class HostCallbackAdapter: HostCallbacks, @unchecked Sendable {
         } catch let error as HostNavigateRejection {
             throw error
         } catch {
-            throw HostNavigateRejection.Navigate(.unknown(reason: error.localizedDescription))
+            throw HostNavigateRejection.Navigate(.unknown(reason: hostRejectionReason(error)))
         }
     }
 
@@ -685,7 +648,7 @@ private final class HostCallbackAdapter: HostCallbacks, @unchecked Sendable {
         } catch let error as HostStorageError {
             throw error
         } catch {
-            throw HostStorageError.Storage(.unknown(reason: error.localizedDescription))
+            throw HostStorageError.Storage(.unknown(reason: hostRejectionReason(error)))
         }
     }
 }
@@ -710,8 +673,8 @@ public final class TrUAPIHostRuntime: @unchecked Sendable {
     /// modality omit it.
     public func openProductExecution(
         bridge: HostBridge,
-        chat: ChatHostBridge? = nil,
-        configuration: ProductExecutionConfig
+        configuration: ProductExecutionConfig,
+        chat: ChatHostBridge? = nil
     ) throws -> TrUAPIProductExecution {
         let adapter = HostCallbackAdapter(bridge: bridge)
         let chatAdapter = chat.map { ChatCallbackAdapter(bridge: $0) }
@@ -735,12 +698,104 @@ public final class TrUAPIHostRuntime: @unchecked Sendable {
         try inner.activateLocalSession(secret: secret, liteUsername: liteUsername)
     }
 
+    /// Answer one decrypted SSO remote message from the wallet-managed
+    /// statement-store session. `message` is one SCALE-encoded
+    /// `RemoteMessage` exactly as decrypted. `.response` carries the
+    /// SCALE-encoded reply to post back over the same session;
+    /// `.disconnected` means the peer ended the session (perform native
+    /// teardown); `.ignored` means the message was not a request.
+    /// Confirmation-gated requests await `confirmUserAction`, so this can
+    /// take arbitrarily long — call from a `Task`, never the main thread.
+    public func handleSsoRequest(message: Data) async throws -> SsoRequestOutcome {
+        try await inner.handleSsoRequest(message: message)
+    }
+
+    /// Build the SCALE-encoded `Disconnected` message to post over a
+    /// session the wallet is ending; record cleanup stays with the wallet.
+    public func prepareDisconnectRequest() -> Data {
+        inner.prepareDisconnectRequest()
+    }
+
     public func notifyChainResponse(connectionId: UInt32, json: String) {
         inner.notifyChainResponse(connectionId: connectionId, json: json)
     }
 
     public func notifyChainClosed(connectionId: UInt32) {
         inner.notifyChainClosed(connectionId: connectionId)
+    }
+
+    /// Record the accounts renewal should keep allowed on the Statement Store.
+    ///
+    /// Needs an active session, so call it after
+    /// ``activateLocalSession(secret:liteUsername:)`` or after pairing, not at
+    /// construction.
+    ///
+    /// Recipe-shaped targets survive a change of root entropy; a raw
+    /// ``StatementRenewalTarget/account(accountId:label:)`` does not, and is
+    /// dropped by the next pass after ``activateLocalSession(secret:liteUsername:)``
+    /// installs a different identity. Re-track those whenever the identity changes.
+    public func trackStatementRenewalTargets(_ targets: [StatementRenewalTarget]) throws {
+        try inner.trackStatementRenewalTargets(targets: targets.map(\.native))
+    }
+
+    /// Run one renewal pass now, reporting what each tracked target got.
+    ///
+    /// Submits extrinsics and blocks until they are included, so call it off the
+    /// main thread. There is no cancellation: a pass with several targets can
+    /// outlast a short background budget, though a target registered before the
+    /// process is killed is not lost and reads back as already allocated.
+    public func renewStatementAllowances() throws -> StatementRenewalReport {
+        try inner.renewStatementAllowances()
+    }
+
+    /// Start the in-process renewal loop, for a host that stays resident. A
+    /// suspended app stops ticking, so prefer scheduling
+    /// ``renewStatementAllowances()``.
+    public func startStatementAllowanceRenewal() {
+        inner.startStatementAllowanceRenewal()
+    }
+
+    /// The in-process loop's own cadence, capped at an hour. Allowances only
+    /// stop being renewed at a period boundary and survive it by the chain's
+    /// grace window, so a host scheduling one wake-up per period
+    /// should read a value under an hour as the boundary approaching rather
+    /// than waking hourly.
+    public func nextStatementRenewalDelay() -> TimeInterval {
+        inner.nextStatementRenewalDelay()
+    }
+
+    /// The most recent pass the in-process renewal loop ran.
+    ///
+    /// `nil` until a pass has run, which is "not yet" rather than healthy.
+    /// ``startStatementAllowanceRenewal()`` returns nothing, so a host driving the
+    /// loop reads its result here. `slotsExhausted` on the last pass means a
+    /// period filled up and an allowance went unrenewed, which retrying cannot
+    /// fix and a person may need telling about.
+    public func lastStatementRenewalReport() -> StatementRenewalReport? {
+        inner.lastStatementRenewalReport()
+    }
+}
+
+/// An account renewal should keep allowed on the Statement Store.
+public enum StatementRenewalTarget: Sendable {
+    /// The statement-store allowance account derived for one product. Resolves
+    /// under whatever root entropy is active, so it survives a rotation.
+    case productStatementAllowance(productId: String)
+    /// The wallet's own SSO account. Also a derivation, so it survives a rotation.
+    case walletSso
+    /// A fixed account, such as a pairing peer's device statement key. Must be
+    /// exactly 32 bytes, and is dropped when the promising identity changes.
+    case account(accountId: Data, label: String)
+
+    var native: NativeStatementRenewalTarget {
+        switch self {
+        case let .productStatementAllowance(productId):
+            .productStatementAllowance(productId: productId)
+        case .walletSso:
+            .walletSso
+        case let .account(accountId, label):
+            .account(accountId: accountId, label: label)
+        }
     }
 }
 
@@ -757,19 +812,21 @@ public protocol TrUAPIProductExecutionProtocol: AnyObject, Sendable {
     ) throws -> AsyncThrowingStream<CustomRendererNode, Error>
     func permissionAuthorizationStatus(
         request: PermissionAuthorizationRequest
-    ) throws -> PermissionAuthorizationStatus
+    ) async throws -> PermissionAuthorizationStatus
     func setPermissionAuthorizationStatus(
         request: PermissionAuthorizationRequest,
         status: PermissionAuthorizationStatus
     ) throws
-    func notifyThemeChanged(theme: ThemeVariant)
+    func notifyThemeChanged(theme: HostThemeSubscribeItem)
+    func notifyLocaleChanged(locale: HostLocaleSubscribeItem)
     func notifyPreimageChanged(key: Data, value: Data?)
     func notifyChainResponse(connectionId: UInt32, json: String)
     func notifyChainClosed(connectionId: UInt32)
     func notifyChatRoomsChanged(rooms: [ChatRoom])
+    func sessionChatIdentityKey() throws -> Data?
 }
 
-/// One SPA or Chat executable connected to a shared host runtime.
+/// One App, Widget, or Worker executable connected to a shared host runtime.
 public final class TrUAPIProductExecution: TrUAPIProductExecutionProtocol, @unchecked Sendable {
     private let inner: NativeProductExecution
     private let callbackRetainer: HostCallbacks
@@ -822,8 +879,8 @@ public final class TrUAPIProductExecution: TrUAPIProductExecutionProtocol, @unch
 
     public func permissionAuthorizationStatus(
         request: PermissionAuthorizationRequest
-    ) throws -> PermissionAuthorizationStatus {
-        try inner.permissionAuthorizationStatus(request: request)
+    ) async throws -> PermissionAuthorizationStatus {
+        try await inner.permissionAuthorizationStatus(request: request)
     }
 
     public func setPermissionAuthorizationStatus(
@@ -833,8 +890,12 @@ public final class TrUAPIProductExecution: TrUAPIProductExecutionProtocol, @unch
         try inner.setPermissionAuthorizationStatus(request: request, status: status)
     }
 
-    public func notifyThemeChanged(theme: ThemeVariant) {
+    public func notifyThemeChanged(theme: HostThemeSubscribeItem) {
         inner.notifyThemeChanged(theme: theme)
+    }
+
+    public func notifyLocaleChanged(locale: HostLocaleSubscribeItem) {
+        inner.notifyLocaleChanged(locale: locale)
     }
 
     public func notifyPreimageChanged(key: Data, value: Data?) {
@@ -847,6 +908,10 @@ public final class TrUAPIProductExecution: TrUAPIProductExecutionProtocol, @unch
 
     public func notifyChainClosed(connectionId: UInt32) {
         inner.notifyChainClosed(connectionId: connectionId)
+    }
+
+    public func sessionChatIdentityKey() throws -> Data? {
+        try inner.sessionChatIdentityKey()
     }
 
     public func notifyChatRoomsChanged(rooms: [ChatRoom]) {
@@ -854,107 +919,33 @@ public final class TrUAPIProductExecution: TrUAPIProductExecutionProtocol, @unch
     }
 }
 
-/// Owning wrapper around the Rust-backed `NativeTrUApiCore`. Holds the callback
-/// bridge alive for the lifetime of the core and exposes session +
-/// WS-bridge controls.
+/// Reason text for an error a host threw from a callback.
 ///
-/// Hosts integrating with a `WKWebView`-based product call `startWsBridge`
-/// and pass the resulting `ws://127.0.0.1:<port>/?t=<token>` URL to the
-/// product via `LocalhostBridgeBootstrap.script(...)`. The product wires
-/// that URL into `@parity/truapi`'s `createWebSocketProvider`.
-public final class TrUAPIHostCore: TrUAPIHostCoreProtocol {
-    let inner: NativeTrUApiCore
-
-    // Rust holds the callback handle; this retainer pins the Swift side for
-    // the core's lifetime.
-    private let callbackRetainer: HostCallbacks
-
-    /// Boot the Rust core against the host callbacks.
-    public init(callbacks: HostCallbacks, runtimeConfig: RuntimeConfig) throws {
-        callbackRetainer = callbacks
-        inner = try NativeTrUApiCore.withRuntimeConfig(
-            callbacks: callbacks,
-            runtimeConfig: runtimeConfig.native
-        )
+/// A value that is not a `LocalizedError` has no author-written description,
+/// and `localizedDescription` renders it as "The operation couldn't be
+/// completed. (Module.Type error 1.)" — which names the host's module and says
+/// nothing about the failure. That string reaches the product, so prefer what
+/// the host actually wrote.
+private func hostRejectionReason(_ error: Error) -> String {
+    let reason: String
+    if let described = (error as? LocalizedError)?.errorDescription {
+        reason = described
+    } else if type(of: error) is NSError.Type {
+        // Foundation writes these, and the text describes the failure rather
+        // than the host's internals.
+        reason = error.localizedDescription
+    } else {
+        // A plain value's `String(describing:)` prints its stored properties,
+        // so only the type name crosses to the product.
+        reason = String(describing: type(of: error))
     }
-
-    /// Start the localhost WebSocket bridge. Requires the `ws-bridge`
-    /// feature in the cdylib. Pair the returned `WsBridgeEndpoint` with
-    /// `LocalhostBridgeBootstrap.script(...)` to hand the URL to the
-    /// product page.
-    public func startWsBridge(bindPort: UInt16 = 0) throws -> WsBridgeEndpoint {
-        try inner.startWsBridge(bindPort: bindPort)
-    }
-
-    /// Stop the localhost WebSocket bridge (if running).
-    public func stopWsBridge() {
-        inner.stopWsBridge()
-    }
-
-    /// Core-owned logout/disconnect path. Best-effort notifies the SSO peer,
-    /// clears in-memory session state, clears the persisted session via
-    /// core storage, and broadcasts `Disconnected` to active
-    /// account-status subscribers.
-    public func disconnect() {
-        inner.disconnect()
-    }
-
-    /// Notify the core after its host-private session storage changes.
-    public func notifySessionStoreChanged() {
-        inner.notifySessionStoreChanged()
-    }
-
-    /// Cancel an in-flight pairing login.
-    ///
-    /// Inert on a native host: the core is a signing host with no pairing flow
-    /// to cancel, so calling this emits no auth state and changes nothing.
-    public func cancelLogin() {
-        inner.cancelLogin()
-    }
-
-    /// Activate or replace the local signing-host session from host-held raw
-    /// BIP-39 entropy.
-    public func activateLocalSession(secret: Data, liteUsername: String? = nil) throws {
-        try inner.activateLocalSession(secret: secret, liteUsername: liteUsername)
-    }
-
-    /// Read a stored permission authorization status without prompting.
-    public func permissionAuthorizationStatus(
-        request: PermissionAuthorizationRequest
-    ) throws -> PermissionAuthorizationStatus {
-        try inner.permissionAuthorizationStatus(request: request)
-    }
-
-    /// Update a stored permission authorization status. `.notDetermined`
-    /// clears the stored value so the next product request prompts again.
-    public func setPermissionAuthorizationStatus(
-        request: PermissionAuthorizationRequest,
-        status: PermissionAuthorizationStatus
-    ) throws {
-        try inner.setPermissionAuthorizationStatus(request: request, status: status)
-    }
-
-    /// Push a host theme update to active TrUAPI theme subscriptions.
-    public func notifyThemeChanged(theme: ThemeVariant) {
-        inner.notifyThemeChanged(theme: theme)
-    }
-
-    /// Push a preimage lookup update to active subscriptions for `key`.
-    public func notifyPreimageChanged(key: Data, value: Data?) {
-        inner.notifyPreimageChanged(key: key, value: value)
-    }
-
-    /// Push a JSON-RPC response from a native chain connection into the core.
-    public func notifyChainResponse(connectionId: UInt32, json: String) {
-        inner.notifyChainResponse(connectionId: connectionId, json: json)
-    }
-
-    /// Notify the core that a native chain connection closed externally.
-    public func notifyChainClosed(connectionId: UInt32) {
-        inner.notifyChainClosed(connectionId: connectionId)
-    }
-
+    return String(reason.prefix(hostRejectionReasonMaxCharacters))
 }
+
+/// Bounded: the reason reaches the product, and a host message can carry a
+/// whole failed statement.
+private let hostRejectionReasonMaxCharacters = 256
+
 private func customRendererStream(
     _ subscribe: (CustomRendererStreamObserver) throws -> NativeCustomRendererSubscription
 ) throws -> AsyncThrowingStream<CustomRendererNode, Error> {
@@ -983,4 +974,18 @@ private final class CustomRendererStreamObserver: NativeCustomRendererObserver, 
     func onComplete() {
         continuation.finish()
     }
+
+    /// The product could not serve the render, so the last tree yielded is
+    /// partial. Finishing with an error keeps that distinct from a clean end.
+    func onError(reason: String) {
+        continuation.finish(throwing: CustomRendererStreamError(reason: reason))
+    }
+}
+
+/// A render the product declined or could not encode.
+public struct CustomRendererStreamError: Error, CustomStringConvertible {
+    /// Why the product ended the render.
+    public let reason: String
+
+    public var description: String { reason }
 }

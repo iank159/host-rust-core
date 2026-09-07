@@ -1,7 +1,28 @@
 import { concatBytes } from "@noble/hashes/utils.js";
 import { err, ok, type Result, type ResultAsync } from "neverthrow";
 
-import { str, u8, type ResultPayload } from "./scale.js";
+import { str, u8, type CallErrorValue, type ResultPayload } from "./scale.js";
+
+/** Wire discriminant reserved for method-independent protocol errors. **/
+export const PROTOCOL_ERROR_ID = 255 as const;
+
+/** The peer rejected an outbound frame because it does not support its API. **/
+export class UnsupportedMessageError extends Error {
+  /** Wire discriminant of the unsupported outbound frame. **/
+  readonly discriminant: number;
+
+  constructor(discriminant: number) {
+    super(`Peer does not support wire message ${discriminant}`);
+    this.name = "UnsupportedMessageError";
+    this.discriminant = discriminant;
+  }
+}
+
+/** Call result returned when the peer does not recognize a request frame. **/
+export type UnsupportedCallError = Extract<
+  CallErrorValue<never>,
+  { tag: "Unsupported" }
+>;
 
 /**
  * Coerce an unknown thrown value into an `Error` instance.
@@ -173,7 +194,8 @@ export interface RequestParams<Ok, Err> {
 
   /**
    * Decode SCALE response payload bytes into the wire `ResultPayload`
-   * envelope. The transport unwraps the envelope into `ResultAsync<Ok, Err>`.
+   * envelope. The transport unwraps the envelope into
+   * `ResultAsync<Ok, Err | UnsupportedCallError>`.
    **/
   decodeResponse: (payload: Uint8Array) => ResultPayload<Ok, Err>;
 }
@@ -203,7 +225,8 @@ export interface SubscribeRawParams {
   onInterrupt?: (payload: Uint8Array) => void;
 
   /**
-   * Called when the underlying provider closes while the subscription is active.
+   * Called when a transport-level error or unsupported start frame terminates
+   * the subscription.
    **/
   onClose?: (error: Error) => void;
 }
@@ -218,9 +241,9 @@ export type HostInitiatedSubscriptionHandler<Request, Item> = (
 /** Product-side registration for one host-initiated subscription method. **/
 export interface HostInitiatedSubscriptionRegistration<Request, Item> {
   /** Install or replace the handler used for future start frames. **/
-  setHandler(
-    handler: HostInitiatedSubscriptionHandler<Request, Item>,
-  ): { unsubscribe(): void };
+  setHandler(handler: HostInitiatedSubscriptionHandler<Request, Item>): {
+    unsubscribe(): void;
+  };
 }
 
 /** Options used to register a host-initiated subscription method. **/
@@ -253,7 +276,9 @@ export interface TrUApiTransport {
   /**
    * Send a one-shot request and resolve with the typed Ok/Err outcome.
    **/
-  request<Ok, Err>(params: RequestParams<Ok, Err>): ResultAsync<Ok, Err>;
+  request<Ok, Err>(
+    params: RequestParams<Ok, Err>,
+  ): ResultAsync<Ok, Err | UnsupportedCallError>;
 
   /**
    * Start a subscription and return a handle that can stop it.
@@ -336,6 +361,16 @@ export interface WireProvider {
    * Release provider resources and close the underlying pipe.
    **/
   dispose(): void;
+}
+
+/**
+ * A {@link WireProvider} backed by a WebSocket, which reports when its socket
+ * is up. Awaiting {@link WebSocketWireProvider.opened} is optional: frames
+ * posted earlier are queued and flushed on open.
+ **/
+export interface WebSocketWireProvider extends WireProvider {
+  /** Resolves once the socket is open, rejects if it never connects. */
+  opened: Promise<void>;
 }
 
 /**
@@ -609,6 +644,91 @@ export function createMessagePortProvider(
     subscribeClose: base.subscribeClose,
     dispose() {
       base.close(new Error("message port provider disposed"));
+      pending.length = 0;
+    },
+  };
+}
+
+/**
+ * Wire provider over a binary WebSocket, one message per SCALE frame.
+ *
+ * This is the transport a host exposes on a loopback socket: the Rust core's
+ * `ws-bridge`, and `truapi-host signing-host --frame-listen`. The frame bytes
+ * are identical to what the {@link createMessagePortProvider} path carries, so
+ * this is a pipe and nothing more.
+ *
+ * Frames posted before the socket opens are queued and flushed on open, so a
+ * caller never has to await {@link WebSocketWireProvider.opened} first.
+ **/
+export function createWebSocketProvider(url: string): WebSocketWireProvider {
+  const base = createBaseProvider();
+  const socket = new WebSocket(url);
+  socket.binaryType = "arraybuffer";
+  const pending: Uint8Array[] = [];
+  let open = false;
+
+  // `send` types its view as ArrayBuffer-backed. Frames never come from a
+  // SharedArrayBuffer, and only the view's own bytes go on the wire, so a
+  // frame that is a window into a larger buffer stays correct.
+  const send = (frame: Uint8Array) =>
+    socket.send(frame as Uint8Array<ArrayBuffer>);
+
+  let resolveOpened!: () => void;
+  let rejectOpened!: (error: Error) => void;
+  const opened = new Promise<void>((resolve, reject) => {
+    resolveOpened = resolve;
+    rejectOpened = reject;
+  });
+  // `opened` is optional for callers, so a failed connection must not surface as
+  // an unhandled rejection. Close still reaches every `subscribeClose`.
+  opened.catch(() => {});
+
+  socket.addEventListener("open", () => {
+    open = true;
+    for (const frame of pending.splice(0)) send(frame);
+    resolveOpened();
+  });
+  socket.addEventListener("message", (event: MessageEvent) => {
+    base.deliver(new Uint8Array(event.data as ArrayBuffer));
+  });
+  socket.addEventListener("error", () => {
+    const error = new Error(`websocket error (${url})`);
+    rejectOpened(error);
+    base.close(error);
+  });
+  socket.addEventListener("close", () => {
+    const error = new Error(`websocket closed (${url})`);
+    rejectOpened(error);
+    base.close(error);
+  });
+  base.onClose(() => {
+    try {
+      socket.close();
+    } catch {
+      // ignore duplicate close during shutdown
+    }
+  });
+
+  return {
+    opened,
+    postMessage(message) {
+      const error = base.closed();
+      if (error) throw error;
+      if (open) {
+        try {
+          send(message);
+        } catch (error) {
+          base.close(error);
+          throw toError(error);
+        }
+      } else {
+        pending.push(message);
+      }
+    },
+    subscribe: base.subscribe,
+    subscribeClose: base.subscribeClose,
+    dispose() {
+      base.close(new Error("websocket provider disposed"));
       pending.length = 0;
     },
   };

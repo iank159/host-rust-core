@@ -77,6 +77,29 @@ export function makeHostCallbacks(
     preimage: { ...defaults.preimage, ...overrides.preimage },
     theme: { ...defaults.theme, ...overrides.theme },
     chain: { ...defaults.chain, ...overrides.chain },
+    // Chat is an optional capability: only fixtures that ask for it get the
+    // group, so the default fixture is a host that does not serve chat.
+    ...(overrides.chat
+      ? {
+          chat: {
+            createChatRoom: async () => ({ status: "New" as const }),
+            registerChatBot: async () => ({ status: "New" as const }),
+            postChatMessage: async () => ({ messageId: "message" }),
+            async *subscribeChatRooms() {},
+            ...overrides.chat,
+          },
+        }
+      : {}),
+    // Same for the OS permission-status capability: a host that omits it
+    // leaves device grants resolving from stored state alone.
+    ...(overrides.permissionStatus
+      ? {
+          permissionStatus: {
+            devicePermissionStatus: async () => "NotApplicable" as const,
+            ...overrides.permissionStatus,
+          },
+        }
+      : {}),
   };
 }
 

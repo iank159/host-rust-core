@@ -32,15 +32,17 @@ git submodule update --init --recursive
       `regen-codegen` skill, then commit
       `js/packages/truapi/src/{generated,playground}/`.
 - [ ] **iOS bindings** — only if UniFFI-exposed types changed
-      (`HostCallbacks`, `NativeTrUApiCore`, the native mirror types in
+      (`HostCallbacks`, `NativeTrUApiHostRuntime`, `NativeProductExecution`,
+      the native mirror types in
       `rust/crates/truapi-server/src/native*`). Run
       `make uniffi && ./ios/truapi-host/scripts/sync-bindings.sh`, then
       commit `ios/truapi-host/Sources/`. Also update every hand-written
-      conformer — `HostCallbackAdapter` in `TrUAPIHost.swift`,
-      `StubHostCallbacks` in `Tests/TrUAPIWsBridgeTests.swift`, and
+      conformer — `HostCallbackAdapter` in `TrUAPIHost.swift` and
       `TrUAPIHost.kt` — since regenerating alone leaves the package
-      non-compiling. `rebuild.sh` does all of the above plus the
-      xcframework and container, but needs Xcode.
+      non-compiling. Swift conformers that implement `HostBridge` rather
+      than the generated `HostCallbacks` pick up the extension defaults
+      and usually need no change. `rebuild.sh` does all of the above plus
+      the xcframework and container, but needs Xcode.
 - [ ] **`@parity/truapi`** — invoke the `ts-client-checks` skill.
       `npm run build && npm test` clean.
 - [ ] **Playground snapshot** — only if codegen ran or
@@ -60,12 +62,19 @@ common cause of the codegen ↔ snapshot mismatch.
 
 GitHub Actions in `.github/workflows/ci.yml` runs the same chain on
 every PR. A green CI run is sufficient evidence for the static layers
-(rust, codegen-drift, ios-bindings, ts-client, playground); the e2e job
-runs the Playwright suite from the `e2e-dotli` skill against a freshly
-built dotli host.
+(rust, codegen-drift, ios-bindings, ios-swift, ts-client, playground);
+the e2e job runs the Playwright suite from the `e2e-dotli` skill against
+a freshly built dotli host.
 
-The `ios-bindings` job only compares the committed bindings against
-freshly generated ones. No CI job compiles Swift or Kotlin, so a
-hand-written conformer that misses a new protocol requirement stays
-green here and fails at release time instead. Green CI is not evidence
-that the iOS package builds.
+The `ios-bindings` job regenerates the Swift bindings, which proves
+every UniFFI-exposed type still has a binding representation; nothing is
+committed to diff against. The `ios-swift` job generates the package's
+Swift sources and container resource, then compiles the package and its
+test target on macOS, which is what catches a hand-written conformer
+that misses a new protocol requirement. It is path-filtered to pull
+requests touching `ios/`, `Package.swift`, the `Makefile`,
+`js/container/` or any crate the bindings are generated from, so it
+shows as skipped elsewhere.
+
+Still uncovered: nothing compiles Kotlin, so `TrUAPIHost.kt` fails at
+release time, and the embedding apps are not built here at all.

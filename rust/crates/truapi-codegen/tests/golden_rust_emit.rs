@@ -97,6 +97,15 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn workspace_tempdir(workspace: &Path) -> tempfile::TempDir {
+    let parent = workspace.join("target/codegen-test-tmp");
+    fs::create_dir_all(&parent).expect("create workspace codegen temp directory");
+    tempfile::Builder::new()
+        .prefix("golden-")
+        .tempdir_in(parent)
+        .expect("workspace tempdir")
+}
+
 fn rustfmt_generated(files: &[PathBuf]) {
     if files.is_empty() {
         return;
@@ -142,6 +151,8 @@ fn prettier_generated(workspace_root: &Path, files: &[PathBuf]) {
             "--",
             "prettier",
             "--write",
+            "--ignore-path",
+            "/dev/null",
             "--config",
         ])
         .arg(workspace_root.join(".prettierrc"));
@@ -166,7 +177,7 @@ fn golden_dispatcher_and_wire_table() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = workspace_root();
 
-    let tempdir = tempfile::tempdir().expect("tempdir");
+    let tempdir = workspace_tempdir(&workspace);
     let rustdoc_json = produce_rustdoc_json(&workspace, &tempdir.path().join("rustdoc-target"));
 
     let out = Command::new(env!("CARGO_BIN_EXE_truapi-codegen"))
@@ -187,13 +198,16 @@ fn golden_dispatcher_and_wire_table() {
         String::from_utf8_lossy(&out.stderr),
     );
 
-    // Compare both emitted files against the goldens. We assert on
+    // Compare the emitted files against the goldens. We assert on
     // wire_table.rs first because it's small and the diff is easy to
-    // read when the wire ids drift.
+    // read when the wire ids drift. mod.rs is covered because
+    // truapi-server declares `pub mod generated;` unconditionally, so
+    // dropping it stops the crate parsing at all.
     let golden_dir = manifest_dir.join("tests/golden");
     let cases = [
         ("wire_table.rs", "wire_table.rs"),
         ("dispatcher.rs", "dispatcher.rs"),
+        ("mod.rs", "mod.rs"),
     ];
     for (golden_name, output_name) in cases {
         let golden = fs::read_to_string(golden_dir.join(golden_name))
@@ -220,11 +234,11 @@ fn golden_dispatcher_and_wire_table() {
 #[test]
 fn binary_emission_is_idempotent() {
     let workspace = workspace_root();
-    let tempdir = tempfile::tempdir().expect("tempdir");
+    let tempdir = workspace_tempdir(&workspace);
     let rustdoc_json = produce_rustdoc_json(&workspace, &tempdir.path().join("rustdoc-target"));
 
     let run_once = || -> (String, String) {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = workspace_tempdir(&workspace);
         let status = Command::new(env!("CARGO_BIN_EXE_truapi-codegen"))
             .args([
                 "--input",
@@ -255,7 +269,7 @@ fn golden_host_callbacks_ts() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = workspace_root();
 
-    let tempdir = tempfile::tempdir().expect("tempdir");
+    let tempdir = workspace_tempdir(&workspace);
     let truapi_json = produce_rustdoc_json(&workspace, &tempdir.path().join("rustdoc-target"));
     let platform_json = produce_rustdoc_json_for_package(
         &workspace,
@@ -360,8 +374,12 @@ fn golden_host_callbacks_ts() {
         "SUBSCRIPTION_NAMES",
     ));
     for name in generated_names {
+        // Callbacks of an optional capability bind through the optional getter;
+        // either way the bridge must name every callback the worker proxies.
         assert!(
-            wasm_bridge_actual.contains(&format!("get_function(callbacks, \"{name}\")?")),
+            wasm_bridge_actual.contains(&format!("get_function(callbacks, \"{name}\")?"))
+                || wasm_bridge_actual
+                    .contains(&format!("get_optional_function(callbacks, \"{name}\")?")),
             "generated wasm bridge must bind worker callback `{name}`"
         );
     }

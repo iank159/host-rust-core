@@ -22,9 +22,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex as AsyncMutex;
 use truapi::latest as api;
 use truapi_platform::{
-    AuthState, ChainProvider, CoreStorage, CoreStorageKey, Features, JsonRpcConnection, Navigation,
-    Notifications, Permissions, PreimageHost, ProductStorage, ProductStorageKey, SessionUiInfo,
-    ThemeHost, UserConfirmation, UserConfirmationReview,
+    AuthState, ChainProvider, CoreStorage, CoreStorageKey, DevicePermissionStatus, Features,
+    JsonRpcConnection, LocaleHost, Navigation, Notifications, PermissionStatusHost, Permissions,
+    PreimageHost, ProductStorage, ProductStorageKey, SessionUiInfo, ThemeHost, UserConfirmation,
+    UserConfirmationReview,
 };
 
 use crate::chain::WsChainProvider;
@@ -33,7 +34,7 @@ use crate::terminal_ui::{SystemEvent, UiHandle};
 static NEXT_STORAGE_TEMP_ID: AtomicU32 = AtomicU32::new(0);
 
 /// How the host answers confirmation prompts (the web/iOS "sign?" modals).
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApprovalPolicy {
     /// Approve every sensitive action without prompting (`--auto-accept`).
     AutoAccept,
@@ -72,15 +73,8 @@ impl CliStoragePaths {
             .map(|user_id| network_dir.join(format!("{user_id}_pairing_host")))
             .filter(|path| path.is_dir())
             .unwrap_or_else(|| bootstrap_dir.clone());
-        let product_storage_dir = if state_dir == bootstrap_dir
-            && bootstrap_dir.join("storage").join("default").is_dir()
-        {
-            bootstrap_dir.join("storage").join("default")
-        } else {
-            state_dir.join("storage")
-        };
         Self {
-            product_storage_dir,
+            product_storage_dir: state_dir.join("storage"),
             state_dir,
             pairing_scope: Some(PairingStorageScope {
                 network_dir,
@@ -93,17 +87,24 @@ impl CliStoragePaths {
 /// Headless-host platform shared by both roles.
 pub struct CliPlatform {
     chain: WsChainProvider,
+    /// Chain roles this host serves, answered by `Features::supported_chains`.
+    chains: truapi_platform::HostChainSet,
     product_storage: Mutex<HashMap<String, HashMap<String, Vec<u8>>>>,
     core_storage: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
+    /// Device-scoped core slots, kept outside the per-user namespaces that
+    /// [`Self::switch_pairing_user_storage`] swaps. Peers address this install
+    /// by the key held here, so a user switch must not regenerate it.
+    device_storage: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
     product_storage_dir: Mutex<Option<PathBuf>>,
     core_storage_path: Mutex<Option<PathBuf>>,
+    device_storage_path: Option<PathBuf>,
     state_dir: Mutex<Option<PathBuf>>,
     pairing_scope: Option<PairingStorageScope>,
     preimages: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
     next_notification_id: AtomicU32,
     scheduled_notifications:
         Arc<Mutex<HashMap<api::NotificationId, api::HostPushNotificationRequest>>>,
-    approval: ApprovalPolicy,
+    approval: Mutex<ApprovalPolicy>,
     /// Consulted-approval transcript (`TRUAPI_APPROVALS_LOG`): one
     /// `<approved|denied> <action>` line per decided confirmation.
     approvals_log: Option<PathBuf>,
@@ -117,13 +118,12 @@ impl CliPlatform {
     /// Build a platform whose chain provider connects to the network's People
     /// chain and whose optional state directory backs product/core storage.
     pub fn new(
-        statement_store_url: impl Into<String>,
-        live_chain_endpoints: &[crate::network::ChainEndpoint],
+        network: crate::network::NetworkConfig,
         storage: Option<CliStoragePaths>,
         approval: ApprovalPolicy,
         ui: Option<UiHandle>,
     ) -> Arc<Self> {
-        let (product_storage_dir, legacy_product_storage_path, core_storage_path) = storage
+        let (product_storage_dir, core_storage_path) = storage
             .as_ref()
             .map(|paths| {
                 if let Err(err) = fs::create_dir_all(&paths.state_dir) {
@@ -135,37 +135,75 @@ impl CliPlatform {
                 }
                 (
                     Some(paths.product_storage_dir.clone()),
-                    Some(paths.state_dir.join("product-storage.json")),
                     Some(paths.state_dir.join("core-storage.json")),
                 )
             })
-            .unwrap_or((None, None, None));
+            .unwrap_or((None, None));
         let product_storage = product_storage_dir
             .as_deref()
-            .zip(legacy_product_storage_path.as_deref())
-            .map(|(directory, legacy)| load_product_storage(directory, legacy))
+            .map(load_product_storage)
             .unwrap_or_default();
         let core_storage = core_storage_path
             .as_deref()
             .map(load_hex_key_map)
             .unwrap_or_default();
+        // Anchored to the role-level bootstrap directory rather than the active
+        // user's, so switching users keeps this install's device identity.
+        let device_storage_path = storage.as_ref().map(|paths| {
+            let directory = paths
+                .pairing_scope
+                .as_ref()
+                .map(|scope| scope.bootstrap_dir.clone())
+                .unwrap_or_else(|| paths.state_dir.clone());
+            if let Err(err) = fs::create_dir_all(&directory) {
+                tracing::warn!(
+                    path = %directory.display(),
+                    %err,
+                    "could not create CLI device storage dir"
+                );
+            }
+            directory.join("device-storage.json")
+        });
+        let device_storage = device_storage_path
+            .as_deref()
+            .map(load_hex_key_map)
+            .unwrap_or_default();
 
         Arc::new(Self {
-            chain: WsChainProvider::new(statement_store_url, live_chain_endpoints),
+            chain: WsChainProvider::new(network.people_ws, network.live_chain_endpoints),
+            chains: network.host_chain_set(),
             product_storage: Mutex::new(product_storage),
             core_storage: Mutex::new(core_storage),
+            device_storage: Mutex::new(device_storage),
             product_storage_dir: Mutex::new(product_storage_dir),
             core_storage_path: Mutex::new(core_storage_path),
+            device_storage_path,
             state_dir: Mutex::new(storage.as_ref().map(|paths| paths.state_dir.clone())),
             pairing_scope: storage.and_then(|paths| paths.pairing_scope),
             preimages: Mutex::new(HashMap::new()),
             next_notification_id: AtomicU32::new(1),
             scheduled_notifications: Arc::new(Mutex::new(HashMap::new())),
-            approval,
+            approval: Mutex::new(approval),
             approvals_log: std::env::var_os("TRUAPI_APPROVALS_LOG").map(PathBuf::from),
             ui,
             prompt_lock: AsyncMutex::new(()),
         })
+    }
+
+    /// Return the policy used by future confirmation requests.
+    pub fn approval_policy(&self) -> ApprovalPolicy {
+        *self
+            .approval
+            .lock()
+            .expect("approval policy mutex poisoned")
+    }
+
+    /// Change how future confirmation requests are decided.
+    pub fn set_approval_policy(&self, approval: ApprovalPolicy) {
+        *self
+            .approval
+            .lock()
+            .expect("approval policy mutex poisoned") = approval;
     }
 
     fn core_key(key: &CoreStorageKey) -> Vec<u8> {
@@ -187,6 +225,22 @@ impl CliPlatform {
             return Ok(());
         };
         save_product_storage(&directory, product_id, values)
+    }
+
+    /// Whether a slot belongs to the install rather than the signed-in user.
+    fn is_device_scoped(key: &CoreStorageKey) -> bool {
+        matches!(key, CoreStorageKey::DeviceEncryptionKey)
+    }
+
+    fn persist_device_storage(&self) -> Result<(), String> {
+        let Some(path) = self.device_storage_path.as_deref() else {
+            return Ok(());
+        };
+        let storage = self
+            .device_storage
+            .lock()
+            .expect("device storage mutex poisoned");
+        save_hex_key_map(path, &storage)
     }
 
     fn persist_core_storage(&self) -> Result<(), String> {
@@ -273,10 +327,7 @@ impl CliPlatform {
 
         let mut target_core = load_hex_key_map(&target_core_path);
         target_core.extend(carried);
-        let mut target_products = load_product_storage(
-            &target_product_dir,
-            &target_state.join("product-storage.json"),
-        );
+        let mut target_products = load_product_storage(&target_product_dir);
         if migrating_bootstrap {
             target_products.extend(
                 self.product_storage
@@ -315,7 +366,7 @@ impl CliPlatform {
 
     /// Resolve a confirmation: auto-accept, or prompt y/n on the CLI.
     async fn decide(&self, action: &str, detail: String) -> bool {
-        let approved = match self.approval {
+        let approved = match self.approval_policy() {
             ApprovalPolicy::AutoAccept => {
                 if let Some(ui) = &self.ui {
                     ui.success(format!("Approved {action} automatically"), Some(detail));
@@ -435,8 +486,12 @@ impl CoreStorage for CliPlatform {
         &self,
         key: CoreStorageKey,
     ) -> Result<Option<Vec<u8>>, api::GenericError> {
-        Ok(self
-            .core_storage
+        let store = if Self::is_device_scoped(&key) {
+            &self.device_storage
+        } else {
+            &self.core_storage
+        };
+        Ok(store
             .lock()
             .expect("core storage mutex poisoned")
             .get(&Self::core_key(&key))
@@ -448,25 +503,45 @@ impl CoreStorage for CliPlatform {
         key: CoreStorageKey,
         value: Vec<u8>,
     ) -> Result<(), api::GenericError> {
+        let device_scoped = Self::is_device_scoped(&key);
         {
-            self.core_storage
+            let store = if device_scoped {
+                &self.device_storage
+            } else {
+                &self.core_storage
+            };
+            store
                 .lock()
                 .expect("core storage mutex poisoned")
                 .insert(Self::core_key(&key), value);
         }
-        self.persist_core_storage()
-            .map_err(|reason| api::GenericError { reason })
+        if device_scoped {
+            self.persist_device_storage()
+        } else {
+            self.persist_core_storage()
+        }
+        .map_err(|reason| api::GenericError { reason })
     }
 
     async fn clear_core_storage(&self, key: CoreStorageKey) -> Result<(), api::GenericError> {
+        let device_scoped = Self::is_device_scoped(&key);
         {
-            self.core_storage
+            let store = if device_scoped {
+                &self.device_storage
+            } else {
+                &self.core_storage
+            };
+            store
                 .lock()
                 .expect("core storage mutex poisoned")
                 .remove(&Self::core_key(&key));
         }
-        self.persist_core_storage()
-            .map_err(|reason| api::GenericError { reason })
+        if device_scoped {
+            self.persist_device_storage()
+        } else {
+            self.persist_core_storage()
+        }
+        .map_err(|reason| api::GenericError { reason })
     }
 }
 
@@ -576,6 +651,19 @@ fn emit_notification_event(ui: Option<&UiHandle>, event: SystemEvent) {
 }
 
 #[async_trait]
+impl PermissionStatusHost for CliPlatform {
+    async fn device_permission_status(
+        &self,
+        _request: api::HostDevicePermissionRequest,
+    ) -> Result<DevicePermissionStatus, api::GenericError> {
+        // A terminal has no OS permission gate, so every capability is
+        // `NotApplicable` rather than `Granted`: claiming a grant would assert
+        // state this host cannot see, and the stored product decision governs.
+        Ok(DevicePermissionStatus::NotApplicable)
+    }
+}
+
+#[async_trait]
 impl Permissions for CliPlatform {
     async fn device_permission(
         &self,
@@ -608,15 +696,19 @@ impl Permissions for CliPlatform {
 impl Features for CliPlatform {
     async fn feature_supported(
         &self,
-        _request: api::HostFeatureSupportedRequest,
+        request: api::HostFeatureSupportedRequest,
     ) -> Result<api::HostFeatureSupportedResponse, api::GenericError> {
-        Ok(api::HostFeatureSupportedResponse { supported: false })
+        let api::HostFeatureSupportedRequest::Chain { genesis_hash } = request;
+        let supported = self
+            .chains
+            .chains
+            .iter()
+            .any(|entry| entry.genesis_hash.as_slice() == genesis_hash.as_slice());
+        Ok(api::HostFeatureSupportedResponse { supported })
     }
 
     async fn supported_chains(&self) -> Result<truapi_platform::HostChainSet, api::GenericError> {
-        Err(api::GenericError {
-            reason: "the CLI host serves no product chains".to_string(),
-        })
+        Ok(self.chains.clone())
     }
 }
 
@@ -648,7 +740,7 @@ impl truapi_platform::AuthPresenter for CliPlatform {
             AuthState::Disconnected => {
                 ("disconnected".to_string(), SystemEvent::PairingDisconnected)
             }
-            AuthState::LoginFailed { reason } => (
+            AuthState::LoginFailed { reason, .. } => (
                 "failed".to_string(),
                 SystemEvent::PairingFailed {
                     reason: reason.clone(),
@@ -768,12 +860,38 @@ fn approval_summary(review: &UserConfirmationReview) -> (&'static str, String) {
                 review.requesting_product_id, review.target_product_id
             ),
         ),
+        UserConfirmationReview::ProductSubtree(review) => (
+            "resolve account subtree",
+            format!(
+                "Product {} requested its account from your device.",
+                review.product_id
+            ),
+        ),
     }
 }
 
 impl ThemeHost for CliPlatform {
-    fn subscribe_theme(&self) -> BoxStream<'static, Result<api::ThemeVariant, api::GenericError>> {
-        Box::pin(stream::once(async { Ok(api::ThemeVariant::Dark) }))
+    fn subscribe_theme(
+        &self,
+    ) -> BoxStream<'static, Result<api::HostThemeSubscribeItem, api::GenericError>> {
+        Box::pin(stream::once(async {
+            Ok(api::HostThemeSubscribeItem {
+                name: api::ThemeName::Default,
+                variant: api::ThemeVariant::Dark,
+            })
+        }))
+    }
+}
+
+impl LocaleHost for CliPlatform {
+    fn subscribe_locale(
+        &self,
+    ) -> BoxStream<'static, Result<api::HostLocaleSubscribeItem, api::GenericError>> {
+        Box::pin(stream::once(async {
+            Ok(api::HostLocaleSubscribeItem {
+                language_tag: "en".to_string(),
+            })
+        }))
     }
 }
 
@@ -805,46 +923,8 @@ struct ProductStorageDocument {
     values: HashMap<String, String>,
 }
 
-fn load_product_storage(
-    directory: &Path,
-    legacy_path: &Path,
-) -> HashMap<String, HashMap<String, Vec<u8>>> {
-    let legacy_exists = legacy_path.is_file();
-    let mut migration_safe = true;
+fn load_product_storage(directory: &Path) -> HashMap<String, HashMap<String, Vec<u8>>> {
     let mut products = HashMap::<String, HashMap<String, Vec<u8>>>::new();
-
-    if legacy_exists {
-        match read_string_map(legacy_path) {
-            Ok(values) => {
-                for (key, value) in values {
-                    match ProductStorageKey::decode(&key) {
-                        Ok(scoped) => {
-                            products
-                                .entry(scoped.product_id().to_string())
-                                .or_default()
-                                .insert(scoped.key().to_string(), value);
-                        }
-                        Err(error) => {
-                            migration_safe = false;
-                            tracing::warn!(
-                                path = %legacy_path.display(),
-                                %error,
-                                "could not migrate an unrecognized product storage key"
-                            );
-                        }
-                    }
-                }
-            }
-            Err(error) => {
-                migration_safe = false;
-                tracing::warn!(
-                    path = %legacy_path.display(),
-                    %error,
-                    "could not decode legacy product storage"
-                );
-            }
-        }
-    }
 
     let entries = match fs::read_dir(directory) {
         Ok(entries) => Some(entries),
@@ -877,36 +957,6 @@ fn load_product_storage(
                 continue;
             }
             products.entry(product_id).or_default().extend(values);
-        }
-    }
-
-    if legacy_exists && migration_safe {
-        let migrated = products.iter().try_for_each(|(product_id, values)| {
-            save_product_storage(directory, product_id, values)
-        });
-        match migrated {
-            Ok(()) => {
-                let backup = legacy_path.with_file_name("product-storage.v1.json.migrated");
-                if backup.exists() {
-                    tracing::warn!(
-                        path = %legacy_path.display(),
-                        backup = %backup.display(),
-                        "legacy product storage was migrated but its backup path already exists"
-                    );
-                } else if let Err(error) = fs::rename(legacy_path, &backup) {
-                    tracing::warn!(
-                        path = %legacy_path.display(),
-                        backup = %backup.display(),
-                        %error,
-                        "could not retain migrated product storage backup"
-                    );
-                }
-            }
-            Err(error) => tracing::warn!(
-                path = %legacy_path.display(),
-                %error,
-                "could not migrate legacy product storage"
-            ),
         }
     }
 
@@ -1077,7 +1127,7 @@ fn save_string_map(path: &Path, values: &HashMap<String, Vec<u8>>) -> Result<(),
     atomic_write(path, text.as_bytes())
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("storage path has no parent: {}", path.display()))?;
@@ -1117,7 +1167,7 @@ fn load_hex_key_map(path: &Path) -> HashMap<Vec<u8>, Vec<u8>> {
 
 /// Directory-safe name for one paired identity's storage namespace.
 ///
-/// The connected id is whatever the People-chain identity yields: a lite username
+/// The connected id is whatever the dotNS identity yields: a lite username
 /// when there is one, otherwise the free-form `full_username`. Only the former is
 /// guaranteed to satisfy [`crate::sessions::validate_name`], so a display name
 /// like `"Tarik Gul"` is rejected on both the space and the capitals.
@@ -1170,6 +1220,105 @@ fn save_hex_key_map(path: &Path, values: &HashMap<Vec<u8>, Vec<u8>>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The preset production builds from, so tests exercise the same config.
+    fn test_network() -> crate::network::NetworkConfig {
+        crate::network::Network::default().config()
+    }
+
+    /// Battery examples that preflight `getChainInfo` resolve the genesis they
+    /// ask for through this set, so an error here fails every one of them. The
+    /// ring-VRF examples are chain-dependent but not among them: they use the
+    /// hardcoded `PASEO_NEXT_V2_INDIVIDUALITY.genesis` and passed even while
+    /// this returned an error.
+    ///
+    /// Serving the preset's three roles unblocks the preflight in every example
+    /// that asks for one: `People` for account-alias, account-proof and both
+    /// create-transaction variants, and `AssetHub` for the other seventeen.
+    ///
+    /// `feature_supported` answers from the same set `supported_chains` serves, so
+    /// the two cannot disagree. The negatives are the malformed inputs, a well-formed
+    /// hash the host serves no role for, and the all-zero SSO sentinel — which the
+    /// provider does route, to the People fallback, yet is still not a served role.
+    #[test]
+    fn feature_supported_resolves_against_the_served_chain_set() {
+        let platform = CliPlatform::new(test_network(), None, ApprovalPolicy::AutoAccept, None);
+        let config = crate::network::Network::default().config();
+
+        let supported = |genesis: Vec<u8>| {
+            futures::executor::block_on(platform.feature_supported(
+                api::HostFeatureSupportedRequest::Chain {
+                    genesis_hash: genesis,
+                },
+            ))
+            .expect("feature_supported is wired")
+            .supported
+        };
+
+        // Every role the host serves answers supported. The reverse direction is the
+        // `unserved` assertion below, since every served role is now a real chain.
+        for entry in config.host_chain_set().chains {
+            assert!(
+                supported(entry.genesis_hash.to_vec()),
+                "{:?} is served but reported unsupported",
+                entry.identifier
+            );
+        }
+
+        // A well-formed hash the host does not serve is unsupported. Asset Hub used
+        // to be this case; without a stand-in, "supported" could degrade to "is 32
+        // bytes" and only the all-zero sentinel would notice.
+        let unserved = [0xab; 32];
+        assert!(
+            !config
+                .host_chain_set()
+                .chains
+                .iter()
+                .any(|entry| entry.genesis_hash == unserved),
+            "the stand-in must not be a served role"
+        );
+        assert!(!supported(unserved.to_vec()));
+
+        // A malformed genesis is unsupported, never a panic or a truncated match.
+        assert!(!supported(Vec::new()));
+        assert!(!supported(config.people_genesis[..31].to_vec()));
+        assert!(!supported(
+            [config.people_genesis.as_slice(), &[0u8]].concat()
+        ));
+        assert!(!supported(vec![0u8; 32]));
+    }
+
+    #[test]
+    fn supported_chains_answers_the_configured_network() {
+        let platform = CliPlatform::new(test_network(), None, ApprovalPolicy::AutoAccept, None);
+        let set = futures::executor::block_on(platform.supported_chains())
+            .expect("the CLI host serves the preset's chains");
+
+        let config = crate::network::Network::default().config();
+        assert_eq!(set.network, config.id);
+        let mut served = set
+            .chains
+            .iter()
+            .map(|entry| (entry.identifier, hex::encode(entry.genesis_hash)))
+            .collect::<Vec<_>>();
+        served.sort_by_key(|(identifier, _)| format!("{identifier:?}"));
+        let mut expected = vec![
+            (
+                api::ChainIdentifier::People,
+                hex::encode(config.people_genesis),
+            ),
+            (
+                api::ChainIdentifier::Bulletin,
+                hex::encode(config.bulletin_genesis),
+            ),
+            (
+                api::ChainIdentifier::AssetHub,
+                hex::encode(config.asset_hub_genesis),
+            ),
+        ];
+        expected.sort_by_key(|(identifier, _)| format!("{identifier:?}"));
+        assert_eq!(served, expected);
+    }
     use tempfile::tempdir;
 
     #[test]
@@ -1185,6 +1334,23 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn approval_policy_changes_apply_to_future_confirmations() {
+        let platform = CliPlatform::new(test_network(), None, ApprovalPolicy::Prompt, None);
+
+        assert_eq!(platform.approval_policy(), ApprovalPolicy::Prompt);
+        platform.set_approval_policy(ApprovalPolicy::AutoAccept);
+        assert_eq!(platform.approval_policy(), ApprovalPolicy::AutoAccept);
+        assert!(
+            platform
+                .decide("test action", "test detail".to_string())
+                .await
+        );
+
+        platform.set_approval_policy(ApprovalPolicy::Prompt);
+        assert_eq!(platform.approval_policy(), ApprovalPolicy::Prompt);
+    }
+
     /// A user id `validate_name` rejects must not leave the previous identity's
     /// storage mounted. `storage_user_id` falls back to `full_username`, a
     /// free-form People-chain display name, and `validate_name` rejects uppercase,
@@ -1196,8 +1362,7 @@ mod tests {
         std::fs::create_dir_all(&network_dir).expect("network dir");
 
         let platform = CliPlatform::new(
-            "",
-            &[],
+            test_network(),
             Some(CliStoragePaths::pairing(network_dir.clone())),
             ApprovalPolicy::AutoAccept,
             None,
@@ -1256,8 +1421,7 @@ mod tests {
         std::fs::create_dir_all(&network_dir).expect("network dir");
 
         let platform = CliPlatform::new(
-            "",
-            &[],
+            test_network(),
             Some(CliStoragePaths::pairing(network_dir)),
             ApprovalPolicy::AutoAccept,
             None,
@@ -1331,8 +1495,7 @@ mod tests {
         .expect("seed core storage");
 
         let platform = CliPlatform::new(
-            "",
-            &[],
+            test_network(),
             Some(CliStoragePaths::new(state_dir, product_dir)),
             ApprovalPolicy::AutoAccept,
             None,
@@ -1448,8 +1611,7 @@ mod tests {
         let temporary = tempdir().expect("create pairing storage root");
         let network_dir = temporary.path().join("testnet");
         let platform = CliPlatform::new(
-            "",
-            &[],
+            test_network(),
             Some(CliStoragePaths::pairing(network_dir.clone())),
             ApprovalPolicy::AutoAccept,
             None,
@@ -1491,21 +1653,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_pairing_storage_moves_to_the_first_resolved_user() {
+    fn device_encryption_key_outlives_pairing_user_switches() {
         let temporary = tempdir().expect("create pairing storage root");
         let network_dir = temporary.path().join("testnet");
-        let legacy_product_dir = network_dir.join("pairing-host/storage/default");
-        let product_key =
-            ProductStorageKey::new("product.dot", "theme").expect("product storage key");
-        save_product_storage(
-            &legacy_product_dir,
-            "product.dot",
-            &HashMap::from([("theme".to_string(), b"dark".to_vec())]),
-        )
-        .expect("write legacy pairing product storage");
         let platform = CliPlatform::new(
-            "",
-            &[],
+            test_network(),
             Some(CliStoragePaths::pairing(network_dir.clone())),
             ApprovalPolicy::AutoAccept,
             None,
@@ -1513,14 +1665,97 @@ mod tests {
 
         platform
             .switch_pairing_user_storage("alice.dot")
-            .expect("resolve legacy storage owner");
+            .expect("select alice");
+        futures::executor::block_on(
+            platform.write_core_storage(CoreStorageKey::DeviceEncryptionKey, vec![7; 32]),
+        )
+        .expect("write device key");
+
+        // Peers address this install by the matching public key, so switching
+        // users must not strand them on a regenerated one.
+        platform
+            .switch_pairing_user_storage("bob.dot")
+            .expect("select bob");
+        assert_eq!(
+            futures::executor::block_on(
+                platform.read_core_storage(CoreStorageKey::DeviceEncryptionKey)
+            )
+            .expect("read device key as bob"),
+            Some(vec![7; 32])
+        );
+
+        // A user-scoped slot stays isolated, so the routing is not simply
+        // making every slot global.
+        futures::executor::block_on(
+            platform.write_core_storage(CoreStorageKey::AutoSigningKeys, vec![1, 2, 3]),
+        )
+        .expect("write bob auto-signing keys");
+        platform
+            .switch_pairing_user_storage("alice.dot")
+            .expect("restore alice");
+        assert_eq!(
+            futures::executor::block_on(
+                platform.read_core_storage(CoreStorageKey::AutoSigningKeys)
+            )
+            .expect("read alice auto-signing keys"),
+            None
+        );
+
+        // It also survives a fresh process reading the same directories.
+        let restarted = CliPlatform::new(
+            test_network(),
+            Some(CliStoragePaths::pairing(network_dir)),
+            ApprovalPolicy::AutoAccept,
+            None,
+        );
+        assert_eq!(
+            futures::executor::block_on(
+                restarted.read_core_storage(CoreStorageKey::DeviceEncryptionKey)
+            )
+            .expect("read device key after restart"),
+            Some(vec![7; 32])
+        );
+    }
+
+    /// A pairing login writes product KV before its username is known, so the
+    /// bootstrap directory's products must follow the first resolved user
+    /// instead of being stranded outside every identity namespace.
+    #[test]
+    fn product_storage_written_before_the_username_carries_into_the_resolved_user() {
+        let temporary = tempdir().expect("create pairing storage root");
+        let network_dir = temporary.path().join("testnet");
+        let product_key =
+            ProductStorageKey::new("product.dot", "theme").expect("product storage key");
+        save_product_storage(
+            &network_dir.join("pairing-host/storage"),
+            "product.dot",
+            &HashMap::from([("theme".to_string(), b"dark".to_vec())]),
+        )
+        .expect("write bootstrap pairing product storage");
+        let platform = CliPlatform::new(
+            test_network(),
+            Some(CliStoragePaths::pairing(network_dir.clone())),
+            ApprovalPolicy::AutoAccept,
+            None,
+        );
+
+        platform
+            .switch_pairing_user_storage("alice.dot")
+            .expect("resolve the bootstrap storage owner");
 
         assert_eq!(
             futures::executor::block_on(platform.read(product_key.encode()))
-                .expect("read migrated product value"),
+                .expect("read carried product value"),
             Some(b"dark".to_vec())
         );
-        assert!(network_dir.join("alice.dot_pairing_host/storage").is_dir());
+        // Persisted, not merely carried in memory: a restart must find it too.
+        assert_eq!(
+            load_product_storage(&network_dir.join("alice.dot_pairing_host/storage")),
+            HashMap::from([(
+                "product.dot".to_string(),
+                HashMap::from([("theme".to_string(), b"dark".to_vec())]),
+            )])
+        );
     }
 
     #[test]
@@ -1591,7 +1826,7 @@ mod tests {
 
     #[test]
     fn cli_notifications_return_stable_ids_and_cancel_idempotently() {
-        let platform = CliPlatform::new("", &[], None, ApprovalPolicy::AutoAccept, None);
+        let platform = CliPlatform::new(test_network(), None, ApprovalPolicy::AutoAccept, None);
         let first = futures::executor::block_on(platform.push_notification(
             api::HostPushNotificationRequest {
                 text: "Hello".to_string(),
@@ -1624,8 +1859,7 @@ mod tests {
         let localhost =
             ProductStorageKey::new("localhost:3000", "theme").expect("localhost product key");
         let platform = CliPlatform::new(
-            "",
-            &[],
+            test_network(),
             Some(test_storage_paths(temporary.path(), "test")),
             ApprovalPolicy::AutoAccept,
             None,
@@ -1659,8 +1893,7 @@ mod tests {
 
         drop(platform);
         let restored = CliPlatform::new(
-            "",
-            &[],
+            test_network(),
             Some(test_storage_paths(temporary.path(), "test")),
             ApprovalPolicy::AutoAccept,
             None,
@@ -1683,15 +1916,13 @@ mod tests {
         let temporary = tempdir().expect("create session storage root");
         let key = ProductStorageKey::new("same.dot", "value").expect("product key");
         let first = CliPlatform::new(
-            "",
-            &[],
+            test_network(),
             Some(test_storage_paths(temporary.path(), "first")),
             ApprovalPolicy::AutoAccept,
             None,
         );
         let second = CliPlatform::new(
-            "",
-            &[],
+            test_network(),
             Some(test_storage_paths(temporary.path(), "second")),
             ApprovalPolicy::AutoAccept,
             None,
@@ -1717,74 +1948,6 @@ mod tests {
         assert_ne!(
             fs::read_to_string(first_path).expect("read first session file"),
             fs::read_to_string(second_path).expect("read second session file")
-        );
-    }
-
-    #[test]
-    fn legacy_product_storage_migrates_and_keeps_a_backup() {
-        let temporary = tempdir().expect("create migration root");
-        let first = ProductStorageKey::new("first.dot", "alpha").expect("first product key");
-        let second = ProductStorageKey::new("second.dot", "beta").expect("second product key");
-        let legacy_path = temporary.path().join("product-storage.json");
-        save_string_map(
-            &legacy_path,
-            &HashMap::from([
-                (first.encode(), b"one".to_vec()),
-                (second.encode(), b"two".to_vec()),
-            ]),
-        )
-        .expect("write legacy product storage");
-
-        let platform = CliPlatform::new(
-            "",
-            &[],
-            Some(test_storage_paths(temporary.path(), "test")),
-            ApprovalPolicy::AutoAccept,
-            None,
-        );
-
-        assert!(!legacy_path.exists());
-        assert!(
-            temporary
-                .path()
-                .join("product-storage.v1.json.migrated")
-                .is_file()
-        );
-        assert_eq!(
-            fs::read_dir(temporary.path().join("storage").join("test"))
-                .expect("list migrated product files")
-                .count(),
-            2
-        );
-        let values = futures::executor::block_on(async {
-            (
-                platform.read(first.encode()).await.expect("read first"),
-                platform.read(second.encode()).await.expect("read second"),
-            )
-        });
-        assert_eq!(values, (Some(b"one".to_vec()), Some(b"two".to_vec())));
-    }
-
-    #[test]
-    fn corrupt_legacy_product_storage_is_not_marked_as_migrated() {
-        let temporary = tempdir().expect("create corrupt migration root");
-        let legacy_path = temporary.path().join("product-storage.json");
-        fs::write(&legacy_path, "{not-json").expect("write corrupt legacy storage");
-
-        let _platform = CliPlatform::new(
-            "",
-            &[],
-            Some(test_storage_paths(temporary.path(), "test")),
-            ApprovalPolicy::AutoAccept,
-            None,
-        );
-
-        assert!(legacy_path.is_file());
-        assert!(
-            !temporary
-                .path()
-                .join("product-storage.v1.json.migrated")
-                .exists()
         );
     }
 }

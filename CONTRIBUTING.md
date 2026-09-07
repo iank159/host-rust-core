@@ -3,7 +3,7 @@
 ## Reporting Issues
 
 If you have found what you think is a bug,
-please [file an issue](https://github.com/paritytech/truapi/issues/new/choose).
+please [file an issue](https://github.com/paritytech/host-rust-core/issues/new/choose).
 
 ## Suggesting New Features
 
@@ -25,11 +25,12 @@ For larger changes that need cross-team discussion, use the RFC process:
 4. The PR will be auto-added to the project board for tracking and review
 5. When the PR is approved and merged, CI automatically assigns the next sequential number, renames the file, and appends it to `docs/rfcs/_index.md`
 
-**Important:** RFC PRs must include corresponding changes to the TrUAPI Rust
-interfaces in `rust/crates/truapi/`. A CI check (`check-rfc.yml`) enforces
-this — PRs that touch `docs/rfcs/` without also modifying `rust/crates/truapi/`
-will fail. This ensures every RFC ships with a concrete API change, not just
-prose.
+A CI check (`check-rfc.yml`) reads the RFC documents a PR touches. A new RFC
+needs frontmatter with a `title` and an `owner`, a `## Summary`, a
+`## Motivation`, and a section describing the approach. Any RFC the PR touches
+must also be free of unedited template text and of `TODO`, `TBD` or `FIXME`.
+Implementation is not required in the same PR: it is tracked on the RFC's issue,
+which carries a task per host alongside the Rust one.
 
 If you use Claude Code, the [`rfc`](.claude/skills/rfc/SKILL.md) skill is highly recommended for drafting RFCs — invoke it with `/rfc` to turn your notes into a well-structured document that follows the template above.
 
@@ -69,9 +70,14 @@ the full list of targets.
 ### Getting started
 
 ```bash
-make setup    # submodules + JS dependencies
+make setup    # submodules, JS dependencies, and the generated outputs
 make build    # Rust workspace + TypeScript client
 ```
+
+The generated Rust, TypeScript and Swift outputs are git-ignored, so a fresh
+checkout has none of them and `truapi-server` does not compile until they
+exist. `make setup` produces them; `make codegen` regenerates them on their
+own.
 
 ### Making changes to the API
 
@@ -89,6 +95,9 @@ make playground   # rebuild the playground against the refreshed snapshot
 make test     # Rust + TypeScript client tests
 make check    # full suite: build, fmt, clippy, test, TS tests, playground build + lint
 ```
+Every target that compiles `truapi-server` depends on `check-generated`, so a
+missing generated file names itself and points at `make codegen` instead of
+failing inside rustc.
 
 ## Pull requests
 
@@ -99,4 +108,4 @@ Use an appropriate commit type. Be especially careful with breaking changes.
 
 ## Releasing
 
-See [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md) for the `@parity/truapi` npm publishing flow.
+See [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md) for the release flow, covering the npm packages and the iOS and Android host artifacts.

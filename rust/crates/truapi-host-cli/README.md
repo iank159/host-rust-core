@@ -20,66 +20,250 @@ One binary, `truapi-host`:
 | Command | Role |
 | --- | --- |
 | `pairing-host` | Seedless host: serves product frames, emits pairing deeplinks, and can run product scripts. |
-| `signing-host` | Wallet-local host: owns signer identity, can run product scripts, accepts pairing deeplinks, registers statement allowance on-chain, signs. |
-| `identity-check` | Probe the root and canonical `uid.dot` identity account for a registered username. |
-| `alloc-check` | Diagnose (or `--submit`) on-chain statement-store allowance: ring membership, chosen slot, and the `set_statement_store_account` extrinsic. |
+| `signing-host` | Wallet-local host: owns signer identity, can run product scripts, decodes copied pairing QR images or accepts deeplinks, registers statement allowance on-chain, signs. |
+| `identity-check` | Probe the root and canonical `uid.dot` identity account for a registered username (read from the dotNS contracts on Asset Hub). |
+| `register-name` | Register a full-person username via `DotnsGateway.register_name` on Asset Hub, linked to a lite username or standalone with a chat key. |
+| `alloc-check` | Diagnose (or `--submit`) on-chain statement-store allowance: ring membership, chosen slot, and the `set_statement_store_account` extrinsic. On a full period it prints each occupied slot's age and which one would be replaced. |
+| `pgas-check` | Diagnose (or `--submit`) an Asset Hub PGAS allowance claim: ring membership on People, whether Asset Hub has imported that ring revision, the day's first unclaimed slot, and the `Pgas.claim_pgas` extrinsic. |
 
 The repository's `make e2e-dotli` target builds this binary and runs the
 dotli/playground Diagnosis suite with a non-interactive signing-host responder.
 It verifies the initial pairing, remote signing, host sign-out, and
 same-account reconnect without the external signer-bot service.
 
-## Quick start
+## Install
 
 ```bash
-make headless install  # build dependencies and install truapi-host once
+curl -fsSL https://raw.githubusercontent.com/paritytech/host-rust-core/main/scripts/truapi-host-installer.sh | bash
 truapi-host signing-host
 ```
+
+Prebuilt binaries exist for `aarch64-apple-darwin`,
+`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`. The Linux
+binaries are statically linked, so they run on any distribution. The installer
+puts each version in `$XDG_DATA_HOME/truapi-host/versions/<version>/` and
+symlinks `~/.local/bin/truapi-host` through a `current` link, so an update only
+moves that one link.
+
+| Variable | Effect |
+| --- | --- |
+| `TRUAPI_HOST_VERSION` | Install this version instead of the current stable one. |
+| `TRUAPI_HOST_INSTALL_DIR` | Version store, default `$XDG_DATA_HOME/truapi-host`. |
+| `TRUAPI_HOST_BIN_DIR` | Directory the `PATH` symlink goes in, default `~/.local/bin`. |
+
+Product scripts (`--script`, `/script`) work from an installed binary: the
+archive ships a `runner.js` with the `@parity/truapi` client bundled in. You
+still need `bun` on `PATH`, since it executes the runner and your script.
 
 Product frames use a private, per-process WebSocket-over-Unix-domain-socket by
 default, so starting either host does not reserve a TCP port. Pass
 `--frame-listen 127.0.0.1:0` to expose an ordinary loopback WebSocket instead;
 this is required for browser clients, which cannot open filesystem sockets.
 
-The signing host opens an interactive terminal where you can paste a pairing
-link, type `/pair <link>`, run `/script`, or use `/help` to discover the
-available commands. It uses `--mnemonic` / `HOST_CLI_SIGNER_MNEMONIC` if set.
+### Staying current
+
+A managed install checks for a new release at most once every four hours,
+alongside whatever command you ran rather than delaying it, and installs it into
+the version store. A command that finishes first waits for the download, so even
+a one-shot run lands the update; it prints a line while downloading. The running
+process is never replaced underneath itself: the new version takes effect the
+next time you start `truapi-host`, and the CLI says so when one is waiting.
+Every archive is checked against its published SHA-256 before it is unpacked.
+
+```bash
+truapi-host update            # check and install now
+truapi-host --version         # what is running
+TRUAPI_HOST_NO_UPDATE=1 ...   # never check
+```
+
+Binaries that the installer did not put in place — a `cargo install` copy, a
+source build, a distro package — are detected and never modified. A local build
+says so on every run and prints the install command, since it otherwise looks
+identical to a managed install that is quietly up to date.
+
+The two install routes shadow each other depending on `PATH` order, so each one
+clears the other: installing removes a `cargo install` copy, and
+`make headless install` removes a prebuilt install first. To remove a prebuilt
+install without replacing it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/paritytech/host-rust-core/main/scripts/truapi-host-installer.sh | bash -s -- --uninstall
+```
+
+`make e2e-cli-update` exercises the whole chain locally: it packages the binary,
+serves a fake release over loopback, installs it with the real installer, and
+updates it. Nothing contacts GitHub.
+
+### Building from source
+
+A source build resolves the product-script runner from the checkout, so it also
+needs the generated `@parity/truapi` sources. (An installed release ships its
+own bundled runner and does not.) To build and install the CLI yourself:
+
+```bash
+make headless install  # build dependencies and install truapi-host once
+truapi-host signing-host
+```
+
+### Raw proof contexts (development only)
+
+A product can bind a ring-VRF proof to 32 bytes of its choosing instead of a
+product-namespaced context by calling `development_createAccountProof` from
+`@parity/truapi`; the signing host honours it as is. Yet to be removed before a
+production release.
+
+### Browser products
+
+`truapi-host dev` is one command for "run this product as if it were inside a
+host". It starts a signing host on loopback, waits for the signer, then runs the
+wrapped development command with the host already live:
+
+```bash
+truapi-host dev -- yarn dev
+```
+
+The product reaches it through a development-only tag, which the host serves
+itself:
+
+```jsx
+{process.env.NODE_ENV === "development" && (
+  <script src="http://127.0.0.1:9955/bootstrap.js" />
+)}
+```
+
+That script installs the same `window.__HOST_API_PORT__` a native webview host
+injects, so the SDK adopts it with no product-side package, import, or
+environment variable. `--app-port` names the development server's port when it
+is not 3000, and the product id defaults to that origin, so the host and the
+product cannot disagree about who they are. `--port` changes the bridge and
+frame port, but the development-only tag must change to the same value.
+
+On Unix the development command starts in a process group owned by the CLI. If
+the direct launcher exits, or the CLI receives SIGINT or SIGTERM, the CLI sends
+SIGTERM to the complete group, waits up to five seconds, then sends SIGKILL if
+anything remains. This catches the intermediate processes that package
+managers put in front of the actual dev server. A natural launcher exit keeps
+its exit status; an interrupted run exits with status 130. Non-Unix platforms
+stop and reap the direct child.
+
+A host that should outlive the development server, or one whose confirmations
+you want to approve by hand in the terminal UI, is the same host started
+directly with your development server run separately. Every host mode serves the
+bridge script, so the product tag is unchanged:
+
+```bash
+truapi-host signing-host --frame-listen 127.0.0.1:9955 --product-id my-product.dot
+```
+
+A product that would rather name the endpoint itself can skip the tag and call
+the SDK directly, before anything else touches the client:
+
+```ts
+import { connectWebSocketHost } from "@parity/truapi/sandbox";
+
+connectWebSocketHost("ws://127.0.0.1:9955");
+```
+
+TCP frame connections are accepted only from loopback peers. Browser WebSocket
+requests must also carry a `localhost` or loopback-IP `Origin`. WebSocket is not
+subject to CORS, so without both checks another page or remote non-browser
+client could drive a host that auto-approves confirmations. Unix-socket clients
+and loopback TCP clients that send no `Origin` are treated as local processes.
+
+The product is then detected as hosted and holds the real product account for
+its own `.dot` name, so signing, statements, entropy, permissions and storage
+all take their production code paths with no phone involved. `--product-id` is
+not optional: the host derives the product account from it and refuses to _sign_
+for any other product id, and a mismatch only surfaces later, as a
+`PermissionDenied` on the first signature.
+
+Two players on one machine means two hosts, each with its own session and port
+(`--session bob --frame-listen 127.0.0.1:9956`), and a second product instance
+pointed at the second port. Sessions isolate the signer, the storage and the
+permissions.
+
+The signing host opens an interactive terminal where you can type `/pair` and
+press Ctrl-V, use the terminal's paste shortcut, or drop an image file. You can
+also provide an image file or deeplink with `/pair <value>`, run `/script`, or
+use `/help` to discover the available commands. It uses `--mnemonic` /
+`HOST_CLI_SIGNER_MNEMONIC` if set.
 Otherwise it auto-selects or creates a stored account under `--base-path` (default
 `$XDG_STATE_HOME/truapi-host` or `~/.local/state/truapi-host`), attests it
 through the identity backend, waits for ring readiness, and rotates when the
-current account exhausts Statement Store slots.
+current account exhausts Statement Store slots and no saved pairing depends on
+its identity. A full period replaces the oldest slot past the runtime's
+replacement cooldown, so rotation only happens when no slot is replaceable.
 
 ### Interactive terminal UI
 
 In a TTY, both hosts open the same scrollable transcript above a single command
 bar. Host lifecycle events, tracing logs, every incoming SSO request, script
 stdout/stderr, commands, and approval prompts all use that transcript, so
-background output cannot overwrite input. On `signing-host`, `--deeplink URL`
-opens the UI and starts the pairing response after initialization.
+background output cannot overwrite input. The status bar shows the active log
+value. On
+`signing-host`, `--deeplink URL` opens the UI and starts the pairing response
+after initialization.
 
 Commands always start with `/`:
 
 | Command | Result |
 | --- | --- |
+| `/pair` | Wait for a pairing QR image from Ctrl-V, terminal paste, or drag-and-drop (signing host). |
+| `/pair <image-path>` | Decode a pairing QR from a PNG, JPEG, or WebP image (signing host). |
 | `/pair <url>` | Validate and answer a `polkadotapp://pair?...` deeplink (signing host). |
+| `/devices` or `/devices --list` | List every paired device saved for the active signing-host session. |
+| `/devices --remove <statement-account-id>` | Remove one paired device by its 32-byte statement account ID. |
+| `/approval` | Show whether signing-host confirmations are manual or automatic. |
+| `/approval manual` | Prompt for every future signing-host confirmation. |
+| `/approval automatic` | Approve every future signing-host confirmation automatically. |
 | `/script` | Reopen the session's last TypeScript scratch script (or create one), then run it. |
 | `/script <path>` | Remember and run an existing JS/TS product script through the public frame endpoint. |
-| `/login` | Start pairing for the selected product and copy its deeplink to the clipboard. |
+| `/login` | Start pairing for the selected product, show its QR code, and copy its deeplink to the clipboard. |
 | `/logout` | Disconnect the pairing host and discard its old pairing keypair. |
-| `/log <level>` | Change tracing to `error`, `warn`, `info`, `debug`, or `trace`. |
+| `/log <level>` | Save tracing as `error`, `warn`, `info`, `debug`, or `trace`, and apply it now. |
 | `/product` | Show the currently selected product. |
 | `/product <id>` | Switch the product used by future scripts and frame connections. |
 | `/session` | Show the current session name, path, and user id (signing host). |
 | `/session <name>` | Switch to or create an isolated signing-host session. |
+| `/session --mnemonic "<phrase>"` | Import an existing signer as a durable session. |
 | `/session --list` | List user sessions for the current network. |
+| `/session --clear <name>` | Permanently clear one signing-host session. |
+| `/session --clear-all` | Permanently clear every signing-host session for the current network. |
 | `/help` | Show commands and keyboard shortcuts. |
 | `/clear` | Clear the visible transcript. |
 | `/copy` | Copy the retained transcript to the system clipboard. |
 | `/quit` | Shut down cleanly. |
 
+### Pasting a pairing QR image
+
+Copy the QR image shown by the app, run `/pair` in an interactive signing host,
+then press Ctrl-V or use the terminal's normal paste shortcut, such as Command-V
+on macOS. Both forms read image pixels from the operating-system clipboard, so
+the image is not converted to terminal text and the flow works inside tmux.
+
+While `/pair` is waiting, you can also drag an image file into the terminal. If
+the terminal inserts the path without submitting it, press Enter. Raw, quoted,
+shell-escaped, and `file://` paths are accepted. `/pair <image-path>` remains
+available for direct file input. PNG, JPEG, and WebP files are supported.
+One-shot `exec` mode accepts an image path or deeplink but cannot wait for a
+clipboard paste or drop.
+
+Clipboard and file images are decoded in memory and are never written to a
+temporary file. The decoder accepts regular and light-on-dark QR codes, including
+the circular finder styling used by Polkadot apps. It distinguishes an image
+without a QR code, an unrelated QR code, and multiple pairing codes. Copy another
+image and paste again after a clipboard error, or press Ctrl-C to cancel.
+
+Images are limited to 8192 pixels per edge and 24 million pixels. Image files are
+also limited to 64 MiB. The decoded value must be exactly one valid
+`polkadotapp://pair?handshake=...` proposal before it reaches the existing
+pairing responder.
+
 Typing `/` opens autocomplete. Up/Down selects a completion; with the menu
 closed it navigates process-local command history. Tab inserts a completion,
-and `/script` completes filesystem paths. Ctrl-U/Ctrl-D scroll by half a
+and `/script` completes filesystem paths. Mnemonic characters are masked while
+typing and mnemonic commands are never retained in command history or the
+transcript. Ctrl-U/Ctrl-D scroll by half a
 viewport, End restores auto-follow, Esc closes autocomplete, and Ctrl-C clears
 input, cancels a running command, or exits when idle. Deeplinks are deliberately
 not persisted in history across processes.
@@ -89,9 +273,13 @@ current signing host, and removes the old pairing identity. The next product
 login request or operator `/login` generates a new keypair and emits a fresh
 link that can be answered by another signing host. `/login` uses the current
 `/product` selection, copies the generated deeplink to the system clipboard,
-and remains interactive while the TUI renders pairing progress. A clipboard
-failure is reported without cancelling pairing. Logout does not clear product
-storage, scripts, or the selected product.
+and remains interactive while the TUI renders a scannable QR code and pairing
+progress. Product-driven login requests show the same QR code without changing
+clipboard contents. The raw link remains in the transcript, and a terminal
+that cannot fit the whole QR falls back to that link instead of wrapping or
+clipping it. A clipboard or QR-rendering failure is reported without cancelling
+pairing.
+Logout does not clear product storage, scripts, or the selected product.
 
 Both `pairing-host` and `signing-host` use the same interactive UI and command
 bar. It uses a quiet, command-centered transcript: submitted
@@ -118,8 +306,9 @@ Bare `/script` reopens the last script recorded for the active session,
 including a path previously selected with `/script <path>`. If that file is
 missing or the session has no script yet, it creates a durable Bun TypeScript
 file under the active host state's `scripts/` directory. The dependency-free
-starter uses ANSI colors and calls `truapi.account.getUserId()`. Scripts opened
-from an npm project can import packages installed by that project.
+starter calls `truapi.account.getUserId()` and prints the returned user id.
+Scripts opened from an npm project can import packages installed by that
+project.
 The TUI temporarily yields the terminal to `$VISUAL`, then `$EDITOR`, or
 `vi` when neither is set. After the editor exits successfully, the TUI is
 restored and the saved script runs through the public frame endpoint. Editor
@@ -128,22 +317,43 @@ settings containing arguments, such as `EDITOR='code --wait'`, are supported.
 Managed sessions isolate signer accounts, product/core storage, and permissions.
 Once a signer identity is known, its public session name is the Lite username
 and its files live under
-`<base-path>/<network>/<username>_signing_host`. Provisional and legacy named
-sessions are promoted to that user-owned root, so an old name such as `pgtest`
-does not remain the durable namespace. The selected username is remembered per
+`<base-path>/<network>/<username>_signing_host`. Provisional named sessions
+are promoted to that user-owned root, so an old name such as `pgtest` does not
+remain the durable namespace. The selected username is remembered per
 network but is not repeated in the status bar as a separate session field.
 `default` remains only as a compatibility/bootstrap location until a username
 is resolved. It is hidden from session completion and listing and cannot be
 selected with `/session default`. User session names contain lowercase ASCII
 letters, digits, `.`, `_`, or `-`; they cannot be paths. Switching prepares the
-target while the old session remains active, then stops its pairing responder
-and resets product WebSocket connections so clients reconnect against the new
-runtime.
+target while the old session remains active, then stops all responders for the
+old session, resets product WebSocket connections so clients reconnect against
+the new runtime, and restores every paired device saved for the target session.
+
+`/session --mnemonic "<phrase>"` brings an already-onboarded account into the
+session catalog. The host derives its `uid.dot` identity, reads any existing
+full or Lite username from dotNS, falls back to the identity backend's assigned
+username records when no dotNS mirror exists, and confirms its People or
+LitePeople ring membership. This lookup is read-only and never registers a new
+username. On success, the resolved identity username becomes the session name;
+only an account absent from both sources uses a deterministic
+`imported-<key fingerprint>` name and connects the account without username
+metadata. The mnemonic is written to that session's `0600` account store and
+the exact account record is remembered for restart. An invalid phrase or an
+account without ring membership on the selected network leaves the current
+runtime active. A username-less session can sign and connect, but
+`account.getUserId()` cannot return a primary username until one source has a
+record. Use the interactive command when practical: putting the same command in
+`exec` also puts the phrase in your shell's arguments/history.
+
 New auto-managed accounts use the session name as their Lite username prefix;
 characters other than lowercase letters are omitted. For example, session
 `pgtest` creates usernames beginning with `pgtest`. An explicit
 `--lite-username-prefix` takes precedence, and `default` retains the historical
-`headless` prefix.
+`headless` prefix. Prefixes are used unchanged because dotNS assigns the
+numerical alias; session names with fewer than six letters use `session`.
+`--reserved-username <label>` additionally reserves a
+full-person base name on dotNS for a newly created account, to be claimed later
+with `register-name`; the CLI refuses labels the registrar has already minted.
 The selected username and last script reference are cached in `session.json`
 inside the displayed session path. Scratch scripts use a portable filename;
 explicit scripts use an absolute path. On restart, an
@@ -153,6 +363,39 @@ session's editor context. A session with no signer yet reports
 `<not provisioned>` and the transcript prompts the user to run
 `/session <name>`. Inspecting with bare `/session` never starts network
 onboarding; naming a different session creates and connects its user.
+
+Each managed session stores all of its paired hosts in `paired-hosts.json`.
+Mutations are serialized through `paired-hosts.json.lock`. `/pair` inserts or
+updates the host selected by its statement account ID only after the encrypted
+handshake response is submitted, and leaves every other responder running.
+Interactive mode and `--serve` restore responders for all saved hosts at
+startup. Transient responder failures and ended subscriptions are retried with
+backoff. A remote `Disconnected` message removes only that peer's saved pairing
+and responder.
+
+Handled SSO request IDs are stored per signing identity and paired host. The
+signing host records a request before executing it, so restarting or retrying a
+responder acknowledges an unexpired duplicate without repeating its side
+effects.
+Missing or overly distant request expiry is bounded to the seven-day SSO
+statement lifetime.
+
+`/devices` and `/devices --list` show the saved statement account IDs in stable
+order with available host and platform metadata. Interactive
+`/devices --remove <statement-account-id>` asks for confirmation. The same
+command through `exec` is an explicit one-shot removal and runs without another
+prompt. Removing one device stops only its responder and allowance renewal. The
+other saved pairings and the signing identity are unchanged.
+
+`/session --clear <name>` permanently deletes that session's local signer
+keys, scripts, core/product storage, and permissions. `/session --clear-all`
+does the same for every signing-host session on the current network, including
+the network's signing-host bootstrap state, while preserving other networks and
+pairing-host state. Neither command deregisters an on-chain username. The interactive UI
+asks for `[y/N]` confirmation. `exec` treats the explicit one-shot command as
+confirmation and runs it immediately. Clearing an inactive named session keeps
+the host running; clearing the active session or all sessions stops the signing
+host after its runtime and product connections have shut down.
 
 Select or create a session at startup with:
 
@@ -170,15 +413,24 @@ come first):
 
 ```bash
 truapi-host signing-host exec '/session'
+truapi-host signing-host exec '/session --clear alice.01'
+truapi-host signing-host exec '/session --clear-all'
 truapi-host signing-host --auto-accept exec '/script ./js/scripts/ring-vrf-smoke.ts'
 truapi-host signing-host exec '/pair polkadotapp://pair?handshake=...'
+truapi-host signing-host --session alice.01 exec '/devices'
+truapi-host signing-host --session alice.01 exec '/devices --list'
+truapi-host signing-host --session alice.01 exec '/devices --remove 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 ```
 
 `exec` does not enable raw mode or emit terminal controls. Command results go
 to stdout, diagnostics go to stderr, and the process exits when the command
 finishes. Starting `signing-host` without `--script` or `exec` while either
-stdin or stdout is not a TTY is an invocation error. The existing `--script`
-one-shot mode remains supported.
+stdin or stdout is not a TTY is an invocation error unless `--serve` is used.
+The existing `--script` one-shot mode remains supported. Neither one-shot mode
+restores saved responders. Only a deeplink supplied for that run is answered,
+and a managed session still saves that pairing for a later interactive or
+`--serve` run. By contrast, an explicit startup mnemonic has no managed session,
+so its pairing runs only for the current process and `/devices` is unavailable.
 
 ## Writing a product script
 
@@ -203,7 +455,8 @@ const login = await truapi.account.requestLogin({ reason: undefined });
 if (
   !login.isOk() ||
   (login.value !== "Success" && login.value !== "AlreadyConnected")
-) throw new Error("login failed");
+)
+  throw new Error("login failed");
 
 const res = await truapi.signing.signRaw({
   account: host.productAccount(),
@@ -211,11 +464,14 @@ const res = await truapi.signing.signRaw({
 });
 res.match(
   (v) => console.log("signature", v.signature),
-  (e) => { throw new Error(JSON.stringify(e)); },
+  (e) => {
+    throw new Error(JSON.stringify(e));
+  },
 );
 ```
 
-`--product-id` (a `.dot` name or `localhost` identifier; default
+`--product-id` (a dotNS name ending in `.dot`, `.paseo` or `.testnet`, or a
+`localhost` identifier; default
 `headless-playground.dot`) sets the initial product. `/product <id>` changes it
 for the lifetime of the process. Switching disconnects active product
 WebSockets so clients reconnect with a new product context; the network,
@@ -227,18 +483,16 @@ the selected id, so the newly selected product sees its own state. The next
 Pairing-host state follows the same identity rule under
 `<base-path>/<network>/<username>_pairing_host`. Before the first identity is
 known it uses the small `<network>/pairing-host` bootstrap; connecting moves
-legacy bootstrap data to the first resolved user. After `/logout`, connecting
+that bootstrap data to the first resolved user. After `/logout`, connecting
 as a different user swaps to that user's KV/core namespace instead of carrying
 the previous user's product data forward.
 
 Product-local KV is persisted independently under each identity root as
 `storage/<safe-product-slug>--<hash>.json`. Each document records its normalized
-product id and raw product keys. On first use, the older combined
-`product-storage.json` in that profile is split into those files and retained
-as `product-storage.v1.json.migrated`. Product and core JSON writes use a
-flushed temporary file and atomic rename.
+product id and raw product keys. Product and core JSON writes use a flushed
+temporary file and atomic rename.
 
-Five scripts ship under `js/scripts/`:
+Six scripts ship under `js/scripts/`:
 
 - `battery.ts` — the generated full-surface gate. It discovers every method
   from the same code-generated example manifest as the playground Diagnosis,
@@ -271,6 +525,7 @@ Five scripts ship under `js/scripts/`:
   scripts/battery.sh --pairing-host     # paired phase only
   make e2e-signing-cli                  # direct phase only
   make e2e-pairing-cli                  # paired phase only
+  make e2e-chat-cli                     # chat phase only
   scripts/battery.sh --release          # release binary
   scripts/battery.sh -- --network foo   # arguments after `--` go to every host process
   ```
@@ -305,9 +560,16 @@ Five scripts ship under `js/scripts/`:
 - `whoami.ts` — calls `getUserId` and prints `WHOAMI <primary username>`; this
   remains available as an explicit `/script <path>` example.
 - `signing-smoke.ts` — a focused product-account signing check.
-- `ring-vrf-smoke.ts` — calls `getAccountAlias` and `createAccountProof`
-  against the Paseo Next v2 LitePeople ring, then verifies both calls return
-  the same contextual alias.
+- `smart-contract-allowance-smoke.ts` — requests a PGAS allowance for product
+  account index 0. Reports `Allocated` against `paseo-next-v2`; a host that serves
+  no Asset Hub role reports `NotAvailable` rather than failing. The direct path asks
+  for `Increase`, so each run submits a real claim and spends one of the day's slots
+  rather than noticing the account is already funded: repeat runs within a day can
+  exhaust them and then fail for that reason rather than a regression. The host logs
+  the real cause, which the wire value flattens to `NotAvailable`.
+- `ring-vrf-smoke.ts` — registers and lists an explicit RFC-0024 key, derives
+  its alias, verifies a fresh non-member key returns `NotMember` for a proof,
+  and exercises direct ring-VRF signing.
 - `preimage-smoke.ts` — a focused Bulletin preimage flow check.
 
 The generated examples are baked to the `truapi-playground.dot` product. With
@@ -318,8 +580,10 @@ long-term storage before returning the product-scoped Bulletin allowance key.
 It needs the playground's deps (`cd playground && yarn install --frozen-lockfile`;
 bun does not resolve the `link:` dependency on `@parity/truapi`). Repeated live
 runs can exhaust the signer's per-period Statement Store or Bulletin allocation
-slots; the signing host rotates auto-managed signer accounts when Statement
-Store slots are exhausted.
+slots. Statement Store registration replaces the oldest slot whose replacement
+cooldown has elapsed, so exhaustion needs every slot to be within that
+cooldown; the signing host rotates auto-managed signer accounts if that
+happens.
 
 ## Confirmations
 
@@ -335,10 +599,20 @@ stdin safely rejects instead of hanging. Same-product Ring-VRF requests do not
 prompt, matching the iOS signing host. Pass `--auto-accept` for unattended
 runs; every auto-approved decision is still printed.
 
+The interactive signing host can inspect or change its running policy with
+`/approval`, `/approval manual`, and `/approval automatic`. A change applies to
+future confirmations and survives session switches within that process. It is
+not saved, so the next process starts from `--auto-accept` again. These commands
+are unavailable on the pairing host and in one-shot `exec` mode.
+
 ## Logging
 
 Use the global `--log-level` option (`error`, `warn`, `info`, `debug`, or
 `trace`) before or after the subcommand, or `/log <level>` in the terminal UI.
+`/log` saves the level under `--base-path`, so pairing and signing hosts restore
+it after restart. A one-off `--log-level` or `TRUAPI_HOST_LOG` value overrides
+the saved level for that process without changing it; otherwise the fallback is
+`info`.
 Every decoded inbound SSO request and every published response is visible
 regardless of the selected level. Stable response entries include the request
 name, statement and remote message ids, protocol outcome, and elapsed time;
@@ -355,25 +629,55 @@ truapi-host signing-host --log-level trace --deeplink '<deeplink>' --auto-accept
 Debug and trace output may contain product signing payloads. `RUST_LOG` takes
 precedence at startup and remains available for module-specific filters, except
 that the noisy `rustls` and `tungstenite::protocol` tracing targets are always
-excluded from CLI log output. Without `RUST_LOG`, `--log-level` and `/log`
-apply to TrUAPI targets while other third-party dependencies remain at `warn`.
+excluded from CLI log output. The status bar continues to show the selected CLI
+level when `RUST_LOG` is absent; otherwise it shows the exact `RUST_LOG` value.
+`/log` replaces the startup filter with the selected level. Without `RUST_LOG`,
+`--log-level` and `/log` apply to TrUAPI targets while other third-party
+dependencies remain at `warn`.
 
 ## Statement-store allowance
 
 The real statement store enforces per-account allowance. Before pairing, the
 signing host grants it on-chain exactly as a real client does: it proves its
-LitePeople ring membership with a bandersnatch ring-VRF and submits an unsigned
+personhood ring membership with a bandersnatch ring-VRF and submits an unsigned
 General (v5) `Resources.set_statement_store_account` extrinsic for each account
 that submits statements — its RFC-0022 `uid.dot` identity account and the
 pairing host's per-pairing device key. The shared native implementation lives in
 `truapi-server/src/runtime/statement_allowance/` (metadata-driven
 signed-extension encoding, ring fetch, slot scan, ring-VRF proof, extrinsic
-assembly, submit). The signing account must be an attested LitePeople member,
-and may sit in an old ring, so the signing host scans back from the current ring
-index (slow, one-time per pairing). Auto-managed accounts are stored in
+assembly, submit). The signing account must be an attested member of at least
+one personhood collection, and may sit in an old ring, so the signing host scans
+back from the current ring index (slow, one-time per pairing).
+
+Each collection is a separate alias space with its own budget, so a signer with
+full personhood has the slots returned by
+`Resources.get_stmt_store_slots_per_period` in `People` on top of
+`Resources.get_lite_stmt_store_slots_per_period` in `LitePeople`. These dynamic
+values and the replacement cooldown are read through runtime view functions and
+cached with the runtime metadata. Asset Hub budgets PGAS claims the same way,
+through `Pgas.MaxClaimsPerPeriodPerPerson` and
+`MaxClaimsPerPeriodPerLitePerson`, and a claim is scanned against the budget of
+the collection it is proved against. A PGAS claim proves one collection rather
+than pooling across both, so it is bounded by that collection's budget alone.
+
+Registration pools across every collection the signer can prove, and a free slot
+anywhere is taken before any live slot is replaced. Whether a live slot may be
+replaced at all depends on the caller. The renewal pass, the pairing-time grant,
+and `alloc-check --submit` may replace, and then take the globally oldest
+replaceable slot across all collections. Allocation on behalf of a connecting
+product may not: it reports the period as exhausted, because every entry in the
+table is one of this wallet's own products and reclaiming space belongs to the
+renewal pass. `alloc-check` prints both collections' member keys, ring indices and
+slot tables. Auto-managed accounts are stored in
 `accounts.json` under `--base-path`; mnemonics are plaintext local test secrets
 and the file is written with `0600` permissions on Unix. `alloc-check` verifies
 membership and can submit a test registration.
+
+When a managed session has saved pairings, Statement Store exhaustion does not
+mark its signer as exhausted or rotate to another identity. If there is no slot
+for another device, pairing fails and preserves the existing identity and
+pairings. Remove a paired device or wait for a new allowance period before
+trying again.
 
 ## Manual use (two terminals)
 
@@ -393,29 +697,90 @@ HOST_CLI_SIGNER_MNEMONIC="spin battle …" truapi-host signing-host --deeplink '
 truapi-host alloc-check --mnemonic "spin battle …" --lookback 100
 ```
 
-Both hosts take `--network` (default `paseo-next-v2`). The network preset owns
-the identity backend URL, People RPC, Bulletin RPC, and genesis hashes; there is
-no public `--statement-store` flag. Both also accept `--frame-listen <address>`
+Both hosts take `--network`, either `paseo-next-v2` (default) or `previewnet`.
+The network preset owns the identity backend URL, the People, Bulletin and Asset
+Hub RPCs, and their genesis hashes; there is
+no public `--statement-store` flag. Pick `previewnet` when a product's runtime
+descriptors target previewnet, so its statements, its host chain routes and its
+own chain reads all land on one network. The CLI mints the identity backend's
+bearer token itself (SPEC.md §12.3). Sessions are per preset, so each network
+gets its own signer identity on the same machine.
+`HOST_CLI_IDENTITY_BACKEND_BASE` swaps only
+the identity backend (for a local one); `HOST_CLI_IDENTITY_BACKEND_TOKEN`
+supplies its bearer token instead of the CLI minting one. For username
+registration, an injected token's subject must match the session's `uid.dot`
+candidate account. The automatically minted token uses that identity; and
+`HOST_CLI_DOTNS_POP_CONTROLLER` overrides on-chain `DotnsPopController`
+discovery (see SPEC.md §21). Both also accept `--frame-listen <address>`
 to opt into a TCP product-frame WebSocket; without it, the CLI creates and
 cleans up a unique temporary Unix socket.
 
+## Serving a dev server (one process, no terminal)
+
+`truapi-host dev` is the shorthand for this when the thing being supervised is a
+development server; reach for `--serve` when something else owns the process.
+
+`signing-host --serve` runs the host as a background service instead of a
+terminal UI, so a dev server or test harness can supervise it:
+
+```bash
+truapi-host signing-host --serve \
+  --frame-listen 127.0.0.1:9955 \
+  --product-id myapp.dot \
+  --auto-accept
+```
+
+It needs no TTY, initialises the signer, restores responders for every paired
+device saved in the selected session, and stays up until stopped. Output is one
+line per event:
+
+```
+✓ Paired with headless.43
+✓ Signing host ready
+• Listening for product frames
+  ws://127.0.0.1:9955
+• Browser bridge
+  http://127.0.0.1:9955/bootstrap.js
+  Load it from a development-only <script> tag to run a product in a plain browser tab
+• Serving product frames until stopped
+  ws://127.0.0.1:9955
+  Confirmations are approved automatically
+```
+
+Wait for `Serving product frames until stopped` before pointing a product at the
+endpoint. That line is last in every case, and it is the only one that means
+both halves are up: the frame socket accepts connections well before a signer
+exists, and `Signing host ready` can arrive either side of it depending on
+whether the session was cached or is being registered. A first run registers a
+lite username and the statement-store allowance on-chain, which can take
+minutes.
+
+Stopping it: Ctrl-C is handled, so the host logs its own shutdown. `SIGTERM`
+ends the process, which is what a supervising dev server sends.
+
+`--auto-accept` is effectively required, because a process with no terminal has
+nowhere to prompt: confirmations are denied instead, and the startup line says
+so. `--serve` cannot be combined with `--script` or `exec`, which are the
+one-shot modes.
+
 ## Scope / gaps
 
-- **Chain methods** route to real `wss://` nodes from the selected `--network`
-  when `E2E_LIVE_CHAIN=1`; off by default. A rustls crypto provider is
+- **Chain methods** route to real `wss://` nodes from the selected `--network`.
+  Every role the preset serves is routed unconditionally; `E2E_LIVE_CHAIN=1` only
+  widens routing to endpoints it carries without serving. A rustls crypto provider is
   installed at startup for the TLS connections.
 - **Ring-VRF product-account aliases and proofs** are implemented by the
   signing host via the `verifiable` crate (`get_account_alias` and
   `create_account_proof`).
-- **`get_user_id`** resolves the signing account's username from People-chain
-  `Resources.Consumers`. Auto-managed signing accounts register fresh lite
+- **`get_user_id`** resolves the signing account's username from the dotNS
+  contracts on Asset Hub. Auto-managed signing accounts register fresh lite
   usernames via the identity backend (`src/attestation.rs`); first registration
   is backend-async and can take minutes (ring onboarding). `truapi-host
-  identity-check --mnemonic <m>` probes which derivation carries a username.
-- `set_statement_store_account` and Bulletin long-term-storage resource
-  allocation are implemented over SSO on native headless hosts.
+identity-check --mnemonic <m>` probes which derivation carries a username.
+- `set_statement_store_account`, Bulletin long-term-storage, and Asset Hub PGAS
+  resource allocation are implemented over SSO on native headless hosts.
 - Everything else the browser host exercises passes: signing (raw, payload,
   create-transaction, and their legacy variants), statement store, entropy,
   aliases, preimage, storage, permissions, notifications, theme, system, chain
-  (with `E2E_LIVE_CHAIN=1`), and user id, subject to live chain availability
+  and user id, subject to live chain availability
   and allowance-slot capacity.

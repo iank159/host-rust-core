@@ -1,6 +1,7 @@
 //! Host-backed JSON-RPC helpers for statement-store allowance registration.
 
 use core::time::Duration;
+use std::collections::HashMap;
 
 use futures::{FutureExt, pin_mut};
 use serde_json::{Value, json};
@@ -143,6 +144,55 @@ impl RpcClient {
         }
     }
 
+    /// `state_queryStorageAt(keys)` at the current best block -> each key's raw
+    /// value in the order asked, `None` where the key is absent.
+    ///
+    /// One round trip for the whole set. Scanning a slot table key by key costs a
+    /// round trip per slot, which dominates everything else the scan does.
+    pub async fn get_storage_many(
+        &self,
+        keys: &[Vec<u8>],
+    ) -> Result<Vec<Option<Vec<u8>>>, StatementAllowanceError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let hex_keys: Vec<String> = keys
+            .iter()
+            .map(|key| format!("0x{}", hex::encode(key)))
+            .collect();
+        let response = self
+            .inner
+            .request::<Value>("state_queryStorageAt", rpc_params![hex_keys.clone()])
+            .await
+            .map_err(|err| RpcError::Request {
+                method: "state_queryStorageAt".to_string(),
+                source: err,
+            })?;
+        // `[{ block, changes: [[key, value|null], ..] }]`, and the changes are not
+        // required to come back in the order asked, so index them by key.
+        let mut found: HashMap<&str, &str> = HashMap::new();
+        let changes = response
+            .as_array()
+            .and_then(|blocks| blocks.first())
+            .and_then(|block| block.get("changes"))
+            .and_then(Value::as_array);
+        for change in changes.into_iter().flatten() {
+            let Some(pair) = change.as_array() else {
+                continue;
+            };
+            if let [Value::String(key), Value::String(value)] = pair.as_slice() {
+                found.insert(key.as_str(), value.as_str());
+            }
+        }
+        hex_keys
+            .iter()
+            .map(|key| match found.get(key.as_str()) {
+                Some(value) => decode_hex(value).map(Some),
+                None => Ok(None),
+            })
+            .collect()
+    }
+
     /// `chain_getFinalizedHead` -> hash of the latest finalized block.
     pub async fn finalized_head(&self) -> Result<String, StatementAllowanceError> {
         let value = self.call("chain_getFinalizedHead", json!([])).await?;
@@ -257,7 +307,8 @@ pub(crate) mod testing {
     struct Inner {
         calls: Mutex<Vec<(String, String)>>,
         responses: Mutex<Vec<String>>,
-        subscription_items: Mutex<Vec<String>>,
+        subscription_batches: Mutex<Vec<Vec<String>>>,
+        subscription_errors: Mutex<Vec<String>>,
     }
 
     impl ScriptedRpc {
@@ -269,10 +320,21 @@ pub(crate) mod testing {
             scripted
         }
 
-        /// Queue the notification items for the next subscription.
+        /// Queue the notification items for one subscription. Call once per
+        /// expected submission; batches are replayed in order.
         pub(crate) fn script_subscription<'a>(&self, items: impl IntoIterator<Item = &'a str>) {
-            *self.0.subscription_items.lock().unwrap() =
-                items.into_iter().map(str::to_owned).collect();
+            self.0
+                .subscription_batches
+                .lock()
+                .unwrap()
+                .push(items.into_iter().map(str::to_owned).collect());
+        }
+
+        /// Fail the next `n` subscriptions with `message`, as the node does when
+        /// it rejects a submission outright.
+        pub(crate) fn script_subscription_errors(&self, message: &str, count: usize) {
+            *self.0.subscription_errors.lock().unwrap() =
+                std::iter::repeat_n(message.to_owned(), count).collect();
         }
 
         /// The `(method, params)` pairs seen so far.
@@ -315,7 +377,22 @@ pub(crate) mod testing {
                 .lock()
                 .unwrap()
                 .push((sub.to_owned(), params_json(params)));
-            let items: Vec<_> = core::mem::take(&mut *self.0.subscription_items.lock().unwrap())
+            let failure = {
+                let mut errors = self.0.subscription_errors.lock().unwrap();
+                (!errors.is_empty()).then(|| errors.remove(0))
+            };
+            if let Some(message) = failure {
+                return Box::pin(async move { Err(subxt_rpcs::Error::Client(message.into())) });
+            }
+            let batch = {
+                let mut batches = self.0.subscription_batches.lock().unwrap();
+                if batches.is_empty() {
+                    Vec::new()
+                } else {
+                    batches.remove(0)
+                }
+            };
+            let items: Vec<_> = batch
                 .into_iter()
                 .map(|item| Ok(RawValue::from_string(item).expect("scripted item is valid JSON")))
                 .collect();

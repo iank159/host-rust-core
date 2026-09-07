@@ -5,6 +5,150 @@ All notable changes to the TrUAPI protocol are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 generated from [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [0.13.1] - 2026-09-02
+
+### Fixed
+
+- resolve the dotNS controller whether the gateway stores a dispatcher or the controller (#564)
+- follow previewnet and paseo-next-v2 through their wipes (#579)
+- read Resources parameters through view functions (#577)
+- clear the active UI slot only while it owns it (#567)
+- page dotNS pendingClaims through its (address,uint256,uint256) view (#574)
+
+## [0.13.0] - 2026-09-01
+
+### Added
+
+- rename PreviewNet dotNS TLD from .test to .testnet (#561)
+
+### Changed
+
+- @parity/truapi 0.13.0, @parity/truapi-host 0.10.0 (#568)
+- Paste pairing QR images in the host CLI (#552)
+
+## [0.12.0] - 2026-08-31
+
+### Added
+
+- `development_createAccountProof` for raw proof contexts to unblock Humanity as a Product (#457)
+- open bump issues on consumer repos when a package is released (#529)
+
+### Changed
+
+- @parity/truapi 0.12.0, @parity/truapi-host 0.9.0, @parity/ios-host 0.12.0 (#555)
+- RFC: Host locale subscription (#526)
+- fix prebuilt script runner lookup (#532)
+
+### Fixed
+
+- reject unknown wire messages (#547)
+- declare the chat worker in the product manifest (#541)
+- downgrade response and error payloads to the caller's version (#525)
+
+## [0.11.0] - 2026-08-27
+
+### Added
+
+- prebuilt truapi-host binaries, one-liner installer, and self-update (#516)
+- local dev flow — run a product in a browser tab against the CLI host (#510)
+- revalidate device permissions against OS state before use (#471)
+- expose current product context (#504)
+- publish io.parity:truapi-host-android as an AAR (#337)
+- auto-grant remote permissions to trusted product labels (#446)
+- improve signing-host session lifecycle (#495)
+
+### Changed
+
+- @parity/truapi 0.11.0, @parity/truapi-host 0.8.0 (#530)
+- remove legacy single-execution core (#508)
+- RFC: Host Identity and Version via `System.host_info` (#177)
+
+### Fixed
+
+- make the CLI release pipeline work end to end (#531)
+- clear the sandbox client when the pipe closes (#509)
+- persist and restore paired SSO hosts (#501)
+- gate tags on a confirmed npm publish (#505)
+- derive Pages base path from configure-pages (#500)
+
+## [0.10.0] - 2026-08-24
+
+### Added
+
+- match manifest execution kinds and serve custom chat rendering from a JS host (#459)
+- gate WebRTC on a decision resolved before the product realm (#444)
+- let a host read what the last renewal pass achieved (#447)
+- tell a listener which way its connection closed (#461)
+- forward every message variant and add the Android host surface (#453)
+- serve product frames headlessly with --serve (#439)
+- export createWebSocketProvider for browser clients (#438)
+- add the previewnet network preset (#440)
+- serve Chat from a JS host as an optional capability (#400)
+- implement Chat::register_bot in the shared Rust core (#430)
+- native and wasm ChainProvider with WebSocket and embedded smoldot backends (#276)
+- retain and expose session identity material (#403)
+- gate external navigation on a per-host remote grant
+- give AuthState::LoginFailed a typed kind (#401)
+- pool allowance slots across personhood collections (#431)
+- report renewal targets dropped by an identity change (#423)
+- drive statement-store allowance renewal from native hosts (#417)
+- yield the named theme from subscribe_theme (#396)
+- serve Asset Hub as a chain role (#404)
+- support PGAS allowances (#391)
+- make ProductContext SCALE-encodable (#392)
+
+### Changed
+
+- @parity/truapi 0.10.0, @parity/truapi-host 0.7.0 (#494)
+- Own-account subtree consent gate, deadline bound, and worker dispose fix (#469)
+- Person's usernames: read from Asset Hub dotNS instead of the People Chain (rebase of #349) (#426)
+- publish 0.7.0 (#450)
+- SSO message handling bindings for Mobile hosts (#433)
+- Allow webrtc connection for products (#399)
+- update Package.swift (#421)
+- Add product manifest RFC and host implementation guide
+
+### Fixed
+
+- raise the crate recursion limit for the trait solver (#475)
+- accept the test dotNS TLD in product identifiers (#465)
+- follow previewnet through its wipe (#455)
+- stop a product or host from aborting the process (#452)
+- track tunnel liveness by flag, not by dialling (#445)
+- satisfy collapsible_match without changing Enter handling (#437)
+- narrow the navigation grant to authorizable hosts
+- satisfy collapsible_match without changing Enter handling
+- advertise the People genesis the chain reports (#416)
+- emit the opening auth state and forward session activation (#393)
+- resolve product chains against the network preset (#402)
+- import the wasm glue by a literal specifier (#394)
+- skip v5 signing for supplied VerifyMultiSignature (#374)
+- encode the transaction-extension version the runtime declares (#382)
+
+## [0.9.0] - 2026-08-13
+
+### RFCs
+
+- **Accepted:** Proof of Personhood as a product
+
+### Added
+
+- replace the oldest slot when a period is full (#378)
+- auto-renew statement-store allowances (#308)
+- land RFC-0024 ring VRF key management (#360)
+
+### Changed
+
+- @parity/truapi 0.9.0, @parity/truapi-host 0.6.0 (#381)
+- share one extension-info resolver in allowance metadata (#377)
+- stop re-reading metadata and rings on every allowance call (#366)
+- update ios library to 0.5.0 (#367)
+
+### Fixed
+
+- accept per-network dotNS TLDs in product identifiers (#369)
+- deploy the playground under the new dotNS name format (#375)
+
 ## [0.8.0] - 2026-08-10
 
 ### RFCs
@@ -20,6 +164,7 @@ generated from [Conventional Commits](https://www.conventionalcommits.org/).
 
 ### Changed
 
+- @parity/truapi 0.8.0, @parity/truapi-host 0.5.0, @parity/ios-host 0.5.0 (#364)
 - RFC 0026: Host chain discovery and name resolution (#354)
 - Use canonical types over the native FFI (#345)
 - iOS host integration (#330)
@@ -190,6 +335,26 @@ generated from [Conventional Commits](https://www.conventionalcommits.org/).
 ### Removed
 
 - roll back the CoinPayment (Coinage) host API
+
+## [0.3.1] - 2026-06-17
+
+### Changed
+
+- @parity/truapi 0.3.1 (#228)
+- @parity/truapi 0.3.1
+- @parity/truapi@0.3.0
+- @parity/truapi@0.3.0
+- Revert "Add explorer v0.3.0 version snapshot"
+- Add explorer v0.3.0 version snapshot
+
+### Fixed
+
+- use GitHub API to create release tag
+- correct import paths in explorer 0.3.1 snapshot
+- align HostPaymentTopUpError variant ordering with wire protocol
+- add MIT license field to workspace and all crates
+- remove prepare hooks and add deny.toml from main
+- remove prepare hook from truapi-host package
 
 ## [0.3.0] - 2026-06-03
 

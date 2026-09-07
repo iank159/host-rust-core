@@ -1,22 +1,23 @@
 # TrUAPI Playground
 
-_Browse, edit, and call SPA-compatible TrUAPI methods live against a connected Polkadot host._
+_Browse, edit, and call App-compatible TrUAPI methods live against a connected Polkadot host._
 
-The playground is an interactive reference for the SPA-compatible TrUAPI surface: methods are grouped by domain, with live request payload editing, one-click calls, and live subscriptions. It must be opened from inside a TrUAPI host so it can talk to the host over the wire.
+The playground is an interactive reference for the App-compatible TrUAPI surface: methods are grouped by domain, with live request payload editing, one-click calls, and live subscriptions. Production builds run inside a TrUAPI host. Local development can also use the CLI browser bridge in a plain browser tab.
 
-**Live app:** [https://truapi-playground.dot.li/](https://truapi-playground.dot.li/)
+**Live app:** [https://truapi-playground.paseo.li/](https://truapi-playground.paseo.li/)
 
 ## Features
 
-- **Execution-aware method browser**: every TrUAPI service available to a `Spa` execution, each with a description and a Request / Response or Subscription badge.
+- **Execution-aware method browser**: every TrUAPI service available to an `App` execution, each with a description and a Request / Response or Subscription badge.
 - **Live calls**: edit a JSON request payload and fire the call against the connected host.
 - **Subscriptions**: open and close streaming methods and watch events arrive in real time.
 - **Auto-test view**: runs every listed method and reports pass / fail in one pass.
-- **Diagnosis view**: runs the SPA surface and produces a copy-pasteable markdown report per host. The explorer's Compatibility page aggregates those into a cross-host matrix. See [Diagnosis](#diagnosis).
+- **Diagnosis view**: runs the App surface and produces a copy-pasteable markdown report per host. The explorer's Compatibility page aggregates those into a cross-host matrix. See [Diagnosis](#diagnosis).
 - **Wiring status**: methods that are not yet bound are flagged "Not supported" so you can see protocol coverage at a glance.
-- **Chat diagnosis**: the same build emits `out/worker/index.js`, a native Chat
-  application that tests room creation and idempotency, live room-list updates,
-  text and custom messages, user actions, and host-initiated custom-render streams. It
+- **Chat diagnosis**: the same build emits `out/worker/index.js`, a `Worker`
+  executable that tests room creation and idempotency, bot registration and
+  idempotency, live room-list updates, text and custom messages, user actions,
+  and host-initiated custom-render streams. It
   displays live results in Chat and posts a Chat-only Markdown report after
   `!diagnose` completes the action check.
 
@@ -24,18 +25,46 @@ The playground is an interactive reference for the SPA-compatible TrUAPI surface
 
 ```bash
 yarn install --frozen-lockfile
-yarn dev
+truapi-host dev -- yarn dev
 ```
 
-Then open the dev server inside the Polkadot Desktop Host:
+Open [http://localhost:3000](http://localhost:3000). `truapi-host dev` starts a
+signing host on `127.0.0.1:9955`, waits until its signer is ready, then starts
+the playground. The development-only tag in `src/app/layout.tsx` loads
+`http://127.0.0.1:9955/bootstrap.js`, which installs the same
+`window.__HOST_API_PORT__` used by native webview hosts. The production build
+checks that this bridge URL is absent from `out/`.
+
+The source tag and the CLI use fixed port `9955`. If you pass a different
+`truapi-host dev --port`, update the tag to match. The CLI accepts frame
+connections only from local TCP peers. Browser WebSocket origins must also be
+`localhost` or a loopback IP. Local non-browser clients may omit `Origin`.
+
+To exercise a real host instead, run `yarn dev` and open the dev server inside
+the Polkadot Desktop Host:
 
 ```
 https://dot.li/localhost:3000
 ```
 
-The app needs a host to connect to. Opening it directly in a regular browser will not work.
+Opening the page directly without either host does not work.
 
-`yarn build` produces both the static SPA under `out/` and its Chat executable
+The plain-browser Playwright suite starts the installed CLI and owns the whole
+stack:
+
+```bash
+yarn e2e:cli
+TRUAPI_HOST_BIN=../target/debug/truapi-host yarn e2e:cli
+```
+
+`TRUAPI_HOST_BIN` selects a checkout build when needed. Existing listeners are
+rejected so the suite cannot silently test a partial or unrelated stack.
+`yarn e2e:cli-diagnosis` runs the longer compatibility diagnosis. It records
+failed and skipped methods as findings and exits nonzero only when the run
+itself breaks or the page raises an error. The CLI Playwright suite is the
+regression gate.
+
+`yarn build` produces both the static app under `out/` and its `Worker` executable
 at `out/worker/index.js`. Both resolve `@parity/truapi` from the linked
 workspace package in `../js/packages/truapi`.
 
@@ -65,7 +94,7 @@ An example **passes** when its promise resolves and **fails** when it throws. Us
 
 ## Diagnosis
 
-The Diagnosis view exercises every SPA-compatible TrUAPI method against the connected host and emits a per-host pass/fail report you can copy out. Per-host reports feed the explorer's **Compatibility** page, which renders the host × method matrix; aggregation lives in the explorer (see [`explorer/README.md`](../explorer/README.md#host-compatibility-matrix)). Chat APIs are diagnosed separately by the native Chat worker.
+The Diagnosis view exercises every App-compatible TrUAPI method against the connected host and emits a per-host pass/fail report you can copy out. Per-host reports feed the explorer's **Compatibility** page, which renders the host × method matrix; aggregation lives in the explorer (see [`explorer/README.md`](../explorer/README.md#host-compatibility-matrix)). Chat APIs are diagnosed separately by the `Worker` executable.
 
 Run the iOS Chat diagnosis from the repository root:
 
@@ -92,7 +121,7 @@ compatibility section.
 
 Open the playground inside a TrUAPI host (it cannot run standalone in a browser tab):
 
-- **Web host:** [https://truapi-playground.dot.li/](https://truapi-playground.dot.li/) opened inside dot.li.
+- **Web host:** [https://truapi-playground.paseo.li/](https://truapi-playground.paseo.li/) opened inside dot.li.
 - **Desktop host:** the Polkadot Desktop app pointed at the playground URL.
 
 Before you start:
@@ -143,14 +172,18 @@ Pushes to `main` deploy automatically via the [Deploy Playground workflow](../.g
 ```bash
 yarn install --frozen-lockfile
 yarn build
-bulletin-deploy ./out truapi-playground.dot --js-merkle
+bulletin-deploy ./out truapi-playground.paseo --js-merkle
 ```
 
 The build output goes to `./out`. The deploy can fail on transient network errors; CI retries up to 3 times, and you can simply rerun the command locally.
 
+The name carries its TLD because [`bulletin-deploy.config.ts`](bulletin-deploy.config.ts) is present: the deploy then also publishes the product manifest, and the publisher requires the name passed here to match the config's `domain` exactly. `.paseo` is the TLD of the default environment (`paseo-next-v2`); for another environment, pass the matching name and set `PLAYGROUND_DOTNS_NAME` to the same value so the config follows, as [the workflow](../.github/workflows/deploy-playground.yml) does.
+
+Publishing the manifest registers the `app.` and `worker.` subnames, so the signer has to own the base name and cover the registration deposits. Pass `--content-only` to update the site alone and leave the manifest untouched.
+
 ### Quick iteration
 
-`deploy:test` skips `--js-merkle` and cleans up the generated `out.car`:
+`deploy:test` skips `--js-merkle`, stays content-only, and cleans up the generated `out.car`:
 
 ```bash
 yarn deploy:test

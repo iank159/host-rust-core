@@ -7,6 +7,8 @@
 mod sso_channel;
 
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use futures::channel::oneshot;
@@ -20,19 +22,24 @@ use super::auth_state::AuthStateMachine;
 use super::authority::{
     AccountAliasAuthorityRequest, AuthorityError, AuthoritySession, AutoSigningKey,
     BulletinAllowanceKey, CreateProofAuthorityRequest, CreateTransactionAuthorityRequest,
-    ProductAuthority, SignPayloadAuthorityRequest, SignRawAuthorityRequest,
+    ListRingVrfKeysAuthorityRequest, ProductAuthority, RegisterRingVrfKeyAuthorityRequest,
+    RingVrfSignAuthorityRequest, SignPayloadAuthorityRequest, SignRawAuthorityRequest,
     StatementStoreAllowanceKey, authority_session, require_current_session,
 };
 use super::connected_session_ui_info;
 use super::identity::resolve_session_identity_with_chain;
+use super::product_subtree;
 use super::services::RuntimeServices;
 use super::sso_pairing::{SsoPairingFlow, SsoPairingOutcome};
-use super::sso_remote::{SSO_PEER_DISCONNECT_REASON, SessionDisconnects, SsoSessionKey};
+use super::sso_remote::{
+    SSO_PEER_DISCONNECT_REASON, SessionDisconnects, SsoSessionKey, sso_message_id,
+};
 use super::statement_store_rpc::StatementStoreRpc;
 use crate::chain_runtime::ChainRuntime;
 use crate::host_logic::entropy::derive_product_entropy_from_source;
 use crate::host_logic::product_account::{
     derivation_index_bytes, derive_product_keypair_from_subtree_secret,
+    derive_ring_vrf_entropy_from_domain,
 };
 use crate::host_logic::session::{SessionInfo, SessionState, encode_persisted_session};
 use crate::host_logic::session_store::SessionStoreChangeNotifier;
@@ -46,6 +53,13 @@ use truapi::{CallContext, CallError, v01};
 use truapi_platform::{
     CoreStorageKey, PairingHostConfig, Platform, ProductContext, SignVrfReview,
     UserConfirmationReview, normalize_product_identifier,
+};
+use zeroize::Zeroizing;
+
+use super::ring_vrf_registry::{RingVrfRegistryStore, validate_owner_listing};
+use super::signing_host::ring_vrf::{
+    ChainRingResolver, MemberCandidate, RingResolver, alias_from_entropy, create_proof,
+    development_context_bytes, member_from_entropy, sign_from_entropy,
 };
 
 /// Distinguishes all remote authority request entrypoints by wire label.
@@ -153,11 +167,13 @@ struct PersistedAutoSigningKey {
     product_id: String,
     expected_product_subtree_public_key: [u8; 32],
     secret: [u8; 64],
+    ring_vrf_domain_entropy: [u8; 32],
 }
 
 impl Drop for PersistedAutoSigningKey {
     fn drop(&mut self) {
         self.secret.zeroize();
+        self.ring_vrf_domain_entropy.zeroize();
     }
 }
 
@@ -181,17 +197,24 @@ fn decode_auto_signing_keys(blob: &[u8]) -> Result<Vec<PersistedAutoSigningKey>,
 fn validate_auto_signing_key(
     secret: [u8; 64],
     expected_product_subtree_public_key: [u8; 32],
+    ring_vrf_domain_entropy: [u8; 32],
 ) -> Result<AutoSigningKey, AuthorityError> {
-    let secret_key = SecretKey::from_bytes(&secret).map_err(|_| AuthorityError::Unavailable {
-        reason: "AutoSigning capability contains an invalid subtree secret".to_string(),
-    })?;
+    let secret = Zeroizing::new(secret);
+    let ring_vrf_domain_entropy = Zeroizing::new(ring_vrf_domain_entropy);
+    let secret_key =
+        SecretKey::from_bytes(&secret[..]).map_err(|_| AuthorityError::Unavailable {
+            reason: "AutoSigning capability contains an invalid subtree secret".to_string(),
+        })?;
     if secret_key.to_public().to_bytes() != expected_product_subtree_public_key {
         return Err(AuthorityError::Unavailable {
             reason: "AutoSigning capability does not match the authenticated product subtree"
                 .to_string(),
         });
     }
-    AutoSigningKey::from_secret_bytes(secret.to_vec())
+    Ok(AutoSigningKey::from_parts(
+        *secret,
+        *ring_vrf_domain_entropy,
+    ))
 }
 
 #[derive(Default)]
@@ -230,6 +253,27 @@ enum StoredSessionActivationError {
     Changed,
 }
 
+/// State carried across the reconciles of one session store sync task.
+#[derive(Default)]
+struct SessionStoreSync {
+    /// Clearing the store can itself notify the sync subscription; clear at
+    /// most once per read-error streak so a persistently failing read cannot
+    /// spin the task through its own clear notifications.
+    cleared_after_read_error: bool,
+}
+
+impl SessionStoreSync {
+    /// Re-read the persisted auth session and reconcile the in-memory one.
+    async fn reconcile(&mut self, pairing_host: &PairingHost) {
+        self.cleared_after_read_error = matches!(
+            pairing_host
+                .reconcile_stored_session(!self.cleared_after_read_error, true)
+                .await,
+            Err(StoredSessionActivationError::Read(_))
+        );
+    }
+}
+
 /// Remote account authority for a pairing host.
 pub(crate) struct PairingHost {
     /// Host platform backing all syscalls.
@@ -253,12 +297,17 @@ pub(crate) struct PairingHost {
     bulletin_allowances: Mutex<HashMap<AllowanceCacheKey, BulletinAllowanceKey>>,
     product_subtrees: Mutex<HashMap<(SsoSessionKey, String), [u8; 32]>>,
     auto_signing_keys: Mutex<HashMap<AutoSigningCacheKey, AutoSigningKey>>,
+    ring_resolver: Arc<dyn RingResolver>,
+    ring_vrf_registry: Arc<RingVrfRegistryStore>,
     /// Orders session-secret cache/storage writes against teardown and activation.
     session_secret_storage: futures::lock::Mutex<()>,
     session_store_activation: futures::lock::Mutex<()>,
     session_lifecycle: Mutex<SessionLifecycle>,
     #[cfg(test)]
     external_session_activation_pause: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    /// Change notifications the sync task has finished reconciling.
+    #[cfg(test)]
+    session_store_change_ticks: AtomicUsize,
     /// Self-reference captured by the spawned disconnect-monitor task.
     weak_self: Weak<PairingHost>,
     /// Task spawner for background monitors.
@@ -286,11 +335,15 @@ impl PairingHost {
             bulletin_allowances: Mutex::new(HashMap::new()),
             product_subtrees: Mutex::new(HashMap::new()),
             auto_signing_keys: Mutex::new(HashMap::new()),
+            ring_resolver: ChainRingResolver::new(services.chain.clone()),
+            ring_vrf_registry: RingVrfRegistryStore::new(services.platform.clone()),
             session_secret_storage: futures::lock::Mutex::new(()),
             session_store_activation: futures::lock::Mutex::new(()),
             session_lifecycle: Mutex::new(SessionLifecycle::default()),
             #[cfg(test)]
             external_session_activation_pause: Mutex::new(None),
+            #[cfg(test)]
+            session_store_change_ticks: AtomicUsize::new(0),
             weak_self: weak_self.clone(),
             spawner: services.spawner.clone(),
         })
@@ -333,6 +386,12 @@ impl PairingHost {
         self.start_session_store_sync(spawner);
     }
 
+    /// Change notifications the sync task has finished reconciling.
+    #[cfg(test)]
+    pub(crate) fn session_store_change_ticks_for_tests(&self) -> usize {
+        self.session_store_change_ticks.load(Ordering::SeqCst)
+    }
+
     /// Test alias for [`Self::start_remote_monitor_for_current_session`].
     #[cfg(test)]
     pub(crate) fn start_session_supervision_for_current_session(&self) {
@@ -369,6 +428,43 @@ impl PairingHost {
         self.session_state.current().as_ref().map(authority_session)
     }
 
+    pub(crate) async fn ring_vrf_providers(
+        &self,
+        ring: &v01::RingLocation,
+    ) -> Result<Vec<v01::ProductAccountId>, RingVrfError> {
+        let session = self.session_state.current().ok_or(RingVrfError::Unknown {
+            reason: "no active session".to_string(),
+        })?;
+        self.ring_vrf_registry
+            .providers(session.public_key, ring)
+            .await
+    }
+
+    pub(crate) async fn selected_ring_vrf_provider(
+        &self,
+        ring: &v01::RingLocation,
+    ) -> Result<Option<v01::ProductAccountId>, RingVrfError> {
+        let session = self.session_state.current().ok_or(RingVrfError::Unknown {
+            reason: "no active session".to_string(),
+        })?;
+        self.ring_vrf_registry
+            .selected_provider(session.public_key, ring)
+            .await
+    }
+
+    pub(crate) async fn select_ring_vrf_provider(
+        &self,
+        ring: v01::RingLocation,
+        handle: v01::ProductAccountId,
+    ) -> Result<(), RingVrfError> {
+        let session = self.session_state.current().ok_or(RingVrfError::Unknown {
+            reason: "no active session".to_string(),
+        })?;
+        self.ring_vrf_registry
+            .select_provider(session.public_key, ring, handle)
+            .await
+    }
+
     /// Start the disconnect monitor when a session is already active.
     #[cfg(test)]
     pub(crate) fn start_remote_monitor_for_current_session(&self) {
@@ -378,14 +474,22 @@ impl PairingHost {
     }
 
     /// Validate, resolve, and install an externally persisted canonical
-    /// session blob without copying it into core storage.
+    /// session blob without copying it into core storage. Reports the resulting
+    /// auth state to the host, including when the blob failed to decode and the
+    /// active session was therefore left alone.
     pub(crate) async fn activate_external_session(&self, blob: &[u8]) -> Result<(), String> {
+        let installed = self.install_external_session(blob).await;
+        self.auth_state.announce_current();
+        installed
+    }
+
+    async fn install_external_session(&self, blob: &[u8]) -> Result<(), String> {
         let _activation = self.session_store_activation.lock().await;
         let session = crate::host_logic::session::decode_persisted_session(blob)?;
         let activation_epoch = self.advance_session_lifecycle();
         let resolved = resolve_session_identity_with_chain(
             &self.chain,
-            self.host_config.people_chain_genesis_hash,
+            self.host_config.asset_hub_chain_genesis_hash,
             session,
         )
         .await;
@@ -398,11 +502,15 @@ impl PairingHost {
 
     /// Read, validate, resolve, and install the persisted auth session before
     /// returning. Product frames may use the connected session once this
-    /// future resolves.
+    /// future resolves. Reports the resulting auth state to the host, including
+    /// when there was no session to restore.
     pub(crate) async fn activate_stored_session(&self) -> Result<(), String> {
-        self.reconcile_stored_session(true, false)
+        let restored = self
+            .reconcile_stored_session(true, false)
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string());
+        self.auth_state.announce_current();
+        restored
     }
 
     async fn reconcile_stored_session(
@@ -450,7 +558,7 @@ impl PairingHost {
         };
         let resolved = resolve_session_identity_with_chain(
             &self.chain,
-            self.host_config.people_chain_genesis_hash,
+            self.host_config.asset_hub_chain_genesis_hash,
             session,
         )
         .await;
@@ -491,39 +599,32 @@ impl PairingHost {
         Ok(())
     }
 
-    /// Spawn the background task that re-reads the persisted auth session on
-    /// every change notification and reconciles the in-memory session.
+    /// Spawn the background task that keeps the in-memory session in step
+    /// with the persisted auth session. It reconciles once at boot and
+    /// announces the outcome, so the host always receives an opening auth
+    /// state, then reconciles again on every change notification.
     #[instrument(skip_all, fields(runtime.method = "session_store.sync"))]
     pub(crate) fn start_session_store_sync(self: Arc<Self>, spawner: Spawner) {
         let pairing_host = Arc::downgrade(&self);
+        drop(self);
         spawner(Box::pin(async move {
-            let Some(current) = pairing_host.upgrade() else {
+            let Some(booting) = pairing_host.upgrade() else {
                 return;
             };
-            let mut ticks = current.session_store_changes.subscribe();
-            drop(current);
-            // Clearing the store can itself notify this subscription; clear at
-            // most once per read-error streak so a persistently failing read
-            // cannot spin the loop through its own clear notifications.
-            let mut cleared_after_read_error = false;
+            let mut ticks = booting.session_store_changes.subscribe();
+            let mut sync = SessionStoreSync::default();
+            sync.reconcile(&booting).await;
+            booting.auth_state.announce_current();
+            drop(booting);
             while ticks.next().await.is_some() {
                 let Some(pairing_host) = pairing_host.upgrade() else {
                     break;
                 };
-                match pairing_host
-                    .reconcile_stored_session(!cleared_after_read_error, true)
-                    .await
-                {
-                    Ok(())
-                    | Err(StoredSessionActivationError::Missing)
-                    | Err(StoredSessionActivationError::Invalid(_))
-                    | Err(StoredSessionActivationError::Changed) => {
-                        cleared_after_read_error = false;
-                    }
-                    Err(StoredSessionActivationError::Read(_)) => {
-                        cleared_after_read_error = true;
-                    }
-                }
+                sync.reconcile(&pairing_host).await;
+                #[cfg(test)]
+                pairing_host
+                    .session_store_change_ticks
+                    .fetch_add(1, Ordering::SeqCst);
             }
         }));
     }
@@ -703,7 +804,8 @@ impl PairingHost {
     }
 
     /// Clear the canonical local session and all session capabilities without
-    /// sending a peer-disconnect statement.
+    /// sending a peer-disconnect statement. Reports the resulting auth state to
+    /// the host, including when there was no session to clear.
     pub(crate) async fn reset_session_state(&self) {
         self.cancel_login();
         self.clear_disconnected_session(true).await;
@@ -711,6 +813,7 @@ impl PairingHost {
         self.clear_statement_store_allowance_keys(None);
         self.clear_bulletin_allowance_keys(None);
         self.clear_product_subtrees(None);
+        self.auth_state.announce_current();
     }
 
     /// Invalidate in-flight login attempts and emit the cancelled auth state.
@@ -803,6 +906,7 @@ impl PairingHost {
             {
                 warn!(%reason, "allowance capability clear failed during disconnect");
             }
+            self.clear_stored_product_subtrees(session).await;
         }
         self.clear_product_subtrees(previous.as_ref());
         if let Err(reason) = self.clear_auto_signing_keys_under_storage_guard().await {
@@ -897,6 +1001,7 @@ impl PairingHost {
         product_id: &str,
         expected_product_subtree_public_key: [u8; 32],
         secret: [u8; 64],
+        ring_vrf_domain_entropy: [u8; 32],
     ) -> Result<(), AuthorityError> {
         self.remember_auto_signing_key(
             session,
@@ -904,8 +1009,22 @@ impl PairingHost {
             product_id,
             expected_product_subtree_public_key,
             secret,
+            ring_vrf_domain_entropy,
         )
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn register_ring_vrf_key_for_tests(
+        &self,
+        session: &SessionInfo,
+        handle: v01::ProductAccountId,
+        ring: v01::RingLocation,
+        public_key: [u8; 32],
+    ) -> Result<(), RingVrfError> {
+        self.ring_vrf_registry
+            .register(session.public_key, handle, ring, public_key)
+            .await
     }
 
     #[cfg(test)]
@@ -987,6 +1106,119 @@ impl PairingHost {
         true
     }
 
+    /// Whether resolving `product_id`'s subtree would reach the Account Holder,
+    /// i.e. neither the memory cache nor the persisted slot already holds it.
+    ///
+    /// A stale or missing session resolves as `false` so a broken state falls
+    /// through to the resolution's own error rather than a spurious prompt.
+    pub(super) async fn subtree_reaches_account_holder(
+        &self,
+        session: &AuthoritySession,
+        product_id: &str,
+    ) -> bool {
+        let Ok(session) = self.current_private_session(session) else {
+            return false;
+        };
+        let Some(sso) = session.sso.as_ref() else {
+            return false;
+        };
+        let cache_key = (SsoSessionKey::from_session(sso), product_id.to_string());
+        self.known_product_subtree(&session, cache_key)
+            .await
+            .is_none()
+    }
+
+    /// Read a product subtree public key from the memory cache, falling back to
+    /// the slot an earlier launch persisted. `None` when neither holds it.
+    ///
+    /// This is the consent-free half of the resolution order. Splitting it out
+    /// lets a host read what the core already knows without the wire request
+    /// that follows a miss, which has no timeout of its own.
+    pub(super) async fn known_product_subtree(
+        &self,
+        session: &SessionInfo,
+        cache_key: (SsoSessionKey, String),
+    ) -> Option<[u8; 32]> {
+        let lifecycle_epoch = self.current_session_lifecycle_epoch();
+        if let Some(public_key) = self
+            .product_subtrees
+            .lock()
+            .expect("product subtree cache mutex poisoned")
+            .get(&cache_key)
+            .copied()
+        {
+            return Some(public_key);
+        }
+        self.stored_product_subtree(session, lifecycle_epoch, cache_key)
+            .await
+    }
+
+    /// Read a product subtree public key persisted by an earlier launch, and
+    /// re-populate the memory cache from it. `None` when nothing is stored.
+    pub(super) async fn stored_product_subtree(
+        &self,
+        session: &SessionInfo,
+        lifecycle_epoch: u64,
+        cache_key: (SsoSessionKey, String),
+    ) -> Option<[u8; 32]> {
+        let public_key =
+            match product_subtree::read_product_subtree(&*self.platform, session, &cache_key.1)
+                .await
+            {
+                Ok(public_key) => public_key?,
+                Err(error) => {
+                    warn!(reason = %error, "stored product subtree read failed");
+                    return None;
+                }
+            };
+        // A stored key still has to belong to the live pairing before it is
+        // served, exactly as a freshly fetched one does.
+        self.cache_product_subtree_if_current(session, lifecycle_epoch, cache_key, public_key)
+            .then_some(public_key)
+    }
+
+    /// Persist and memory-cache a freshly fetched product subtree public key.
+    ///
+    /// Persistence is an optimisation: a storage failure still serves the key
+    /// and leaves the next launch to re-ask the wallet, which is what happens
+    /// today. Losing the pairing mid-write is not, so the storage entry is
+    /// rolled back rather than left addressing a session that has gone.
+    pub(super) async fn persist_product_subtree_if_current(
+        &self,
+        session: &SessionInfo,
+        lifecycle_epoch: u64,
+        cache_key: (SsoSessionKey, String),
+        public_key: [u8; 32],
+    ) -> bool {
+        let product_id = cache_key.1.clone();
+        let _storage_guard = self.session_secret_storage.lock().await;
+        if !self.session_secret_allocation_is_current(session, lifecycle_epoch) {
+            return false;
+        }
+        let persisted = match product_subtree::write_product_subtree(
+            &*self.platform,
+            session,
+            &product_id,
+            public_key,
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                warn!(reason = %error, "product subtree persist failed");
+                false
+            }
+        };
+        if self.cache_product_subtree_if_current(session, lifecycle_epoch, cache_key, public_key) {
+            return true;
+        }
+        if persisted {
+            let _ = product_subtree::remove_product_subtree(&*self.platform, session, &product_id)
+                .await;
+        }
+        false
+    }
+
     pub(super) fn cache_product_subtree_if_current(
         &self,
         session: &SessionInfo,
@@ -1023,13 +1255,13 @@ impl PairingHost {
 
     async fn refresh_current_session_identity(&self) -> Option<AuthoritySession> {
         let current = self.session_state.current()?;
-        if current.has_username() || self.host_config.people_chain_genesis_hash == [0; 32] {
+        if current.has_username() || self.host_config.asset_hub_chain_genesis_hash == [0; 32] {
             return Some(authority_session(&current));
         }
 
         let resolved = resolve_session_identity_with_chain(
             &self.chain,
-            self.host_config.people_chain_genesis_hash,
+            self.host_config.asset_hub_chain_genesis_hash,
             current.clone(),
         )
         .await;
@@ -1501,8 +1733,13 @@ impl PairingHost {
         product_id: &str,
         expected_product_subtree_public_key: [u8; 32],
         secret: [u8; 64],
+        ring_vrf_domain_entropy: [u8; 32],
     ) -> Result<(), AuthorityError> {
-        let key = validate_auto_signing_key(secret, expected_product_subtree_public_key)?;
+        let key = validate_auto_signing_key(
+            secret,
+            expected_product_subtree_public_key,
+            ring_vrf_domain_entropy,
+        )?;
         let owner = AutoSigningOwner::from_session(session);
         let cache_key = (owner.clone(), product_id.to_string());
         let _storage_guard = self.session_secret_storage.lock().await;
@@ -1530,6 +1767,7 @@ impl PairingHost {
             product_id: product_id.to_string(),
             expected_product_subtree_public_key,
             secret,
+            ring_vrf_domain_entropy,
         });
         if !self.session_secret_allocation_is_current(session, lifecycle_epoch) {
             return Err(AuthorityError::Disconnected);
@@ -1657,6 +1895,7 @@ impl PairingHost {
         let key = match validate_auto_signing_key(
             persisted.secret,
             persisted.expected_product_subtree_public_key,
+            persisted.ring_vrf_domain_entropy,
         ) {
             Ok(key) => key,
             Err(err) => {
@@ -1678,6 +1917,33 @@ impl PairingHost {
         Ok(Some(key))
     }
 
+    /// Drop the persisted subtree slots this run knows about for `session`.
+    ///
+    /// Scoped to the in-memory set, so a product never opened since launch
+    /// keeps its slot. Those address session ids that cannot recur, and
+    /// clearing them belongs to the host, as `CoreStorage` states.
+    async fn clear_stored_product_subtrees(&self, session: &SessionInfo) {
+        let Some(sso) = session.sso.as_ref() else {
+            return;
+        };
+        let session_key = SsoSessionKey::from_session(sso);
+        let product_ids: Vec<String> = self
+            .product_subtrees
+            .lock()
+            .expect("product subtree cache mutex poisoned")
+            .keys()
+            .filter(|(key, _)| *key == session_key)
+            .map(|(_, product_id)| product_id.clone())
+            .collect();
+        for product_id in product_ids {
+            if let Err(reason) =
+                product_subtree::remove_product_subtree(&*self.platform, session, &product_id).await
+            {
+                warn!(%reason, %product_id, "product subtree clear failed during disconnect");
+            }
+        }
+    }
+
     fn clear_product_subtrees(&self, session: Option<&SessionInfo>) {
         let mut subtrees = self
             .product_subtrees
@@ -1692,6 +1958,94 @@ impl PairingHost {
         };
         let session_key = SsoSessionKey::from_session(sso);
         subtrees.retain(|(key, _), _| *key != session_key);
+    }
+
+    fn require_owned_ring_vrf_key(
+        calling_product_id: &str,
+        handle: &v01::ProductAccountId,
+    ) -> Result<(), RingVrfError> {
+        let caller = normalize_product_identifier(calling_product_id).map_err(|error| {
+            RingVrfError::Unknown {
+                reason: error.to_string(),
+            }
+        })?;
+        if caller != handle.dot_ns_identifier {
+            return Err(RingVrfError::NotAllowlisted);
+        }
+        Ok(())
+    }
+
+    async fn local_ring_vrf_entropy(
+        &self,
+        session: &SessionInfo,
+        handle: &v01::ProductAccountId,
+    ) -> Result<Option<Zeroizing<[u8; 32]>>, RingVrfError> {
+        let Some(auto_signing) = self
+            .auto_signing_key(session, &handle.dot_ns_identifier)
+            .await
+            .map_err(RingVrfError::from)?
+        else {
+            return Ok(None);
+        };
+        let entry = self
+            .ring_vrf_registry
+            .entry(session.public_key, handle)
+            .await?
+            .ok_or(RingVrfError::KeyNotRegistered)?;
+        let entropy = Zeroizing::new(derive_ring_vrf_entropy_from_domain(
+            auto_signing.ring_vrf_domain_entropy(),
+            &handle.derivation_index,
+        ));
+        if entry.public_key != Some(member_from_entropy(&entropy)?) {
+            return Err(RingVrfError::Unknown {
+                reason: "registered ring-VRF public key does not match the AutoSigning capability"
+                    .to_string(),
+            });
+        }
+        Ok(Some(entropy))
+    }
+
+    async fn local_ring_vrf_entropy_for_ring(
+        &self,
+        session: &SessionInfo,
+        handle: &v01::ProductAccountId,
+        ring: &v01::RingLocation,
+    ) -> Result<Option<Zeroizing<[u8; 32]>>, RingVrfError> {
+        let Some(entropy) = self.local_ring_vrf_entropy(session, handle).await? else {
+            return Ok(None);
+        };
+        let entry = self
+            .ring_vrf_registry
+            .entry(session.public_key, handle)
+            .await?
+            .ok_or(RingVrfError::KeyNotRegistered)?;
+        if !entry.rings.contains(ring) {
+            return Err(RingVrfError::KeyNotInRing);
+        }
+        Ok(Some(entropy))
+    }
+
+    fn mirror_ring_vrf_registration(
+        &self,
+        session: SessionInfo,
+        request: RegisterRingVrfKeyAuthorityRequest,
+    ) {
+        let weak_self = self.weak_self.clone();
+        (self.spawner)(Box::pin(async move {
+            let Some(host) = weak_self.upgrade() else {
+                return;
+            };
+            let cx = CallContext::with_request_id(format!(
+                "ring-vrf-registration-mirror:{}",
+                sso_message_id()
+            ));
+            if let Err(error) = host
+                .remote_register_ring_vrf_key(&cx, &session, request)
+                .await
+            {
+                warn!(?error, "ring-VRF registration mirror failed");
+            }
+        }));
     }
 
     async fn product_subtree_public_key(
@@ -1788,8 +2142,27 @@ impl PairingHost {
         session: &AuthoritySession,
         request: AccountAliasAuthorityRequest,
     ) -> Result<v01::ContextualAlias, RingVrfError> {
-        let session = self.current_private_session(session)?;
-        self.remote_account_alias(cx, &session, request).await
+        let private_session = self.current_private_session(session)?;
+        if request.calling_product_id == request.key_handle.dot_ns_identifier
+            && let Some(entropy) = self
+                .local_ring_vrf_entropy_for_ring(
+                    &private_session,
+                    &request.key_handle,
+                    &request.ring_location,
+                )
+                .await?
+        {
+            self.ring_resolver.validate(&request.ring_location).await?;
+            self.current_private_session(session)?;
+            let context = development_context_bytes(&request.context);
+            let alias = alias_from_entropy(&entropy, &context)?;
+            return Ok(v01::ContextualAlias {
+                context,
+                alias: alias.to_vec(),
+            });
+        }
+        self.remote_account_alias(cx, &private_session, request)
+            .await
     }
 
     async fn create_proof(
@@ -1798,8 +2171,146 @@ impl PairingHost {
         session: &AuthoritySession,
         request: CreateProofAuthorityRequest,
     ) -> Result<v01::HostAccountCreateProofResponse, RingVrfError> {
-        let session = self.current_private_session(session)?;
-        self.remote_create_proof(cx, &session, request).await
+        Self::require_owned_ring_vrf_key(&request.calling_product_id, &request.key_handle)?;
+        let private_session = self.current_private_session(session)?;
+        if let Some(entropy) = self
+            .local_ring_vrf_entropy_for_ring(
+                &private_session,
+                &request.key_handle,
+                &request.ring_location,
+            )
+            .await?
+        {
+            let member = member_from_entropy(&entropy)?;
+            let resolved = self
+                .ring_resolver
+                .resolve(&request.ring_location, &[MemberCandidate { member }])
+                .await?;
+            self.current_private_session(session)?;
+            let context = development_context_bytes(&request.context);
+            let (proof, alias) = create_proof(&entropy, &resolved, &context, &request.message)?;
+            return Ok(v01::HostAccountCreateProofResponse {
+                proof,
+                contextual_alias: v01::ContextualAlias {
+                    context,
+                    alias: alias.to_vec(),
+                },
+                ring_index: resolved.ring_index,
+                ring_revision: resolved.ring_revision,
+            });
+        }
+        self.remote_create_proof(cx, &private_session, request)
+            .await
+    }
+
+    async fn register_ring_vrf_key(
+        &self,
+        cx: &CallContext,
+        session: &AuthoritySession,
+        request: RegisterRingVrfKeyAuthorityRequest,
+    ) -> Result<v01::RingVrfPublicKey, RingVrfError> {
+        let private_session = self.current_private_session(session)?;
+        let handle = v01::ProductAccountId {
+            dot_ns_identifier: normalize_product_identifier(&request.calling_product_id).map_err(
+                |error| RingVrfError::Unknown {
+                    reason: error.to_string(),
+                },
+            )?,
+            derivation_index: request.index.clone(),
+        };
+        if let Some(auto_signing) = self
+            .auto_signing_key(&private_session, &request.calling_product_id)
+            .await
+            .map_err(RingVrfError::from)?
+        {
+            self.ring_resolver.validate(&request.ring).await?;
+            self.current_private_session(session)?;
+            let entropy = Zeroizing::new(derive_ring_vrf_entropy_from_domain(
+                auto_signing.ring_vrf_domain_entropy(),
+                &request.index,
+            ));
+            let public_key = member_from_entropy(&entropy)?;
+            self.ring_vrf_registry
+                .register(
+                    private_session.public_key,
+                    handle,
+                    request.ring.clone(),
+                    public_key,
+                )
+                .await?;
+            self.current_private_session(session)?;
+            self.mirror_ring_vrf_registration(private_session, request);
+            return Ok(public_key);
+        }
+        let public_key = self
+            .remote_register_ring_vrf_key(cx, &private_session, request.clone())
+            .await?;
+        self.ring_vrf_registry
+            .register(private_session.public_key, handle, request.ring, public_key)
+            .await?;
+        self.current_private_session(session)?;
+        Ok(public_key)
+    }
+
+    async fn list_ring_vrf_keys(
+        &self,
+        cx: &CallContext,
+        session: &AuthoritySession,
+        request: ListRingVrfKeysAuthorityRequest,
+    ) -> Result<Vec<v01::RegisteredRingVrfKey>, RingVrfError> {
+        let private_session = self.current_private_session(session)?;
+        let owner = normalize_product_identifier(&request.owner).map_err(|error| {
+            RingVrfError::Unknown {
+                reason: error.to_string(),
+            }
+        })?;
+        if request.calling_product_id == owner
+            && let Some(mut entries) = self
+                .ring_vrf_registry
+                .complete_owner_entries(private_session.public_key, &owner)
+                .await?
+        {
+            self.current_private_session(session)?;
+            apply_ring_vrf_disclosure(&mut entries, request.disclosure);
+            return Ok(entries);
+        }
+        let requested_disclosure = request.disclosure;
+        let mut remote_request = request;
+        if remote_request.calling_product_id == owner {
+            remote_request.disclosure = v01::RingVrfKeyDisclosure::PublicKey;
+        }
+        let mut entries = self
+            .remote_list_ring_vrf_keys(cx, &private_session, remote_request)
+            .await?;
+        validate_owner_listing(&owner, &entries)?;
+        if entries.iter().all(|entry| entry.public_key.is_some()) {
+            entries = self
+                .ring_vrf_registry
+                .reconcile_owner(private_session.public_key, &owner, entries)
+                .await?;
+        }
+        self.current_private_session(session)?;
+        apply_ring_vrf_disclosure(&mut entries, requested_disclosure);
+        Ok(entries)
+    }
+
+    async fn ring_vrf_sign(
+        &self,
+        cx: &CallContext,
+        session: &AuthoritySession,
+        request: RingVrfSignAuthorityRequest,
+    ) -> Result<Vec<u8>, RingVrfError> {
+        Self::require_owned_ring_vrf_key(&request.calling_product_id, &request.key_handle)?;
+        let private_session = self.current_private_session(session)?;
+        if let Some(entropy) = self
+            .local_ring_vrf_entropy(&private_session, &request.key_handle)
+            .await?
+        {
+            self.current_private_session(session)?;
+            return sign_from_entropy(&entropy, &request.message);
+        }
+        self.remote_ring_vrf_sign(cx, &private_session, request)
+            .await
     }
 
     async fn allocate_resources(
@@ -1886,6 +2397,17 @@ impl PairingHost {
     }
 }
 
+fn apply_ring_vrf_disclosure(
+    entries: &mut [v01::RegisteredRingVrfKey],
+    disclosure: v01::RingVrfKeyDisclosure,
+) {
+    if disclosure == v01::RingVrfKeyDisclosure::Anonymized {
+        for entry in entries {
+            entry.public_key = None;
+        }
+    }
+}
+
 fn login_error_reason(err: &CallError<HostRequestLoginError>) -> String {
     match err {
         CallError::Domain(HostRequestLoginError::V1(v01::HostRequestLoginError::Unknown {
@@ -1949,6 +2471,14 @@ impl ProductAuthority for PairingHost {
         PairingHost::product_subtree_public_key(self, cx, session, product_id).await
     }
 
+    async fn subtree_resolution_reaches_account_holder(
+        &self,
+        session: &AuthoritySession,
+        product_id: &str,
+    ) -> bool {
+        PairingHost::subtree_reaches_account_holder(self, session, product_id).await
+    }
+
     async fn sign_vrf(
         &self,
         cx: &CallContext,
@@ -2002,6 +2532,33 @@ impl ProductAuthority for PairingHost {
         request: CreateProofAuthorityRequest,
     ) -> Result<v01::HostAccountCreateProofResponse, RingVrfError> {
         PairingHost::create_proof(self, cx, session, request).await
+    }
+
+    async fn register_ring_vrf_key(
+        &self,
+        cx: &CallContext,
+        session: &AuthoritySession,
+        request: RegisterRingVrfKeyAuthorityRequest,
+    ) -> Result<v01::RingVrfPublicKey, RingVrfError> {
+        PairingHost::register_ring_vrf_key(self, cx, session, request).await
+    }
+
+    async fn list_ring_vrf_keys(
+        &self,
+        cx: &CallContext,
+        session: &AuthoritySession,
+        request: ListRingVrfKeysAuthorityRequest,
+    ) -> Result<Vec<v01::RegisteredRingVrfKey>, RingVrfError> {
+        PairingHost::list_ring_vrf_keys(self, cx, session, request).await
+    }
+
+    async fn ring_vrf_sign(
+        &self,
+        cx: &CallContext,
+        session: &AuthoritySession,
+        request: RingVrfSignAuthorityRequest,
+    ) -> Result<Vec<u8>, RingVrfError> {
+        PairingHost::ring_vrf_sign(self, cx, session, request).await
     }
 
     async fn allocate_resources(

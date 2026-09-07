@@ -12,6 +12,7 @@ rust/crates/
   truapi-codegen/        rustdoc JSON → TypeScript client + Rust dispatcher
   truapi-macros/         #[wire(id = N)] proc-macro
   truapi-platform/       Host syscall traits (storage, navigation, consent, ...)
+  truapi-provider/       network provider backends (WebSocket RPC or smoldot light-client)
   truapi-server/         Rust runtime hosts implement; ships as WASM (browser/node)
 js/packages/
   truapi/                  @parity/truapi TS package; generated TS lives under ignored paths
@@ -19,16 +20,41 @@ js/packages/
                           `.` (shared host types), `/web` (iframe + Web
                           Worker), `/worker-runtime` (Worker entry).
                           WASM bundle (gitignored) under dist/wasm/web/, built via `make wasm`
+  truapi-debugger/        @parity/truapi-debugger (published to npm): the debugger.
+                          Owns all decoding of the wire frames the Rust host tap
+                          (truapi-server's DebugSink) streams out, and decodes
+                          every frame by default (no denylist, no reveal toggle).
+                          Holds the trace, envelope-decode, and value-decode
+                          engines, the shared view model + renderers, and two
+                          mounts over them: server.ts (standalone WS+HTTP app on
+                          127.0.0.1:9231 that hosts dial into, `npm run serve`;
+                          endpoints /, /op-list, /op, /view, /channels, /stats,
+                          /traces, /frame) and in-app.ts (createInAppDebugger:
+                          same-page host, no server, no dial). @parity/truapi has
+                          no debug seam. Where the app ultimately lives is still
+                          an open decision.
 js/container/              TS lockdown container for the iOS host web view; `npm run build`
                            bundles it into ios/truapi-host/Sources/TrUAPIHost/Resources/
+ios/truapi-provider/       TrUAPIProvider Swift package (chain transport over UniFFI);
+                           second product of the root Package.swift, released on its
+                           own tag (@parity/ios-provider@<v>) via its scripts/
+android/truapi-host/       truapi-host-android AAR (bindings + Kotlin shell + per-ABI
+                           cdylib), published to GitHub Packages by release-android;
+                           include `@parity/android-host <version>` in the `release:`
+                           PR title
+android/truapi-provider/   truapi-provider-android AAR; bundles the cdylib the same way,
+                           so consumers need no Rust toolchain
 ios/truapi-host/           TrUAPIHost Swift package over the truapi-server UniFFI core;
                            SPM manifest at the repo root (Package.swift), rebuild via
                            ios/truapi-host/scripts/rebuild.sh
-playground/                Next.js interactive playground; deploys to truapi-playground.dot
+playground/                Next.js interactive playground; deploys to the truapi-playground dotNS label
 hosts/dotli/               dotli submodule
 docs/                      design docs, RFCs, feature proposals
 scripts/codegen.sh         regenerate the TS client from the Rust crate
 scripts/battery.sh         run the generated battery against both headless CLI host roles
+scripts/truapi-host-installer.sh
+                           one-liner installer for the prebuilt truapi-host CLI
+.github/consumers.json     maps each released package to the repos notified by a bump issue
 ```
 
 ### Crate + binding invariants
@@ -50,6 +76,18 @@ scripts/battery.sh         run the generated battery against both headless CLI h
   unsupported leaf values instead of defining parallel `Native*` mirrors.
   Boundary-specific native types are reserved for lifecycle or callback
   behavior that has no canonical value-type equivalent.
+- `truapi-host-cli`'s crate version tracks `js/packages/truapi/package.json`,
+  kept in sync by `scripts/sync-release-versions.mjs`. A
+  `release: @parity/truapi <version>` therefore also publishes prebuilt
+  `truapi-host` binaries through `.github/workflows/release-cli.yml`: one
+  archive per target (`aarch64-apple-darwin`, `x86_64-unknown-linux-musl`,
+  `aarch64-unknown-linux-musl`) plus a `.sha256`, uploaded to the
+  `@parity/truapi@<version>` release, followed by the `truapi-host-cli-stable`
+  pointer that `scripts/truapi-host-installer.sh` and the CLI's own updater
+  read. Release asset URLs must percent-encode the tag
+  (`%40parity%2Ftruapi%40<version>`). `make cli-dist CLI_TARGET=<triple>`
+  reproduces one archive locally, and `make e2e-cli-update` installs and
+  self-updates it against a loopback release server.
 - `truapi-server` WASM artifacts live under
   `js/packages/truapi-host/dist/wasm/web/` and are gitignored.
   Build them locally with `make wasm` (rerun whenever
@@ -57,18 +95,40 @@ scripts/battery.sh         run the generated battery against both headless CLI h
   `wasm32-unknown-unknown` to guard the wasm bridge and its offline subxt
   surface, but does not build or publish the packaged bundle; run `make wasm`
   locally before relying on the browser host.
-- After changing UniFFI-exposed types or native bindings, run
-  `./ios/truapi-host/scripts/rebuild.sh` and commit the generated bindings and
-  container output. When only the bindings changed, `make uniffi &&
-  ./ios/truapi-host/scripts/sync-bindings.sh` does that part without Xcode. CI
-  enforces it: the `ios-bindings` job regenerates and diffs the committed
-  bindings, but compiles no Swift, so the hand-written conformers are still on
-  you. To publish the binary, include `@parity/ios-host <version>`
-  in the `release:` PR title. The release workflow rebuilds and simulator-tests
-  the XCFramework, uploads it, and makes the `Package.swift` follow-up commit
-  only after the asset is live. `publish.sh <version>` is the manual fallback.
-  Keep `useLocalBinary = false` in committed manifests; `true` is for local
-  testing against the rebuilt XCFramework only.
+- The UniFFI bindings and the container bundle are gitignored build outputs.
+  After changing UniFFI-exposed types or native bindings, run
+  `./ios/truapi-host/scripts/rebuild.sh` to refresh them locally; when only the
+  bindings changed, `make uniffi && ./ios/truapi-host/scripts/sync-bindings.sh`
+  does that part without Xcode. Because nothing is committed, CI regenerates
+  rather than diffs: the `ios-bindings` job proves every UniFFI-exposed type
+  still has a binding representation, and the `ios-swift` job generates the
+  package's Swift sources and container resource and then compiles the package
+  and its test target, which is what catches a hand-written conformer that
+  missed a new protocol requirement. `ios-swift` is path-filtered, and the
+  filter has to name every crate the bindings are generated from, since a
+  protocol change no longer leaves an `ios/` diff to key on. On the Kotlin side
+  the `ci-android` job compiles
+  `TrUAPIHost.kt` against freshly generated bindings on pull requests touching
+  `android/` or the native crates, which catches the same class of drift;
+  `make android-check` does it locally. The embedding apps are compiled by
+  neither.
+  Hosts implement `HostBridge`, whose protocol extension defaults the optional
+  callbacks; `TrUAPIHostRuntime` and each product execution retain one.
+  To publish, include `@parity/ios-host <version>` in the `release:` PR title.
+  `release-ios.yml` rebuilds and simulator-tests the XCFramework, uploads it,
+  then cuts the plain semver tag `<version>` whose commit carries the generated
+  sources and a manifest pointing at that asset. That tag is the SwiftPM
+  contract: consumers pin `exact("<version>")`, and a branch cannot be consumed
+  directly because the generated sources are ignored there. The job clones and
+  compiles the tag before pushing it, then opens a pull request against the
+  release branch that points `Package.swift` at the new asset. Dispatching
+  `release-ios` manually with a pre-release version cuts a tag for app-side
+  testing of an unmerged change without touching any branch. When the title
+  also names an npm package, the iOS job waits on that publish being confirmed
+  on npm. `publish.sh <version>` is the manual fallback.
+  `Package.swift` reads `TRUAPI_USE_LOCAL_BINARY` from the environment to build
+  against the rebuilt XCFramework; the tag script refuses a manifest that pins
+  the local binary.
 
 ## Code style
 
@@ -174,8 +234,16 @@ yarn build              # static export to out/
 yarn lint
 ```
 
-The playground must be opened from inside a TrUAPI host. The fastest local
-setup is to run dotli's preview server alongside the playground and open
+The fastest way to exercise the playground is `truapi-host dev -- yarn dev`
+from `playground/`, which starts a signing host on `127.0.0.1:9955`, serves the
+browser bridge at `/bootstrap.js`, and runs the dev server with the host live.
+The playground's root layout carries the development-only `<script>` tag that
+loads it. TCP frame peers and browser origins are limited to loopback. On Unix,
+the CLI owns the wrapped command's process group and applies a five-second
+SIGTERM grace period before killing remaining descendants.
+
+The playground must otherwise be opened from inside a TrUAPI host. The fastest
+local setup is to run dotli's preview server alongside the playground and open
 `http://localhost:5173/localhost:3000` in any browser. Use the
 [`playground-local-stack`](.claude/skills/playground-local-stack/SKILL.md)
 skill to bring both servers up in tmux (it handles the `hosts/dotli/`
@@ -268,5 +336,5 @@ debug-panel traffic disappearing when the login popup opens.
 
 ## Deployment
 
-Pushes to `main` trigger `.github/workflows/deploy-playground.yml`, which builds `playground/` and publishes the static export to `truapi-playground.dot` via `bulletin-deploy`.
+Pushes to `main` trigger `.github/workflows/deploy-playground.yml`, which builds `playground/` and publishes the static export via `bulletin-deploy`. Pass the bare dotNS label `truapi-playground`, never a suffixed name: dotNS attaches the top-level domain its network declares, so the live name is `truapi-playground.paseo` on Paseo Next v2. The deploy steps stay in this repo because `bulletin-deploy` ships its shared reusable workflow from a private repo that this public one cannot call.
 Pushes to `main` also trigger `.github/workflows/deploy-docs.yml`, which publishes the explorer (at the Pages root), the playground (under `/playground/`), and the Rust API docs (under `/cargo_doc/`) to GitHub Pages.

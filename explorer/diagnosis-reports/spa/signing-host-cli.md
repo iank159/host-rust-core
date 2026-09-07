@@ -2,6 +2,7 @@
 
 | Method | Status | Details |
 | --- | --- | --- |
+| `Account/ring_vrf_registry_e2e` | ✅ |  |
 | `Account/connection_status_subscribe` | ✅ |  |
 | `Account/get_account` | ✅ |  |
 | `Account/get_account_alias` | ✅ |  |
@@ -10,6 +11,9 @@
 | `Account/get_user_id` | ✅ |  |
 | `Account/request_login` | ✅ |  |
 | `Account/sign_vrf` | ✅ |  |
+| `Account/register_ring_vrf_key` | ✅ |  |
+| `Account/list_ring_vrf_keys` | ✅ |  |
+| `Account/ring_vrf_sign` | ✅ |  |
 | `Chain/follow_head_subscribe` | ✅ |  |
 | `Chain/get_head_header` | ✅ |  |
 | `Chain/get_head_body` | ✅ |  |
@@ -23,12 +27,12 @@
 | `Chain/get_spec_properties` | ✅ |  |
 | `Chain/broadcast_transaction` | ✅ |  |
 | `Chain/stop_transaction` | ✅ |  |
-| `Coin Payment/create_purse` | ❌ | createPurse failed: { "error": { "tag": "HostFailure", "value": { "reason": "unavailable" } } } |
-| `Coin Payment/query_purse` | ❌ | queryPurse failed: { "error": { "tag": "HostFailure", "value": { "reason": "unavailable" } } } |
+| `Coin Payment/create_purse` | ❌ | createPurse failed: { "error": { "tag": "Unsupported" } } |
+| `Coin Payment/query_purse` | ❌ | queryPurse failed: { "error": { "tag": "Unsupported" } } |
 | `Coin Payment/rebalance_purse` | ❌ | Subscription interrupted |
 | `Coin Payment/delete_purse` | ❌ | Subscription interrupted |
-| `Coin Payment/create_receivable` | ❌ | createReceivable failed: { "error": { "tag": "HostFailure", "value": { "reason": "unavailable" } } } |
-| `Coin Payment/create_cheque` | ❌ | createCheque failed: { "error": { "tag": "HostFailure", "value": { "reason": "unavailable" } } } |
+| `Coin Payment/create_receivable` | ❌ | createReceivable failed: { "error": { "tag": "Unsupported" } } |
+| `Coin Payment/create_cheque` | ❌ | createCheque failed: { "error": { "tag": "Unsupported" } } |
 | `Coin Payment/deposit` | ❌ | Subscription interrupted |
 | `Coin Payment/refund` | ❌ | Subscription interrupted |
 | `Coin Payment/listen_for_payment` | ❌ | Subscription interrupted |
@@ -62,3 +66,4 @@
 | `System/navigate_to` | ✅ |  |
 | `Theme/subscribe` | ✅ |  |
 | `Resource Allocation/auto_signing_e2e` | ✅ |  |
+| `Account/auto_signing_ring_vrf_e2e` | ✅ |  |

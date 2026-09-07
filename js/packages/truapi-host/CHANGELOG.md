@@ -1,5 +1,94 @@
 # @parity/truapi-host
 
+## 0.10.1
+
+### Patch Changes
+
+- Preserve buffered subscription event order.
+- Resolve the dotNS controller whether the gateway stores a dispatcher or the controller.
+- Page dotNS `pendingClaims` through its `(address,uint256,uint256)` view, and retain claims from complete earlier pages when a later page reverts.
+- Read Resources parameters through runtime view functions.
+- Updated dependencies
+  - @parity/truapi@0.13.1
+
+## 0.10.0
+
+### Minor Changes
+
+- Rename the PreviewNet dotNS top-level domain from `.test` to `.testnet`.
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+  - @parity/truapi@0.13.0
+
+## 0.9.0
+
+### Minor Changes
+
+- 8983638: Support the development-only raw proof context used by `development_createAccountProof`.
+- 654c0cf: Expose the host's selected language through `locale.subscribe()`.
+
+### Patch Changes
+
+- Updated dependencies [654c0cf]
+  - @parity/truapi@0.12.0
+
+## 0.8.0
+
+### Minor Changes
+
+- fa7d8db: Expose the current canonical product identifier through `system.getProductContext()`.
+
+### Patch Changes
+
+- Updated dependencies [fa7d8db]
+  - @parity/truapi@0.11.0
+
+## 0.7.0
+
+### Minor Changes
+
+- Host runtime over the current Rust core. A JS host can serve Chat as an
+  optional capability: bot registration, every message variant forwarded,
+  manifest execution-kind matching, and custom chat rendering. The runtime
+  retains and exposes session identity material, emits the opening auth state
+  with a typed `LoginFailed` kind, forwards session activation, yields the named
+  theme from `subscribe_theme`, and reads person usernames from Asset Hub dotNS.
+  External navigation is gated on a per-host remote grant, own-account subtree
+  consent is gated with a bounded deadline, and statement-store allowance
+  renewal pools PGAS slots and reports what the last pass achieved. Fixes:
+  workers are disposed cleanly, a misbehaving product or host no longer aborts
+  the process, and the wasm glue is imported by a literal specifier.
+
+### Patch Changes
+
+- Updated dependencies [d872d64]
+- Updated dependencies [d49f253]
+  - @parity/truapi@0.10.0
+
+## 0.6.0
+
+### Minor Changes
+
+- The host runtime backs the ring-VRF registry with a product-scoped key store, so
+  registration, listing, and direct signing resolve against registered member
+  keys, and a foreign key is refused unless its owner allowlisted the caller.
+
+  Statement-store allowances renew themselves as they approach expiry and replace
+  the oldest slot once a period is full, so long-lived products keep a usable slot
+  without a manual top-up. Allowance operations reuse cached chain metadata, rings,
+  and a single shared extension-info resolver instead of re-reading them per call.
+
+  Product identifiers accept per-network dotNS TLDs, so a product name resolves
+  against the host's configured network rather than a single hard-coded suffix.
+
+### Patch Changes
+
+- Updated dependencies
+  - @parity/truapi@0.9.0
+
 ## 0.5.0
 
 ### Minor Changes

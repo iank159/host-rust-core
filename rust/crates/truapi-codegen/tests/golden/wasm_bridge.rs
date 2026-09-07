@@ -12,25 +12,36 @@ use wasm_bindgen::JsValue;
 
 use super::{
     WasmPlatform, call_js_function, decode_bytes, decode_js_item, generic, get_function,
-    invoke_bool, invoke_bytes_return, invoke_js_subscription, invoke_optional_bytes_return,
-    invoke_unit, parse_optional_bytes_item,
+    get_optional_function, invoke_bool, invoke_bytes_return, invoke_js_subscription,
+    invoke_optional_bytes_return, invoke_unit, missing_callback, parse_optional_bytes_item,
 };
 
 /// JS-side callbacks invoked by the wasm platform bridge. Methods with
 /// Rust default bodies are still required here because the generated TS
 /// adapter resolves optional host callbacks before constructing this
 /// raw callback object.
+///
+/// Callbacks of an optional capability trait are replaced by a throwing
+/// stub when the host omits the group. The core never reaches them: it
+/// only holds an adapter for a capability whose `has_*` accessor is
+/// true, and answers the rest with `Unsupported`.
 pub(super) struct JsBridge {
     pub(super) auth_state_changed: Function,
     pub(super) chain_connect: Function,
+    pub(super) create_chat_room: Function,
+    pub(super) register_chat_bot: Function,
+    pub(super) post_chat_message: Function,
+    pub(super) subscribe_chat_rooms: Function,
     pub(super) read_core_storage: Function,
     pub(super) write_core_storage: Function,
     pub(super) clear_core_storage: Function,
     pub(super) feature_supported: Function,
     pub(super) supported_chains: Function,
+    pub(super) subscribe_locale: Function,
     pub(super) navigate_to: Function,
     pub(super) push_notification: Function,
     pub(super) cancel_notification: Function,
+    pub(super) device_permission_status: Function,
     pub(super) device_permission: Function,
     pub(super) remote_permission: Function,
     pub(super) lookup_preimage: Function,
@@ -39,6 +50,8 @@ pub(super) struct JsBridge {
     pub(super) clear: Function,
     pub(super) subscribe_theme: Function,
     pub(super) confirm_user_action: Function,
+    pub(super) chat_present: bool,
+    pub(super) permission_status_present: bool,
 }
 
 impl JsBridge {
@@ -46,14 +59,25 @@ impl JsBridge {
         Ok(Self {
             auth_state_changed: get_function(callbacks, "authStateChanged")?,
             chain_connect: get_function(callbacks, "chainConnect")?,
+            create_chat_room: get_optional_function(callbacks, "createChatRoom")?
+                .unwrap_or_else(|| missing_callback("createChatRoom")),
+            register_chat_bot: get_optional_function(callbacks, "registerChatBot")?
+                .unwrap_or_else(|| missing_callback("registerChatBot")),
+            post_chat_message: get_optional_function(callbacks, "postChatMessage")?
+                .unwrap_or_else(|| missing_callback("postChatMessage")),
+            subscribe_chat_rooms: get_optional_function(callbacks, "subscribeChatRooms")?
+                .unwrap_or_else(|| missing_callback("subscribeChatRooms")),
             read_core_storage: get_function(callbacks, "readCoreStorage")?,
             write_core_storage: get_function(callbacks, "writeCoreStorage")?,
             clear_core_storage: get_function(callbacks, "clearCoreStorage")?,
             feature_supported: get_function(callbacks, "featureSupported")?,
             supported_chains: get_function(callbacks, "supportedChains")?,
+            subscribe_locale: get_function(callbacks, "subscribeLocale")?,
             navigate_to: get_function(callbacks, "navigateTo")?,
             push_notification: get_function(callbacks, "pushNotification")?,
             cancel_notification: get_function(callbacks, "cancelNotification")?,
+            device_permission_status: get_optional_function(callbacks, "devicePermissionStatus")?
+                .unwrap_or_else(|| missing_callback("devicePermissionStatus")),
             device_permission: get_function(callbacks, "devicePermission")?,
             remote_permission: get_function(callbacks, "remotePermission")?,
             lookup_preimage: get_function(callbacks, "lookupPreimage")?,
@@ -62,7 +86,23 @@ impl JsBridge {
             clear: get_function(callbacks, "clear")?,
             subscribe_theme: get_function(callbacks, "subscribeTheme")?,
             confirm_user_action: get_function(callbacks, "confirmUserAction")?,
+            chat_present: get_optional_function(callbacks, "createChatRoom")?.is_some()
+                && get_optional_function(callbacks, "registerChatBot")?.is_some()
+                && get_optional_function(callbacks, "postChatMessage")?.is_some()
+                && get_optional_function(callbacks, "subscribeChatRooms")?.is_some(),
+            permission_status_present: get_optional_function(callbacks, "devicePermissionStatus")?
+                .is_some(),
         })
+    }
+
+    /// Whether the host supplied every `chat` callback.
+    pub(super) fn has_chat(&self) -> bool {
+        self.chat_present
+    }
+
+    /// Whether the host supplied every `permission_status` callback.
+    pub(super) fn has_permission_status(&self) -> bool {
+        self.permission_status_present
     }
 }
 
@@ -74,6 +114,83 @@ impl truapi_platform::AuthPresenter for WasmPlatform {
         ) {
             web_sys::console::error_1(&JsValue::from_str(&reason));
         }
+    }
+}
+
+#[truapi_platform::async_trait]
+impl truapi_platform::ChatPlatform for WasmPlatform {
+    async fn create_chat_room(
+        &self,
+        product: &truapi_platform::ProductContext,
+        request: v01::HostChatCreateRoomRequest,
+    ) -> Result<v01::HostChatCreateRoomResponse, v01::HostChatCreateRoomError> {
+        let bytes = invoke_bytes_return(
+            &self.bridge.create_chat_room,
+            vec![
+                Uint8Array::from(product.encode().as_slice()).into(),
+                Uint8Array::from(request.encode().as_slice()).into(),
+            ],
+        )
+        .await
+        .map_err(|reason| v01::HostChatCreateRoomError::Unknown { reason })?;
+        decode_bytes::<v01::HostChatCreateRoomResponse>(
+            bytes,
+            "createChatRoom response did not decode",
+        )
+        .map_err(|reason| v01::HostChatCreateRoomError::Unknown { reason })
+    }
+
+    async fn register_chat_bot(
+        &self,
+        product: &truapi_platform::ProductContext,
+        request: v01::HostChatRegisterBotRequest,
+    ) -> Result<v01::HostChatRegisterBotResponse, v01::HostChatRegisterBotError> {
+        let bytes = invoke_bytes_return(
+            &self.bridge.register_chat_bot,
+            vec![
+                Uint8Array::from(product.encode().as_slice()).into(),
+                Uint8Array::from(request.encode().as_slice()).into(),
+            ],
+        )
+        .await
+        .map_err(|reason| v01::HostChatRegisterBotError::Unknown { reason })?;
+        decode_bytes::<v01::HostChatRegisterBotResponse>(
+            bytes,
+            "registerChatBot response did not decode",
+        )
+        .map_err(|reason| v01::HostChatRegisterBotError::Unknown { reason })
+    }
+
+    async fn post_chat_message(
+        &self,
+        product: &truapi_platform::ProductContext,
+        request: v01::HostChatPostMessageRequest,
+    ) -> Result<v01::HostChatPostMessageResponse, v01::HostChatPostMessageError> {
+        let bytes = invoke_bytes_return(
+            &self.bridge.post_chat_message,
+            vec![
+                Uint8Array::from(product.encode().as_slice()).into(),
+                Uint8Array::from(request.encode().as_slice()).into(),
+            ],
+        )
+        .await
+        .map_err(|reason| v01::HostChatPostMessageError::Unknown { reason })?;
+        decode_bytes::<v01::HostChatPostMessageResponse>(
+            bytes,
+            "postChatMessage response did not decode",
+        )
+        .map_err(|reason| v01::HostChatPostMessageError::Unknown { reason })
+    }
+
+    fn subscribe_chat_rooms(
+        &self,
+        product: &truapi_platform::ProductContext,
+    ) -> BoxStream<'static, Result<v01::HostChatListSubscribeItem, v01::GenericError>> {
+        invoke_js_subscription(
+            &self.bridge.subscribe_chat_rooms,
+            Some(product.encode()),
+            parse_host_chat_list_subscribe_item_item,
+        )
     }
 }
 
@@ -152,6 +269,18 @@ impl truapi_platform::Features for WasmPlatform {
     }
 }
 
+impl truapi_platform::LocaleHost for WasmPlatform {
+    fn subscribe_locale(
+        &self,
+    ) -> BoxStream<'static, Result<v01::HostLocaleSubscribeItem, v01::GenericError>> {
+        invoke_js_subscription(
+            &self.bridge.subscribe_locale,
+            None,
+            parse_host_locale_subscribe_item_item,
+        )
+    }
+}
+
 #[truapi_platform::async_trait]
 impl truapi_platform::Navigation for WasmPlatform {
     async fn navigate_to(&self, url: String) -> Result<(), v01::HostNavigateToError> {
@@ -186,6 +315,26 @@ impl truapi_platform::Notifications for WasmPlatform {
             vec![JsValue::from_f64(f64::from(id))],
         )
         .await
+        .map_err(generic)
+    }
+}
+
+#[truapi_platform::async_trait]
+impl truapi_platform::PermissionStatusHost for WasmPlatform {
+    async fn device_permission_status(
+        &self,
+        request: v01::HostDevicePermissionRequest,
+    ) -> Result<truapi_platform::DevicePermissionStatus, v01::GenericError> {
+        let bytes = invoke_bytes_return(
+            &self.bridge.device_permission_status,
+            vec![Uint8Array::from(request.encode().as_slice()).into()],
+        )
+        .await
+        .map_err(generic)?;
+        decode_bytes::<truapi_platform::DevicePermissionStatus>(
+            bytes,
+            "devicePermissionStatus response did not decode",
+        )
         .map_err(generic)
     }
 }
@@ -276,8 +425,14 @@ impl truapi_platform::ProductStorage for WasmPlatform {
 }
 
 impl truapi_platform::ThemeHost for WasmPlatform {
-    fn subscribe_theme(&self) -> BoxStream<'static, Result<v01::ThemeVariant, v01::GenericError>> {
-        invoke_js_subscription(&self.bridge.subscribe_theme, None, parse_theme_variant_item)
+    fn subscribe_theme(
+        &self,
+    ) -> BoxStream<'static, Result<v01::HostThemeSubscribeItem, v01::GenericError>> {
+        invoke_js_subscription(
+            &self.bridge.subscribe_theme,
+            None,
+            parse_host_theme_subscribe_item_item,
+        )
     }
 }
 
@@ -296,6 +451,20 @@ impl truapi_platform::UserConfirmation for WasmPlatform {
     }
 }
 
-fn parse_theme_variant_item(value: JsValue) -> Result<v01::ThemeVariant, String> {
-    decode_js_item::<v01::ThemeVariant>(value, "ThemeVariant")
+fn parse_host_chat_list_subscribe_item_item(
+    value: JsValue,
+) -> Result<v01::HostChatListSubscribeItem, String> {
+    decode_js_item::<v01::HostChatListSubscribeItem>(value, "HostChatListSubscribeItem")
+}
+
+fn parse_host_locale_subscribe_item_item(
+    value: JsValue,
+) -> Result<v01::HostLocaleSubscribeItem, String> {
+    decode_js_item::<v01::HostLocaleSubscribeItem>(value, "HostLocaleSubscribeItem")
+}
+
+fn parse_host_theme_subscribe_item_item(
+    value: JsValue,
+) -> Result<v01::HostThemeSubscribeItem, String> {
+    decode_js_item::<v01::HostThemeSubscribeItem>(value, "HostThemeSubscribeItem")
 }

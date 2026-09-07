@@ -1,5 +1,64 @@
 # @parity/truapi
 
+## 0.13.1
+
+### Patch Changes
+
+- Follow the previewnet and paseo-next-v2 testnet wipes: the well-known chain genesis hashes, the `truapi-host` CLI preset, and the bundled light-client chain specs match the live chains again.
+
+## 0.13.0
+
+### Minor Changes
+
+- Accept pasted pairing QR images in the `truapi-host` CLI terminal UI.
+- Rename the PreviewNet dotNS top-level domain from `.test` to `.testnet`.
+
+## 0.12.0
+
+### Minor Changes
+
+- 8983638: Add `development_createAccountProof`, a development-only helper for creating a proof with an exact 32-byte context.
+- 654c0cf: Expose the host's selected language through `locale.subscribe()`.
+
+## 0.11.0
+
+### Minor Changes
+
+- fa7d8db: Expose the current canonical product identifier through `system.getProductContext()`.
+
+## 0.10.0
+
+### Minor Changes
+
+- d872d64: Export `PREVIEWNET_INDIVIDUALITY` and `PREVIEWNET_ASSET_HUB` well-known chains,
+  so a product on previewnet can pin the genesis hashes it signs `CheckGenesis`
+  over the same way a product on `paseo-next-v2` does. Pairs with the CLI gaining a
+  `previewnet` network preset.
+- d49f253: Add `createWebSocketProvider(url)` for hosts that serve protocol frames over a
+  WebSocket, and `connectWebSocketHost(url)` on the sandbox path so a plain
+  browser tab using such a host is detected as hosted and shares the cached
+  client. Both native host READMEs already pointed products at
+  `createWebSocketProvider`, which until now did not exist, so every browser
+  product had to hand-write the bridge. `truapi-host signing-host --frame-listen`
+  is now reachable from an ordinary tab, and the CLI's own TCP provider delegates
+  to the shared implementation.
+
+## 0.9.0
+
+### Minor Changes
+
+- Add the RFC-0024 ring-VRF key management surface. `account.registerRingVrfKey`
+  registers a product-owned member key for a ring and returns its public key,
+  `account.listRingVrfKeys` reports an owner product's registry entries at either
+  `Anonymized` or `PublicKey` disclosure, and `account.ringVrfSign` signs bytes
+  directly with a registered key.
+
+  `account.getAccountAlias` and `account.createAccountProof` take a `keyHandle`
+  naming the registered member key the host must use, and ring locations address
+  the collection directly without a pallet-instance junction. Their error unions
+  carry `KeyNotRegistered` and `KeyNotInRing`; proof creation also reports
+  `NotAllowlisted` when a foreign key's owner has not allowlisted the caller.
+
 ## 0.8.0
 
 ### Minor Changes

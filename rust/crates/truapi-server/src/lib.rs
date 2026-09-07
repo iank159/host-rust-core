@@ -2,6 +2,9 @@
     clippy::double_must_use,
     reason = "async-trait generates must_use futures for async trait methods"
 )]
+// The pairing-flow future nests the chain, SSO and identity futures deeply
+// enough that proving the tree's auto traits exceeds the default limit.
+#![recursion_limit = "256"]
 
 //! TrUAPI server runtime: dispatcher, frames, SCALE encoding, stream management.
 //!
@@ -15,6 +18,8 @@
 //!   native WebView hosts (Android/iOS).
 //! - [`native`]: UniFFI surface exposing the native host runtime + callbacks.
 //! - `wasm` (wasm32 only): wasm-bindgen surface exposing `WasmProductRuntime`.
+//! - `native_debug` (non-wasm32 only): a loopback WebSocket [`DebugSink`] that
+//!   streams tapped frames to the `@parity/truapi-debugger` app.
 
 pub(crate) mod chain_runtime;
 pub mod core;
@@ -46,16 +51,24 @@ pub mod native_renderer;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "ws-bridge"))]
+pub mod native_debug;
+
 pub use host_core::{
-    FrameSink, HostAdmin, PairingHostRuntime, ProductRuntime, ProductRuntimeControl,
-    ProductRuntimeError, SigningHostRuntime,
+    ChannelId, DebugEvent, DebugSink, FrameDirection, FrameSink, HostAdmin, PairingHostRuntime,
+    ProductRuntime, ProductRuntimeControl, ProductRuntimeError, SigningHostRuntime,
 };
 pub use host_logic::session::{
     ExternalPairedSession, SsoSessionInfo, decode_persisted_session, encode_external_paired_session,
 };
-pub use runtime::ResponderExit;
+#[cfg(all(not(target_arch = "wasm32"), feature = "ws-bridge"))]
+pub use native_debug::{DebugSinkError, WsDebugSink};
+#[cfg(not(target_arch = "wasm32"))]
+pub use runtime::StatementRenewalTarget;
+pub use runtime::login_failure::reports_exhausted_period;
 #[cfg(not(target_arch = "wasm32"))]
 pub use runtime::statement_allowance;
+pub use runtime::{PairedSsoPeer, ResponderExit};
 pub use truapi_platform::{
     CoreStorageKeyDescription, CoreStorageKeyDescriptionError, HostRuntimeConfig,
     PairingHostConfig, PermissionAuthorizationRequest, PermissionAuthorizationStatus, Platform,
@@ -76,6 +89,12 @@ pub use wasm::*;
 
 #[cfg(not(target_arch = "wasm32"))]
 uniffi::setup_scaffolding!();
+
+#[cfg(not(target_arch = "wasm32"))]
+uniffi::use_remote_type!(truapi::Bytes32);
+
+#[cfg(not(target_arch = "wasm32"))]
+use truapi::Bytes32;
 
 #[cfg(not(target_arch = "wasm32"))]
 truapi::uniffi_reexport_scaffolding!();

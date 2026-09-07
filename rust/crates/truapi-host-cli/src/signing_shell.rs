@@ -1,9 +1,11 @@
 //! Slash-command parsing and command-bar editing for the signing-host UI.
 
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use truapi_platform::normalize_product_identifier;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::LogLevel;
 use crate::sessions;
@@ -17,6 +19,26 @@ pub enum ProductCommand {
     Switch(String),
 }
 
+/// Operation selected through `/devices`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceCommand {
+    /// List paired devices for the active managed session.
+    List,
+    /// Remove the device with this statement account ID.
+    Remove([u8; 32]),
+}
+
+/// Operation selected through `/approval`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalCommand {
+    /// Print the current approval mode.
+    Current,
+    /// Prompt for every confirmation.
+    Manual,
+    /// Approve every confirmation without prompting.
+    Automatic,
+}
+
 /// Operation selected through `/session`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionCommand {
@@ -26,13 +48,94 @@ pub enum SessionCommand {
     List,
     /// Switch to or create the named session.
     Switch(String),
+    /// Permanently clear one named session or every session for the network.
+    Clear(sessions::SessionClearTarget),
+    /// Import an existing signer and initialize its username-owned session.
+    ImportMnemonic(SecretMnemonic),
+}
+
+/// Pairing input selected through `/pair`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairCommand {
+    /// Acquire a pairing deeplink from a copied QR image.
+    Scan,
+    /// Decode a pairing deeplink from an image file.
+    Image(PathBuf),
+    /// Answer the supplied Polkadot Mobile pairing deeplink.
+    Deeplink(String),
+}
+
+/// A mnemonic accepted by the command parser without exposing it through
+/// derived debug output or retaining it after the command is dropped.
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+pub struct SecretMnemonic(String);
+
+impl SecretMnemonic {
+    fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    /// Borrow the phrase only at the account-import boundary.
+    pub fn expose_secret(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretMnemonic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// Whether a command carries mnemonic material that must not enter UI history,
+/// transcripts, busy labels, or diagnostics.
+pub fn contains_mnemonic(command: &str) -> bool {
+    mnemonic_option_end(command).is_some()
+}
+
+fn mnemonic_option_end(command: &str) -> Option<usize> {
+    let trimmed = command.trim_start();
+    let leading_bytes = command.len().saturating_sub(trimmed.len());
+    let after_session = trimmed.strip_prefix("/session")?;
+    if !after_session.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let option = after_session.trim_start();
+    let option_start = command.len().saturating_sub(option.len());
+    let suffix = option.strip_prefix("--mnemonic")?;
+    if !suffix.is_empty() && !suffix.starts_with(char::is_whitespace) {
+        return None;
+    }
+    Some(leading_bytes.max(option_start) + "--mnemonic".len())
+}
+
+/// Replace mnemonic characters while preserving command length and cursor
+/// placement in the interactive command bar.
+pub fn mask_mnemonic(command: &str) -> Option<String> {
+    if !contains_mnemonic(command) {
+        return None;
+    }
+    let argument_start = mnemonic_option_end(command)?;
+    let mut masked = command[..argument_start].to_string();
+    masked.extend(command[argument_start..].chars().map(|character| {
+        if character.is_whitespace() {
+            character
+        } else {
+            '•'
+        }
+    }));
+    Some(masked)
 }
 
 /// A command accepted by the signing-host command bar or `exec` mode.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellCommand {
-    /// Answer a Polkadot Mobile pairing deeplink.
-    Pair(String),
+    /// Scan or answer a Polkadot Mobile pairing request.
+    Pair(PairCommand),
+    /// Inspect or remove paired devices for the active managed session.
+    Devices(DeviceCommand),
+    /// Inspect or change how future confirmations are approved.
+    Approval(ApprovalCommand),
     /// Edit the remembered product script, or run an explicit one, through the
     /// public frame endpoint.
     Script(Option<PathBuf>),
@@ -52,6 +155,8 @@ pub enum ShellCommand {
     Product(ProductCommand),
     /// Inspect, list, or switch the active persistent session.
     Session(SessionCommand),
+    /// Renew tracked statement-store allowances for the current period.
+    Renew,
     /// Shut down the signing host.
     Quit,
 }
@@ -72,13 +177,44 @@ pub fn parse_command(input: &str) -> Result<ShellCommand, String> {
     match name {
         "/pair" => {
             if argument.is_empty() {
-                return Err("usage: /pair <polkadotapp://pair?...>".to_string());
+                return Ok(ShellCommand::Pair(PairCommand::Scan));
             }
-            if !argument.starts_with("polkadotapp://pair?") {
-                return Err("/pair expects a polkadotapp://pair?... URL".to_string());
+            if argument.starts_with("polkadotapp://pair?") {
+                return Ok(ShellCommand::Pair(PairCommand::Deeplink(
+                    argument.to_string(),
+                )));
             }
-            Ok(ShellCommand::Pair(argument.to_string()))
+            let arguments = shlex::split(argument)
+                .ok_or_else(|| "invalid /pair image path quoting".to_string())?;
+            if arguments.len() != 1 || argument.contains("://") {
+                return Err("usage: /pair [<image-path> | <polkadotapp://pair?...>]".to_string());
+            }
+            Ok(ShellCommand::Pair(PairCommand::Image(PathBuf::from(
+                &arguments[0],
+            ))))
         }
+        "/devices" => {
+            if argument.is_empty() || argument == "--list" {
+                return Ok(ShellCommand::Devices(DeviceCommand::List));
+            }
+            let arguments =
+                shlex::split(argument).ok_or_else(|| "invalid /devices quoting".to_string())?;
+            if arguments.first().is_some_and(|value| value == "--remove") {
+                if arguments.len() != 2 {
+                    return Err("usage: /devices --remove <statement-account-id>".to_string());
+                }
+                return Ok(ShellCommand::Devices(DeviceCommand::Remove(
+                    parse_statement_account_id(&arguments[1])?,
+                )));
+            }
+            Err("usage: /devices [--list | --remove <statement-account-id>]".to_string())
+        }
+        "/approval" => match argument {
+            "" => Ok(ShellCommand::Approval(ApprovalCommand::Current)),
+            "manual" => Ok(ShellCommand::Approval(ApprovalCommand::Manual)),
+            "automatic" => Ok(ShellCommand::Approval(ApprovalCommand::Automatic)),
+            _ => Err("usage: /approval [manual|automatic]".to_string()),
+        },
         "/script" => {
             if argument.is_empty() {
                 return Ok(ShellCommand::Script(None));
@@ -108,19 +244,71 @@ pub fn parse_command(input: &str) -> Result<ShellCommand, String> {
             if argument.is_empty() {
                 return Ok(ShellCommand::Session(SessionCommand::Current));
             }
-            if argument == "--list" {
-                return Ok(ShellCommand::Session(SessionCommand::List));
+            let arguments = shlex::split(argument)
+                .ok_or_else(|| "invalid /session quoting; close the mnemonic quote".to_string())?;
+            let first = arguments.first().expect("non-empty session argument");
+            match first.as_str() {
+                "--list" if arguments.len() == 1 => {
+                    return Ok(ShellCommand::Session(SessionCommand::List));
+                }
+                "--clear" => {
+                    let Some(name) = arguments.get(1) else {
+                        return Err("usage: /session --clear <name>".to_string());
+                    };
+                    if arguments.len() != 2 {
+                        return Err("usage: /session --clear <name>".to_string());
+                    }
+                    sessions::validate_selectable_name(name)?;
+                    return Ok(ShellCommand::Session(SessionCommand::Clear(
+                        sessions::SessionClearTarget::Named(name.to_string()),
+                    )));
+                }
+                "--clear-all" if arguments.len() == 1 => {
+                    return Ok(ShellCommand::Session(SessionCommand::Clear(
+                        sessions::SessionClearTarget::All,
+                    )));
+                }
+                "--mnemonic" => {
+                    if arguments.len() < 2 {
+                        return Err("usage: /session --mnemonic \"<BIP-39 phrase>\"".to_string());
+                    }
+                    return Ok(ShellCommand::Session(SessionCommand::ImportMnemonic(
+                        SecretMnemonic::new(arguments[1..].join(" ")),
+                    )));
+                }
+                option if option.starts_with("--") => {
+                    return Err(format!(
+                        "unknown /session option `{option}`; use /help to list options"
+                    ));
+                }
+                _ if arguments.len() != 1 => {
+                    return Err("usage: /session <name>".to_string());
+                }
+                _ => {}
             }
-            sessions::validate_selectable_name(argument)?;
+            sessions::validate_selectable_name(first)?;
             Ok(ShellCommand::Session(SessionCommand::Switch(
-                argument.to_string(),
+                first.to_string(),
             )))
         }
+        "/renew" => no_argument(name, argument, ShellCommand::Renew),
         "/quit" => no_argument(name, argument, ShellCommand::Quit),
         _ => Err(format!(
             "unknown command `{name}`; use /help to list commands"
         )),
     }
+}
+
+fn parse_statement_account_id(value: &str) -> Result<[u8; 32], String> {
+    let value = value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .unwrap_or(value);
+    let bytes = hex::decode(value)
+        .map_err(|_| "statement account ID must be 32 bytes of hexadecimal".to_string())?;
+    bytes
+        .try_into()
+        .map_err(|_| "statement account ID must be 32 bytes of hexadecimal".to_string())
 }
 
 fn no_argument(name: &str, argument: &str, command: ShellCommand) -> Result<ShellCommand, String> {
@@ -141,11 +329,14 @@ pub struct Completion {
 }
 
 const SIGNING_COMMANDS: &[(&str, &str)] = &[
-    ("/pair", "answer a Polkadot Mobile pairing URL"),
+    ("/pair", "paste a pairing QR image or provide a file or URL"),
+    ("/devices", "list or remove paired devices"),
+    ("/approval", "show or change confirmation approval"),
     ("/script", "edit the last or run an existing product script"),
     ("/log", "set error, warn, info, debug, or trace"),
     ("/product", "show or switch the active product"),
-    ("/session", "show or switch the active session"),
+    ("/session", "show, switch, or clear sessions"),
+    ("/renew", "renew statement-store allowances now"),
     ("/help", "show commands and keyboard shortcuts"),
     ("/clear", "clear the visible transcript"),
     ("/copy", "copy the transcript to the clipboard"),
@@ -172,6 +363,11 @@ const LOG_ARGUMENTS: &[(&str, &str)] = &[
     ("trace", "show all host and protocol activity"),
 ];
 
+const APPROVAL_ARGUMENTS: &[(&str, &str)] = &[
+    ("manual", "prompt for every confirmation"),
+    ("automatic", "approve confirmations automatically"),
+];
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum CommandScope {
     PairingHost,
@@ -189,6 +385,38 @@ fn completions_for_scope(
     }
     if let Some(prefix) = input.strip_prefix("/log ") {
         return fixed_argument_completions("/log", prefix, LOG_ARGUMENTS);
+    }
+    if scope == CommandScope::SigningHost
+        && let Some(prefix) = input.strip_prefix("/approval ")
+    {
+        return fixed_argument_completions("/approval", prefix, APPROVAL_ARGUMENTS);
+    }
+    if scope == CommandScope::SigningHost
+        && let Some(prefix) = input.strip_prefix("/devices ")
+    {
+        return fixed_argument_completions(
+            "/devices",
+            prefix,
+            &[
+                ("--list", "list paired devices"),
+                ("--remove", "remove one paired device"),
+            ],
+        );
+    }
+    if scope == CommandScope::SigningHost
+        && let Some(prefix) = input.strip_prefix("/session --clear ")
+    {
+        if prefix.contains(char::is_whitespace) {
+            return Vec::new();
+        }
+        return session_names
+            .iter()
+            .filter(|name| name.starts_with(prefix))
+            .map(|name| Completion {
+                value: format!("/session --clear {name}"),
+                description: "clear existing session",
+            })
+            .collect();
     }
     if scope == CommandScope::SigningHost
         && let Some(prefix) = input.strip_prefix("/session ")
@@ -212,6 +440,18 @@ fn completions_for_scope(
                     description: "list sessions",
                 },
             );
+        }
+        for (value, description) in [
+            ("--mnemonic", "import an existing signer"),
+            ("--clear", "clear one session"),
+            ("--clear-all", "clear all sessions"),
+        ] {
+            if value.starts_with(prefix) {
+                matches.push(Completion {
+                    value: format!("/session {value}"),
+                    description,
+                });
+            }
         }
         return matches;
     }
@@ -295,7 +535,6 @@ fn path_completions(input: &str) -> Vec<Completion> {
 }
 
 /// Editable command input with completion selection and in-memory history.
-#[derive(Debug)]
 pub struct CommandEditor {
     chars: Vec<char>,
     cursor: usize,
@@ -306,6 +545,33 @@ pub struct CommandEditor {
     completions_dismissed: bool,
     session_names: Vec<String>,
     scope: CommandScope,
+}
+
+impl fmt::Debug for CommandEditor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let text = self.text();
+        let text = if contains_mnemonic(&text) {
+            "<redacted>".to_string()
+        } else {
+            text
+        };
+        f.debug_struct("CommandEditor")
+            .field("text", &text)
+            .field("cursor", &self.cursor)
+            .field("history_entries", &self.history.len())
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+impl Drop for CommandEditor {
+    fn drop(&mut self) {
+        self.chars.zeroize();
+        for entry in &mut self.history {
+            entry.zeroize();
+        }
+        self.history_draft.zeroize();
+    }
 }
 
 impl Default for CommandEditor {
@@ -327,10 +593,9 @@ impl Default for CommandEditor {
 impl CommandEditor {
     /// Build an editor exposing only commands supported by the pairing host.
     pub fn pairing_host() -> Self {
-        Self {
-            scope: CommandScope::PairingHost,
-            ..Self::default()
-        }
+        let mut editor = Self::default();
+        editor.scope = CommandScope::PairingHost;
+        editor
     }
 
     /// Return the current command text.
@@ -345,6 +610,7 @@ impl CommandEditor {
 
     /// Replace the command text and place the cursor at its end.
     pub fn set_text(&mut self, value: impl Into<String>) {
+        self.chars.zeroize();
         self.chars = value.into().chars().collect();
         self.cursor = self.chars.len();
         self.edited();
@@ -396,6 +662,7 @@ impl CommandEditor {
 
     /// Clear the current command without adding it to history.
     pub fn clear(&mut self) {
+        self.chars.zeroize();
         self.chars.clear();
         self.cursor = 0;
         self.edited();
@@ -463,9 +730,13 @@ impl CommandEditor {
     /// Submit and remember the current input, clearing the editor.
     pub fn submit(&mut self) -> String {
         let value = self.text();
-        if !value.trim().is_empty() && self.history.last() != Some(&value) {
+        if !value.trim().is_empty()
+            && !contains_mnemonic(&value)
+            && self.history.last() != Some(&value)
+        {
             self.history.push(value.clone());
         }
+        self.chars.zeroize();
         self.chars.clear();
         self.cursor = 0;
         self.history_index = None;
@@ -487,11 +758,16 @@ impl CommandEditor {
         let index = match self.history_index {
             Some(index) => index.saturating_sub(1),
             None => {
-                self.history_draft = self.text();
+                self.history_draft.zeroize();
+                let draft = self.text();
+                if !contains_mnemonic(&draft) {
+                    self.history_draft = draft;
+                }
                 self.history.len() - 1
             }
         };
         self.history_index = Some(index);
+        self.chars.zeroize();
         self.chars = self.history[index].chars().collect();
         self.cursor = self.chars.len();
     }
@@ -503,9 +779,11 @@ impl CommandEditor {
         if index + 1 < self.history.len() {
             let next = index + 1;
             self.history_index = Some(next);
+            self.chars.zeroize();
             self.chars = self.history[next].chars().collect();
         } else {
             self.history_index = None;
+            self.chars.zeroize();
             self.chars = self.history_draft.chars().collect();
         }
         self.cursor = self.chars.len();
@@ -523,7 +801,14 @@ pub fn parse_approval(input: &str) -> Option<bool> {
 
 /// Text displayed by `/help` in either presentation mode.
 pub const HELP_TEXT: &str = "\
+/pair                   paste or drop a pairing QR image
+/pair <image-path>      read a pairing QR image file
 /pair <url>             answer a Polkadot Mobile pairing URL
+/devices                list paired devices for the active session
+/devices --remove <id>  remove one paired device by statement account ID
+/approval               show the current confirmation approval mode
+/approval manual        prompt for every future confirmation
+/approval automatic     approve every future confirmation automatically
 /script                 edit and run the session's last Bun TypeScript script
 /script <path>          run an existing JS/TS product script with Bun
 /log <level>            set error, warn, info, debug, or trace
@@ -531,13 +816,17 @@ pub const HELP_TEXT: &str = "\
 /product <id>           switch product and reconnect product clients
 /session                show the current session and path
 /session <name>         switch to or create a session
+/session --mnemonic \"<phrase>\" import an existing signer as its username session
 /session --list         list sessions for this network
+/session --clear <name> permanently clear one session
+/session --clear-all    permanently clear all sessions for this network
+/renew                  renew statement-store allowances now
 /help                   show this help
 /clear                  clear the visible transcript
 /copy                   copy the transcript to the clipboard
 /quit                   shut down the signing host
 
-Keys: Up/Down completion or history, Tab complete, Ctrl-U/Ctrl-D scroll,
+Keys: Ctrl-V or terminal paste for a pairing image, Up/Down completion or history, Tab complete, Ctrl-U/Ctrl-D scroll,
 Esc close completion or reject approval, Ctrl-C clear/cancel/quit";
 
 /// Help shown by the pairing-host command bar.
@@ -561,13 +850,26 @@ Esc close completion, Ctrl-C clear/cancel/quit";
 mod tests {
     use super::*;
 
+    const MNEMONIC: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const DEVICE_ID: &str = "0101010101010101010101010101010101010101010101010101010101010101";
+
     #[test]
     fn parses_all_operational_commands() {
         assert_eq!(
+            parse_command("/pair"),
+            Ok(ShellCommand::Pair(PairCommand::Scan))
+        );
+        assert_eq!(
             parse_command("/pair polkadotapp://pair?handshake=01"),
-            Ok(ShellCommand::Pair(
+            Ok(ShellCommand::Pair(PairCommand::Deeplink(
                 "polkadotapp://pair?handshake=01".to_string()
-            ))
+            )))
+        );
+        assert_eq!(
+            parse_command(r#"/pair "/tmp/pairing QR.png""#),
+            Ok(ShellCommand::Pair(PairCommand::Image(PathBuf::from(
+                "/tmp/pairing QR.png"
+            ))))
         );
         assert_eq!(
             parse_command("/script scripts/my smoke.ts"),
@@ -593,6 +895,19 @@ mod tests {
             )))
         );
         assert_eq!(parse_command("/copy"), Ok(ShellCommand::Copy));
+        assert_eq!(parse_command("/renew"), Ok(ShellCommand::Renew));
+        assert_eq!(
+            parse_command("/devices"),
+            Ok(ShellCommand::Devices(DeviceCommand::List))
+        );
+        assert_eq!(
+            parse_command(&format!("/devices --remove 0x{DEVICE_ID}")),
+            Ok(ShellCommand::Devices(DeviceCommand::Remove([1; 32])))
+        );
+        assert_eq!(
+            parse_command(&format!("/devices --remove 0X{DEVICE_ID}")),
+            Ok(ShellCommand::Devices(DeviceCommand::Remove([1; 32])))
+        );
         assert_eq!(
             parse_command("/session"),
             Ok(ShellCommand::Session(SessionCommand::Current))
@@ -602,6 +917,44 @@ mod tests {
             Ok(ShellCommand::Session(SessionCommand::Switch(
                 "alice".to_string()
             )))
+        );
+        assert_eq!(
+            parse_command("/session --clear alice"),
+            Ok(ShellCommand::Session(SessionCommand::Clear(
+                sessions::SessionClearTarget::Named("alice".to_string())
+            )))
+        );
+        assert_eq!(
+            parse_command("/session --clear-all"),
+            Ok(ShellCommand::Session(SessionCommand::Clear(
+                sessions::SessionClearTarget::All
+            )))
+        );
+        let imported = parse_command(&format!("/session --mnemonic \"{MNEMONIC}\""))
+            .expect("mnemonic command parses");
+        let ShellCommand::Session(SessionCommand::ImportMnemonic(mnemonic)) = imported else {
+            panic!("unexpected mnemonic command")
+        };
+        assert_eq!(mnemonic.expose_secret(), MNEMONIC);
+    }
+
+    #[test]
+    fn parses_runtime_approval_commands() {
+        assert_eq!(
+            parse_command("/approval"),
+            Ok(ShellCommand::Approval(ApprovalCommand::Current))
+        );
+        assert_eq!(
+            parse_command("/approval manual"),
+            Ok(ShellCommand::Approval(ApprovalCommand::Manual))
+        );
+        assert_eq!(
+            parse_command("/approval automatic"),
+            Ok(ShellCommand::Approval(ApprovalCommand::Automatic))
+        );
+        assert_eq!(
+            parse_command("/approval sometimes").unwrap_err(),
+            "usage: /approval [manual|automatic]"
         );
     }
 
@@ -618,9 +971,23 @@ mod tests {
         assert!(parse_command("/logout now").is_err());
         assert!(parse_command("/pair https://example.com").is_err());
         assert!(parse_command("/deeplink polkadotapp://pair?handshake=01").is_err());
+        assert!(parse_command("/renew now").is_err());
+        assert!(parse_command("/devices --remove").is_err());
+        assert!(parse_command("/devices --remove not-an-account").is_err());
+        assert!(parse_command(&format!("/devices --remove {DEVICE_ID} extra")).is_err());
+        assert!(parse_command("/devices --unknown").is_err());
         assert!(parse_command("/log noisy").is_err());
         assert!(parse_command("/product example.com").is_err());
         assert!(parse_command("/session ../escape").is_err());
+        assert_eq!(
+            parse_command("/session --clear").unwrap_err(),
+            "usage: /session --clear <name>"
+        );
+        assert!(parse_command("/session --clear alice bob").is_err());
+        assert!(parse_command("/session --clear-all now").is_err());
+        assert!(parse_command("/session --unknown").is_err());
+        assert!(parse_command("/session --mnemonic").is_err());
+        assert!(parse_command("/session --mnemonic \"not closed").is_err());
         assert!(
             parse_command("/session default")
                 .unwrap_err()
@@ -648,6 +1015,34 @@ mod tests {
     }
 
     #[test]
+    fn mnemonic_commands_are_redacted_and_never_enter_history() {
+        let command = format!("/session --mnemonic \"{MNEMONIC}\"");
+        let parsed = parse_command(&command).expect("mnemonic command parses");
+        let rendered = format!("{parsed:?}");
+        assert!(!rendered.contains("abandon"), "mnemonic leaked: {rendered}");
+        assert!(rendered.contains("<redacted>"));
+
+        let masked = mask_mnemonic(&command).expect("mnemonic is masked");
+        assert!(masked.starts_with("/session --mnemonic "));
+        assert!(!masked.contains("abandon"));
+        assert_eq!(masked.chars().count(), command.chars().count());
+        let irregular = format!("  /session\t --mnemonic\t{MNEMONIC}");
+        assert!(contains_mnemonic(&irregular));
+        assert!(
+            !mask_mnemonic(&irregular)
+                .expect("irregular whitespace is still masked")
+                .contains("abandon")
+        );
+
+        let mut editor = CommandEditor::default();
+        editor.set_text(command.clone());
+        let rendered = format!("{editor:?}");
+        assert!(!rendered.contains("abandon"), "editor leaked: {rendered}");
+        assert_eq!(editor.submit(), command);
+        assert!(editor.history.is_empty());
+    }
+
+    #[test]
     fn editor_handles_unicode_at_character_boundaries() {
         let mut editor = CommandEditor::default();
         editor.set_text("/script café.ts");
@@ -663,6 +1058,22 @@ mod tests {
         assert_eq!(parse_approval(" YES "), Some(true));
         assert_eq!(parse_approval("n"), Some(false));
         assert_eq!(parse_approval("sure"), None);
+    }
+
+    #[test]
+    fn pair_command_advertises_image_paste_file_and_deeplink_inputs() {
+        assert_eq!(
+            completions_for_scope("/pair", &[], CommandScope::SigningHost),
+            vec![Completion {
+                value: "/pair".to_string(),
+                description: "paste a pairing QR image or provide a file or URL",
+            }]
+        );
+        assert!(HELP_TEXT.starts_with(
+            "/pair                   paste or drop a pairing QR image\n\
+             /pair <image-path>      read a pairing QR image file\n\
+             /pair <url>             answer a Polkadot Mobile pairing URL"
+        ));
     }
 
     #[test]
@@ -697,6 +1108,76 @@ mod tests {
 
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].value, "/session alice");
+    }
+
+    #[test]
+    fn device_completion_offers_list_and_remove_operations() {
+        assert_eq!(
+            completions_for_scope("/devices --", &[], CommandScope::SigningHost),
+            vec![
+                Completion {
+                    value: "/devices --list".to_string(),
+                    description: "list paired devices",
+                },
+                Completion {
+                    value: "/devices --remove".to_string(),
+                    description: "remove one paired device",
+                },
+            ]
+        );
+        assert!(completions_for_scope("/devices", &[], CommandScope::PairingHost).is_empty());
+    }
+
+    #[test]
+    fn approval_completion_is_signing_host_only() {
+        assert_eq!(
+            completions_for_scope("/approval ", &[], CommandScope::SigningHost),
+            vec![
+                Completion {
+                    value: "/approval manual".to_string(),
+                    description: "prompt for every confirmation",
+                },
+                Completion {
+                    value: "/approval automatic".to_string(),
+                    description: "approve confirmations automatically",
+                },
+            ]
+        );
+        assert!(completions_for_scope("/appro", &[], CommandScope::PairingHost).is_empty());
+    }
+
+    #[test]
+    fn session_completion_offers_clear_operations_and_existing_names() {
+        let operations = completions_for_scope(
+            "/session --c",
+            &["alice".to_string(), "bob".to_string()],
+            CommandScope::SigningHost,
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|completion| completion.value == "/session --clear")
+        );
+        assert!(
+            operations
+                .iter()
+                .any(|completion| completion.value == "/session --clear-all")
+        );
+        let import = completions_for_scope(
+            "/session --m",
+            &["alice".to_string()],
+            CommandScope::SigningHost,
+        );
+        assert_eq!(import.len(), 1);
+        assert_eq!(import[0].value, "/session --mnemonic");
+
+        let names = completions_for_scope(
+            "/session --clear b",
+            &["alice".to_string(), "bob".to_string()],
+            CommandScope::SigningHost,
+        );
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].value, "/session --clear bob");
     }
 
     #[test]

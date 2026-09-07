@@ -31,15 +31,18 @@ import type {
   HostChatListSubscribeItem,
   HostChatPostMessageRequest,
   HostChatPostMessageResponse,
+  HostChatRegisterBotRequest,
+  HostChatRegisterBotResponse,
   HostDevicePermissionResponse,
   HostFeatureSupportedRequest,
   HostFeatureSupportedResponse,
+  HostLocaleSubscribeItem,
   HostPushNotificationRequest,
   HostPushNotificationResponse,
+  HostThemeSubscribeItem,
   NotificationId,
   RemotePermissionResponse,
   Result,
-  ThemeVariant,
 } from "@parity/truapi";
 
 /**
@@ -100,7 +103,7 @@ export type AuthState =
   /**
    * The last login attempt failed; show the reason and offer a retry.
    */
-  | { tag: "LoginFailed"; value: { reason: string } }
+  | { tag: "LoginFailed"; value: { kind: LoginFailureKind; reason: string } }
   /**
    * The wallet accepted the pairing request and the core is resolving and
    * persisting the session. Hosts should replace the pairing QR with an
@@ -147,7 +150,50 @@ export type CoreStorageKey =
   /**
    * Wallet-bound RFC-0010 AutoSigning capabilities for the active pairing.
    */
-  | { tag: "AutoSigningKeys"; value?: undefined };
+  | { tag: "AutoSigningKeys"; value?: undefined }
+  /**
+   * Wallet-bound RFC-0024 ring-VRF registry snapshot.
+   */
+  | { tag: "RingVrfRegistry"; value: { rootPublicKey: Uint8Array } }
+  /**
+   * Statement-store allowance targets the signing host keeps renewed.
+   */
+  | { tag: "StatementRenewalTargets"; value?: undefined }
+  /**
+   * This device's long-lived X25519 encryption secret, advertised to peers
+   * as the device encryption public key. Random rather than identity-derived
+   * so devices restoring one identity stay individually addressable.
+   *
+   * Hosts must back this slot with storage scoped to the install, outliving
+   * logout and any per-user namespacing: once it changes, peers addressing
+   * the previous key can no longer reach this device.
+   */
+  | { tag: "DeviceEncryptionKey"; value?: undefined }
+  /**
+   * One product's hard-subtree public key, as the Account Holder answered it
+   * for this paired session. Product account is a hard derivation, so the
+   * answer is fixed for the pair and read back instead of re-asking the
+   * wallet on every launch.
+   *
+   * The value is the 32-byte key with no framing, so a host can derive
+   * product account addresses from the slot it already stores. These are
+   * public keys: every address derived from them already appears on the
+   * reviews the host draws.
+   */
+  | { tag: "ProductSubtree"; value: { sessionId: string; productId: string } }
+  /**
+   * Signing-host request replay state for one wallet and pairing peer.
+   *
+   * The value is a versioned, bounded replay ledger owned by the core.
+   */
+  | {
+      tag: "SsoResponderRequestLedger";
+      value: {
+        rootPublicKey: Uint8Array;
+        peerStatementAccountId: Uint8Array;
+        peerEncryptionPublicKey: Uint8Array;
+      };
+    };
 
 /**
  * Review shown before a product creates a ring-VRF proof (RFC 0004).
@@ -188,6 +234,20 @@ export type CreateTransactionReview =
   | { tag: "LegacyAccount"; value: LegacyAccountTxPayload };
 
 /**
+ * What the operating system currently says about a device capability.
+ *
+ * Distinct from `PermissionAuthorizationStatus`, which is the product-scoped
+ * decision the user made through TrUAPI. The two answer different questions
+ * and are combined rather than substituted: a capability is usable only when
+ * the product holds a grant *and* the OS still allows it.
+ */
+export type DevicePermissionStatus =
+  | "Granted"
+  | "Denied"
+  | "NotDetermined"
+  | "NotApplicable";
+
+/**
  * One chain a host serves: a protocol chain role mapped to the concrete
  * chain of the host's configured environment.
  */
@@ -213,7 +273,7 @@ export interface HostChainSet {
   network: string;
 
   /**
-   * Complete set of chains available through this host.
+   * Chains this host serves, keyed by protocol role.
    */
   chains: Array<HostChainEntry>;
 }
@@ -227,6 +287,12 @@ export interface IdentityDisclosureReview {
    */
   productId: string;
 }
+
+/**
+ * Why a login attempt failed, for hosts that need to act on the cause rather
+ * than only display it.
+ */
+export type LoginFailureKind = "NoFreeAllowanceSlots" | "Other";
 
 /**
  * Permission request whose authorization status can be inspected or updated
@@ -295,8 +361,25 @@ export interface ProductContext {
 
 /**
  * Trusted kind of product executable attached to a TrUAPI connection.
+ *
+ * Mirrors the executable kinds a product manifest declares. The variants are
+ * capability classes: a connection reaches an execution-gated service only
+ * when its kind matches exactly, so `App` and `Widget` carry the same
+ * capability and differ only in how the host presents them, and `Worker` is
+ * the only kind that may serve the Chat modality.
  */
-export type ProductExecutionKind = "Spa" | "Chat";
+export type ProductExecutionKind = "App" | "Widget" | "Worker";
+
+/**
+ * Review shown before a product resolves its own account subtree over SSO,
+ * when the value is not cached and the core must ask the Account Holder.
+ */
+export interface ProductSubtreeReview {
+  /**
+   * Product resolving its own account.
+   */
+  productId: string;
+}
 
 /**
  * Review shown before allocating resources for a product. Names the
@@ -326,17 +409,37 @@ export interface SessionUiInfo {
   publicKey: Bytes32;
 
   /**
-   * Wallet identity account id used for People-chain username lookup.
+   * Wallet identity account id used for the dotNS username lookup on Asset Hub.
    */
   identityAccountId?: Bytes32;
 
   /**
-   * Short username from the People-chain identity record.
+   * X25519 public key addressing this identity in chat. Public counterpart
+   * of the key `CoreAdmin::get_session_chat_identity_key` serves.
+   */
+  chatPublicKey?: Bytes32;
+
+  /**
+   * X25519 public key of the wallet device that answered pairing. Hosts
+   * running their own encrypted device-sync channel key it against this.
+   */
+  deviceEncPublicKey?: Bytes32;
+
+  /**
+   * Statement-store account id the paired wallet signs every session-channel
+   * statement with. Whether it is scoped to the wallet device or to the
+   * wallet identity is the wallet's choice, so hosts must not treat it as a
+   * device discriminator; use `Self::device_enc_public_key` for that.
+   */
+  peerStatementAccountId?: Bytes32;
+
+  /**
+   * Short username from the dotNS identity record on Asset Hub.
    */
   liteUsername?: string;
 
   /**
-   * Fully qualified username from the People-chain identity record.
+   * Fully qualified username from the dotNS identity record on Asset Hub.
    */
   fullUsername?: string;
 }
@@ -447,7 +550,11 @@ export type UserConfirmationReview =
   /**
    * Sign an RFC-0023 VRF transcript with a product account.
    */
-  | { tag: "SignVrf"; value: SignVrfReview };
+  | { tag: "SignVrf"; value: SignVrfReview }
+  /**
+   * Resolve a product's own account subtree over SSO.
+   */
+  | { tag: "ProductSubtree"; value: ProductSubtreeReview };
 
 /**
  * Review shown before a product asks to access another product account.
@@ -483,7 +590,10 @@ export const AuthState: S.Codec<AuthState> = S.lazy(
       Disconnected: S._void,
       Pairing: S.Struct({ deeplink: S.str }) as S.Codec<{ deeplink: string }>,
       Connected: SessionUiInfo,
-      LoginFailed: S.Struct({ reason: S.str }) as S.Codec<{ reason: string }>,
+      LoginFailed: S.Struct({
+        kind: LoginFailureKind,
+        reason: S.str,
+      }) as S.Codec<{ kind: LoginFailureKind; reason: string }>,
       Authenticating: S._void,
     }),
 );
@@ -515,6 +625,24 @@ export const CoreStorageKey: S.Codec<CoreStorageKey> = S.lazy(
         productId: string;
       }>,
       AutoSigningKeys: S._void,
+      RingVrfRegistry: S.Struct({ rootPublicKey: S.Bytes(32) }) as S.Codec<{
+        rootPublicKey: Uint8Array;
+      }>,
+      StatementRenewalTargets: S._void,
+      DeviceEncryptionKey: S._void,
+      ProductSubtree: S.Struct({
+        sessionId: S.str,
+        productId: S.str,
+      }) as S.Codec<{ sessionId: string; productId: string }>,
+      SsoResponderRequestLedger: S.Struct({
+        rootPublicKey: S.Bytes(32),
+        peerStatementAccountId: S.Bytes(32),
+        peerEncryptionPublicKey: S.Bytes(32),
+      }) as S.Codec<{
+        rootPublicKey: Uint8Array;
+        peerStatementAccountId: Uint8Array;
+        peerEncryptionPublicKey: Uint8Array;
+      }>,
     }),
 );
 
@@ -540,6 +668,19 @@ export const CreateTransactionReview: S.Codec<CreateTransactionReview> = S.lazy(
       Product: ProductAccountTxPayload,
       LegacyAccount: LegacyAccountTxPayload,
     }),
+);
+
+/**
+ * What the operating system currently says about a device capability.
+ *
+ * Distinct from `PermissionAuthorizationStatus`, which is the product-scoped
+ * decision the user made through TrUAPI. The two answer different questions
+ * and are combined rather than substituted: a capability is usable only when
+ * the product holds a grant *and* the OS still allows it.
+ */
+export const DevicePermissionStatus: S.Codec<DevicePermissionStatus> = S.lazy(
+  (): S.Codec<DevicePermissionStatus> =>
+    S.Status("Granted", "Denied", "NotDetermined", "NotApplicable"),
 );
 
 /**
@@ -573,6 +714,14 @@ export const IdentityDisclosureReview: S.Codec<IdentityDisclosureReview> =
     (): S.Codec<IdentityDisclosureReview> =>
       S.Struct({ productId: S.str }) as S.Codec<IdentityDisclosureReview>,
   );
+
+/**
+ * Why a login attempt failed, for hosts that need to act on the cause rather
+ * than only display it.
+ */
+export const LoginFailureKind: S.Codec<LoginFailureKind> = S.lazy(
+  (): S.Codec<LoginFailureKind> => S.Status("NoFreeAllowanceSlots", "Other"),
+);
 
 /**
  * Permission request whose authorization status can be inspected or updated
@@ -627,9 +776,24 @@ export const ProductContext: S.Codec<ProductContext> = S.lazy(
 
 /**
  * Trusted kind of product executable attached to a TrUAPI connection.
+ *
+ * Mirrors the executable kinds a product manifest declares. The variants are
+ * capability classes: a connection reaches an execution-gated service only
+ * when its kind matches exactly, so `App` and `Widget` carry the same
+ * capability and differ only in how the host presents them, and `Worker` is
+ * the only kind that may serve the Chat modality.
  */
 export const ProductExecutionKind: S.Codec<ProductExecutionKind> = S.lazy(
-  (): S.Codec<ProductExecutionKind> => S.Status("Spa", "Chat"),
+  (): S.Codec<ProductExecutionKind> => S.Status("App", "Widget", "Worker"),
+);
+
+/**
+ * Review shown before a product resolves its own account subtree over SSO,
+ * when the value is not cached and the core must ask the Account Holder.
+ */
+export const ProductSubtreeReview: S.Codec<ProductSubtreeReview> = S.lazy(
+  (): S.Codec<ProductSubtreeReview> =>
+    S.Struct({ productId: S.str }) as S.Codec<ProductSubtreeReview>,
 );
 
 /**
@@ -655,6 +819,9 @@ export const SessionUiInfo: S.Codec<SessionUiInfo> = S.lazy(
     S.Struct({
       publicKey: Bytes32,
       identityAccountId: S.Option(Bytes32),
+      chatPublicKey: S.Option(Bytes32),
+      deviceEncPublicKey: S.Option(Bytes32),
+      peerStatementAccountId: S.Option(Bytes32),
       liteUsername: S.Option(S.str),
       fullUsername: S.Option(S.str),
     }) as S.Codec<SessionUiInfo>,
@@ -725,6 +892,7 @@ export const UserConfirmationReview: S.Codec<UserConfirmationReview> = S.lazy(
       PreimageSubmit: PreimageSubmitReview,
       AccountAccess: AccountAccessReview,
       SignVrf: SignVrfReview,
+      ProductSubtree: ProductSubtreeReview,
     }),
 );
 
@@ -733,9 +901,11 @@ export const UserConfirmationReview: S.Codec<UserConfirmationReview> = S.lazy(
  */
 export interface AuthPresenter {
   /**
-   * Observe an auth state change. Emitted only when the state actually
-   * changes, in transition order. Default is a no-op for hosts that
-   * render no auth UI.
+   * Observe an auth state change, in transition order. A pairing host
+   * always receives an opening state once the core has restored the
+   * persisted session, `Disconnected` included; later emissions happen
+   * only when the state changes. Default is a no-op for hosts that render
+   * no auth UI.
    */
   authStateChanged?(state: AuthState): void;
 }
@@ -758,22 +928,54 @@ export interface ChainProvider {
 }
 
 /**
- * Host-implemented adapter through which product Chat calls reach native
- * storage and UI.
+ * Host-implemented adapter through which product Chat calls reach host
+ * storage and UI. Optional: a host that omits it leaves Chat requests
+ * answered `Unsupported`. See `OptionalPlatform`.
+ *
+ * The core bounds and screens the product-supplied fields it forwards. Ids,
+ * names and icons on `create_chat_room`, `register_chat_bot` and
+ * `post_chat_message` are NFC-normalized and rejected for control and bidi
+ * characters. Message bodies are bounded and screened but pass through
+ * byte-for-byte, keeping line breaks and tabs, so a product reads back the
+ * bytes it sent. Counts and byte budgets are enforced, and any URL a host may
+ * fetch or open is restricted to `https` or an inline raster image and
+ * delivered as the parser resolved it.
+ *
+ * The core screens a URL's shape, not its reachability. `https://127.0.0.1`,
+ * `https://[::1]`, a private range and `https://169.254.169.254` (the cloud
+ * metadata endpoint) all pass: which networks a host is willing to fetch from
+ * depends on where that host runs, and a core that guessed would break a host
+ * serving its own media from localhost. A host that fetches these URLs owns
+ * that decision. Credentials are the exception and are refused, because
+ * `user:pass@` survives resolution into whatever the host fetches and logs.
+ *
+ * `ChatFile::size_bytes` is a product assertion and is not verified against
+ * the resource it names. Contextual output escaping, storage limits, and
+ * anything a host derives from product-supplied values remain host-owned.
  */
 export interface ChatPlatform {
   /**
    * Create or resolve a product-scoped native chat room.
    */
-  createRoom(
+  createChatRoom(
     product: ProductContext,
     request: HostChatCreateRoomRequest,
   ): Promise<HostChatCreateRoomResponse>;
 
   /**
-   * Persist a product-authored message in a native chat room.
+   * Register or resolve a product-scoped native chat bot. Host-owned in the
+   * same way rooms are.
    */
-  postMessage(
+  registerChatBot(
+    product: ProductContext,
+    request: HostChatRegisterBotRequest,
+  ): Promise<HostChatRegisterBotResponse>;
+
+  /**
+   * Persist a product-authored message in a native chat room. A host that
+   * cannot store a given content variant reports a domain error for it.
+   */
+  postChatMessage(
     product: ProductContext,
     request: HostChatPostMessageRequest,
   ): Promise<HostChatPostMessageResponse>;
@@ -781,9 +983,9 @@ export interface ChatPlatform {
   /**
    * Emit the current product-scoped room list and later replacements.
    */
-  subscribeRooms(
+  subscribeChatRooms(
     product: ProductContext,
-  ): AsyncIterable<HostChatListSubscribeItem>;
+  ): AsyncIterable<Result<HostChatListSubscribeItem, GenericError>>;
 }
 
 /**
@@ -801,6 +1003,10 @@ export interface CoreAdmin {
 
   /**
    * Read a stored permission authorization status without prompting.
+   *
+   * A device capability also resolves the host application's OS gate, so an
+   * OS refusal reads as `Denied` whatever is stored. Remote,
+   * identity-disclosure and account-access decisions have no OS gate.
    */
   getPermissionAuthorizationStatus(
     request: PermissionAuthorizationRequest,
@@ -808,6 +1014,10 @@ export interface CoreAdmin {
 
   /**
    * Read stored permission authorization statuses without prompting.
+   *
+   * A device capability also resolves the host application's OS gate, so an
+   * OS refusal reads as `Denied` whatever is stored. Remote,
+   * identity-disclosure and account-access decisions have no OS gate.
    *
    * Results are returned in the same order as `requests`.
    */
@@ -823,10 +1033,70 @@ export interface CoreAdmin {
     request: PermissionAuthorizationRequest,
     status: PermissionAuthorizationStatus,
   ): Promise<void>;
+
+  /**
+   * Read the active session's X25519 chat identity private key, for hosts
+   * that run their own P2P chat channel for the paired identity.
+   *
+   * The wallet derives this key from the identity root and shares it during
+   * pairing; the core retains it verbatim, because a value derived
+   * host-side would address an identity no existing peer can reach. ``undefined``
+   * when no session is active.
+   *
+   * Deliberately not on `SessionUiInfo`: that projection rides every
+   * `AuthState` broadcast to all registered `AuthPresenter`s, so a
+   * secret placed there would reach hosts that never asked for it.
+   */
+  getSessionChatIdentityKey(): Promise<Bytes32 | undefined>;
+
+  /**
+   * Read this device's X25519 encryption secret, for hosts that run device
+   * sync against the peer's `SessionUiInfo::device_enc_public_key`.
+   *
+   * Generated and persisted on first read, so the returned key is stable for
+   * the install and matches the public key peers were told to address.
+   */
+  getDeviceEncryptionKey(): Promise<Bytes32>;
+
+  /**
+   * Read `product_id`'s hard-subtree public key, so a host can name the
+   * account a review will sign with instead of showing a bare derivation
+   * path.
+   *
+   * Resolves from the memory cache, then the persisted slot, then the
+   * Account Holder. A pairing host reaching the wallet sends an SSO request,
+   * which answers without prompting the user, though it can wake the phone.
+   * A signing host derives locally and never waits.
+   *
+   * `timeout_ms` bounds that wait, and exceeding it is an error rather than
+   * ``undefined``. The underlying wait has no deadline of its own, so a host
+   * calling this while drawing a review should pass a timeout it is willing
+   * to block for. ``undefined`` uses a default sized for a product awaiting a
+   * signature, which is far too long to hold a render.
+   *
+   * ``undefined`` means no active session. Derive account public keys from the
+   * answer with `deriveProductAccountPublicKey`.
+   */
+  getProductSubtreePublicKey(
+    productId: string,
+    timeoutMs: number | undefined,
+  ): Promise<Bytes32 | undefined>;
 }
 
 /**
  * Host-private persistence for core-owned state.
+ *
+ * Clearing product-indexed slots is the host's job. The core drops the ones
+ * it is holding when a session ends, but a product it never opened this run
+ * has no entry to drop, so those slots outlive the disconnect. A host that
+ * removes a product must clear them with the rest of that product's state, or
+ * they accumulate for the life of the install.
+ *
+ * `describe_core_storage_key` names the product owning a slot:
+ * `CoreStorageKeyDescription::product_id` is `Some` exactly for the
+ * product-indexed variants, which are `PermissionAuthorization`,
+ * `AutoSigningKey`, and `ProductSubtree`. Keying host storage by that value
+ * makes the sweep a prefix delete rather than a scan.
  */
 export interface CoreStorage {
   /**
@@ -858,9 +1128,8 @@ export interface Features {
   ): Promise<HostFeatureSupportedResponse>;
 
   /**
-   * Enumerate the chains this host serves (RFC 0026). The returned set must
-   * match exactly what `ChainProvider::connect` will accept; the core
-   * resolves `get_chain_info` requests against it.
+   * Enumerate the chains this host serves (RFC 0026). The core resolves
+   * `get_chain_info` requests against the returned set.
    */
   supportedChains(): Promise<HostChainSet>;
 }
@@ -886,6 +1155,18 @@ export interface JsonRpcConnection {
    * must stop receiving responses and release any per-caller resources.
    */
   close(): void;
+}
+
+/**
+ * Host locale source.
+ */
+export interface LocaleHost {
+  /**
+   * Emits the currently selected locale immediately, then future changes.
+   */
+  subscribeLocale(): AsyncIterable<
+    Result<HostLocaleSubscribeItem, GenericError>
+  >;
 }
 
 /**
@@ -935,6 +1216,29 @@ export interface PairingHostAdmin {
    * decoding that blob into live `SessionState` / `AuthState`.
    */
   notifySessionStoreChanged(): void;
+}
+
+/**
+ * Live OS permission state, read without prompting.
+ *
+ * A product-scoped grant is persisted once and never expires, but the OS
+ * grant behind it can be revoked in system settings, suspended by device
+ * policy, or reset by the platform — Android auto-resets runtime permissions
+ * for apps that go unused. Without this capability the core keeps answering
+ * from the stored grant alone and tells a product `granted` for a capability
+ * the OS has since taken away.
+ *
+ * This is deliberately separate from `Permissions::device_permission`: that
+ * call may show UI, so it cannot be used to re-check a decision the user has
+ * already made without prompting them again on every request.
+ */
+export interface PermissionStatusHost {
+  /**
+   * Current OS status of a device capability. Must not prompt.
+   */
+  devicePermissionStatus(
+    request: HostDevicePermissionRequest,
+  ): Promise<DevicePermissionStatus>;
 }
 
 /**
@@ -1001,9 +1305,10 @@ export interface ProductStorage {
  */
 export interface ThemeHost {
   /**
-   * Emits current theme immediately, then future changes.
+   * Emits current theme immediately, then future changes. Hosts with no
+   * named themes report `ThemeName::Default`.
    */
-  subscribeTheme(): AsyncIterable<Result<ThemeVariant, GenericError>>;
+  subscribeTheme(): AsyncIterable<Result<HostThemeSubscribeItem, GenericError>>;
 }
 
 /**
@@ -1017,7 +1322,9 @@ export interface UserConfirmation {
 }
 
 /**
- * Combined platform interface. A host must provide all capability traits.
+ * Combined platform interface. A host must provide every capability trait
+ * listed here. Members marked optional may be omitted; the core answers their
+ * product calls with `Unsupported`. See `OptionalPlatform`.
  */
 export interface HostCallbacks {
   navigation: Navigation;
@@ -1030,7 +1337,10 @@ export interface HostCallbacks {
   auth: AuthPresenter;
   userConfirmation: UserConfirmation;
   theme: ThemeHost;
+  locale: LocaleHost;
   preimage: PreimageHost;
+  chat?: ChatPlatform;
+  permissionStatus?: PermissionStatusHost;
 }
 
 export interface RequiredHostCallbacks {
@@ -1044,5 +1354,8 @@ export interface RequiredHostCallbacks {
   auth: Required<AuthPresenter>;
   userConfirmation: Required<UserConfirmation>;
   theme: Required<ThemeHost>;
+  locale: Required<LocaleHost>;
   preimage: Required<PreimageHost>;
+  chat?: Required<ChatPlatform>;
+  permissionStatus?: Required<PermissionStatusHost>;
 }

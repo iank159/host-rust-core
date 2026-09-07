@@ -2,7 +2,7 @@
 //!
 //! Wraps `verifiable`'s prover-gated `open` + `create` into the single-shot
 //! proof a `RegisterStatementStoreAllowance` needs: prove that our member key is
-//! in the LitePeople ring, bound to a slot `context` and the extrinsic proof
+//! in the collection's ring, bound to a slot `context` and the extrinsic proof
 //! `message`. Mirrors signing-bot `ring-proof.ts` `oneShotProof`.
 
 use thiserror::Error;
@@ -117,7 +117,7 @@ mod tests {
             RingDomainSize::Domain11,
             entropy,
             &members,
-            b"SSS_SLOT:test-context-padding..",
+            &[0x33; 32],
             &[0x42; 32],
         )
         .unwrap();
@@ -132,7 +132,7 @@ mod tests {
             RingDomainSize::Domain11,
             entropy,
             &[other],
-            b"SSS_SLOT:test-context-padding..",
+            &[0x33; 32],
             &[0x42; 32],
         )
         .unwrap_err();

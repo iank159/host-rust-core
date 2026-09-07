@@ -51,14 +51,17 @@ pub mod latest {
     use crate::versioned::{self, Versioned};
 
     pub use crate::v01::{
-        AccountId, AllocatableResource, AllocationOutcome, ChainIdentifier, ContextualAlias,
-        DerivationIndex, GenericError, HostSignPayloadData, NotificationId, OperationStartedResult,
-        ProductAccountId, ProductProofContext, RawPayload, RemotePermission,
-        RemoteStatementStoreCreateProofError, RemoteStatementStoreCreateProofRequest,
-        RemoteStatementStoreCreateProofResponse, RemoteStatementStoreSubscribeItem,
-        RemoteStatementStoreSubscribeRequest, RingLocation, RuntimeApi, RuntimeSpec, RuntimeType,
+        AccountId, AllocatableResource, AllocationOutcome, ChainIdentifier, ChatAction,
+        ChatActionLayout, ChatActions, ChatBotRegistrationStatus, ChatCustomMessage, ChatFile,
+        ChatMedia, ChatMessageContent, ChatReaction, ChatRichText, ChatRoomRegistrationStatus,
+        ContextualAlias, DerivationIndex, GenericError, HostPlatform, HostSignPayloadData,
+        NotificationId, OperationStartedResult, ProductAccountId, ProductProofContext, RawPayload,
+        RegisteredRingVrfKey, RemotePermission, RemoteStatementStoreCreateProofError,
+        RemoteStatementStoreCreateProofRequest, RemoteStatementStoreCreateProofResponse,
+        RemoteStatementStoreSubscribeItem, RemoteStatementStoreSubscribeRequest, RingLocation,
+        RingVrfKeyDisclosure, RingVrfPublicKey, RuntimeApi, RuntimeSpec, RuntimeType,
         SignedStatement, Statement, StatementProof, StorageQueryItem, StorageQueryType,
-        StorageResultItem, ThemeVariant, TxPayloadExtension,
+        StorageResultItem, ThemeName, ThemeVariant, TxPayloadExtension,
     };
 
     /// Latest payload type of a versioned envelope.
@@ -75,6 +78,12 @@ pub mod latest {
     pub type HostChatCreateRoomResponse = LatestOf<versioned::chat::HostChatCreateRoomResponse>;
     /// Native chat room creation failure.
     pub type HostChatCreateRoomError = LatestOf<versioned::chat::HostChatCreateRoomError>;
+    /// Native chat bot registration request.
+    pub type HostChatRegisterBotRequest = LatestOf<versioned::chat::HostChatRegisterBotRequest>;
+    /// Native chat bot registration result.
+    pub type HostChatRegisterBotResponse = LatestOf<versioned::chat::HostChatRegisterBotResponse>;
+    /// Native chat bot registration failure.
+    pub type HostChatRegisterBotError = LatestOf<versioned::chat::HostChatRegisterBotError>;
     /// Current native room list for a product.
     pub type HostChatListSubscribeItem = LatestOf<versioned::chat::HostChatListSubscribeItem>;
     /// Native chat message posting request.
@@ -92,6 +101,15 @@ pub mod latest {
     /// Contextual alias derivation result.
     pub type HostAccountGetAliasResponse =
         LatestOf<versioned::account::HostAccountGetAliasResponse>;
+    /// Ring-VRF key registration result.
+    pub type HostAccountRegisterRingVrfKeyResponse =
+        LatestOf<versioned::account::HostAccountRegisterRingVrfKeyResponse>;
+    /// Ring-VRF registry listing result.
+    pub type HostAccountListRingVrfKeysResponse =
+        LatestOf<versioned::account::HostAccountListRingVrfKeysResponse>;
+    /// Direct ring-VRF key signing result.
+    pub type HostAccountRingVrfSignResponse =
+        LatestOf<versioned::account::HostAccountRingVrfSignResponse>;
     /// Legacy account listing result.
     pub type HostGetLegacyAccountsResponse =
         LatestOf<versioned::account::HostGetLegacyAccountsResponse>;
@@ -109,9 +127,14 @@ pub mod latest {
     /// Feature-support query result.
     pub type HostFeatureSupportedResponse =
         LatestOf<versioned::system::HostFeatureSupportedResponse>;
+    /// Product context bound to the current host runtime.
+    pub type HostGetProductContextResponse =
+        LatestOf<versioned::system::HostGetProductContextResponse>;
     /// Local storage operation error.
     pub type HostLocalStorageReadError =
         LatestOf<versioned::local_storage::HostLocalStorageReadError>;
+    /// Locale the host currently presents its interface in.
+    pub type HostLocaleSubscribeItem = LatestOf<versioned::locale::HostLocaleSubscribeItem>;
     /// Navigation request error.
     pub type HostNavigateToError = LatestOf<versioned::system::HostNavigateToError>;
     /// Push notification scheduling request.
@@ -142,6 +165,8 @@ pub mod latest {
     /// Raw-bytes signing request for a legacy account.
     pub type HostSignRawWithLegacyAccountRequest =
         LatestOf<versioned::signing::HostSignRawWithLegacyAccountRequest>;
+    /// Current host theme pushed to subscribers.
+    pub type HostThemeSubscribeItem = LatestOf<versioned::theme::HostThemeSubscribeItem>;
     /// Transaction creation payload for a legacy account.
     pub type LegacyAccountTxPayload =
         LatestOf<versioned::signing::HostCreateTransactionWithLegacyAccountRequest>;
@@ -149,6 +174,8 @@ pub mod latest {
     pub type PreimageSubmitError = LatestOf<versioned::preimage::RemotePreimageSubmitError>;
     /// Transaction creation payload for a product account.
     pub type ProductAccountTxPayload = LatestOf<versioned::signing::HostCreateTransactionRequest>;
+    /// Chain-head runtime-API call request.
+    pub type RemoteChainHeadCallRequest = LatestOf<versioned::chain::RemoteChainHeadCallRequest>;
     /// Chain-head subscription item.
     pub type RemoteChainHeadFollowItem = LatestOf<versioned::chain::RemoteChainHeadFollowItem>;
     /// Chain-identifier resolution error.

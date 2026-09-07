@@ -4,7 +4,11 @@ use crate::versioned::account::{
     HostAccountConnectionStatusSubscribeItem, HostAccountCreateProofError,
     HostAccountCreateProofRequest, HostAccountCreateProofResponse, HostAccountGetAliasError,
     HostAccountGetAliasRequest, HostAccountGetAliasResponse, HostAccountGetError,
-    HostAccountGetRequest, HostAccountGetResponse, HostAccountSignVrfError,
+    HostAccountGetRequest, HostAccountGetResponse, HostAccountListRingVrfKeysError,
+    HostAccountListRingVrfKeysRequest, HostAccountListRingVrfKeysResponse,
+    HostAccountRegisterRingVrfKeyError, HostAccountRegisterRingVrfKeyRequest,
+    HostAccountRegisterRingVrfKeyResponse, HostAccountRingVrfSignError,
+    HostAccountRingVrfSignRequest, HostAccountRingVrfSignResponse, HostAccountSignVrfError,
     HostAccountSignVrfRequest, HostAccountSignVrfResponse, HostGetLegacyAccountsError,
     HostGetLegacyAccountsRequest, HostGetLegacyAccountsResponse, HostGetUserIdError,
     HostGetUserIdRequest, HostGetUserIdResponse, HostRequestLoginError, HostRequestLoginRequest,
@@ -37,9 +41,12 @@ pub trait Account: Send + Sync {
     /// Retrieve a product-scoped account.
     ///
     /// ```ts
+    /// const productContext = await truapi.system.getProductContext();
+    /// assert(productContext.isOk(), "getProductContext failed:", productContext);
+    ///
     /// const result = await truapi.account.getAccount({
     ///   productAccountId: {
-    ///     dotNsIdentifier: "truapi-playground.dot",
+    ///     dotNsIdentifier: productContext.value.productId,
     ///     derivationIndex: { tag: "Index", value: 0 },
     ///   },
     /// });
@@ -67,21 +74,34 @@ pub trait Account: Send + Sync {
     /// Retrieve the contextual alias for a context and ring.
     ///
     /// ```ts
+    /// const productContext = await truapi.system.getProductContext();
+    /// assert(productContext.isOk(), "getProductContext failed:", productContext);
+    ///
     /// const people = await truapi.chain.getChainInfo({ chain: "People" });
     /// assert(people.isOk(), "getChainInfo failed:", people);
     ///
     /// const PEOPLE_COLLECTION_ID =
-    ///   "0x706f703a706f6c6b61646f742e6e6574776f726b2f70656f706c652d6c697465";
+    ///   "0x706f703a706f6c6b61646f742e6e6574776f726b2f70656f706c652d6c697465" as const;
+    /// const keyHandle = {
+    ///   dotNsIdentifier: productContext.value.productId,
+    ///   derivationIndex: { tag: "Index" as const, value: 0 },
+    /// };
+    /// const ringLocation = {
+    ///   chainId: people.value.genesisHash,
+    ///   junctions: [
+    ///     { tag: "CollectionId" as const, value: PEOPLE_COLLECTION_ID },
+    ///   ],
+    /// };
+    /// const registration = await truapi.account.registerRingVrfKey({
+    ///   index: keyHandle.derivationIndex,
+    ///   ring: ringLocation,
+    /// });
+    /// assert(registration.isOk(), "registerRingVrfKey failed:", registration);
     ///
     /// const result = await truapi.account.getAccountAlias({
-    ///   context: { productId: "truapi-playground.dot", suffix: { tag: "Index", value: 0 } },
-    ///   ringLocation: {
-    ///     chainId: people.value.genesisHash,
-    ///     junctions: [
-    ///       { tag: "PalletInstance", value: 67 },
-    ///       { tag: "CollectionId", value: PEOPLE_COLLECTION_ID },
-    ///     ],
-    ///   },
+    ///   keyHandle,
+    ///   context: { productId: productContext.value.productId, suffix: { tag: "Index", value: 0 } },
+    ///   ringLocation,
     /// });
     /// assert(result.isOk(), "getAccountAlias failed:", result);
     /// console.log("account alias:", result.value);
@@ -95,9 +115,12 @@ pub trait Account: Send + Sync {
         Err(CallError::unavailable())
     }
 
-    /// Generate a ring VRF proof; the host selects the member key for the ring.
+    /// Generate a ring VRF proof with an explicitly registered member key.
     ///
     /// ```ts
+    /// const productContext = await truapi.system.getProductContext();
+    /// assert(productContext.isOk(), "getProductContext failed:", productContext);
+    ///
     /// const people = await truapi.chain.getChainInfo({ chain: "People" });
     /// assert(people.isOk(), "getChainInfo failed:", people);
     ///
@@ -105,20 +128,30 @@ pub trait Account: Send + Sync {
     ///   "0x706f703a706f6c6b61646f742e6e6574776f726b2f70656f706c652d6c697465";
     ///
     /// const result = await truapi.account.createAccountProof({
-    ///   context: { productId: "truapi-playground.dot", suffix: { tag: "Index", value: 0 } },
+    ///   keyHandle: {
+    ///     dotNsIdentifier: "peopl.dot",
+    ///     derivationIndex: { tag: "Index", value: 1 },
+    ///   },
+    ///   context: { productId: productContext.value.productId, suffix: { tag: "Index", value: 0 } },
     ///   ringLocation: {
     ///     chainId: people.value.genesisHash,
     ///     junctions: [
-    ///       { tag: "PalletInstance", value: 67 },
     ///       { tag: "CollectionId", value: PEOPLE_COLLECTION_ID },
     ///     ],
     ///   },
     ///   message: "0x48656c6c6f",
     /// });
-    /// assert(result.isOk(), "createAccountProof failed:", result);
-    /// console.log("account proof created:", result.value);
+    /// assert(result.isErr(), "foreign createAccountProof unexpectedly succeeded:", result);
+    /// assert(
+    ///   result.error.tag === "Domain" &&
+    ///     result.error.value.tag === "V1" &&
+    ///     result.error.value.value.tag === "NotAllowlisted",
+    ///   "foreign createAccountProof did not return NotAllowlisted:",
+    ///   result,
+    /// );
+    /// console.log("foreign account proof refused without prompting");
     /// ```
-    #[wire(request_id = 26)]
+    #[wire(request_id = 26, sensitive)]
     async fn create_account_proof(
         &self,
         _cx: &CallContext,
@@ -135,9 +168,12 @@ pub trait Account: Send + Sync {
     /// account, otherwise a per-call user confirmation.
     ///
     /// ```ts
+    /// const productContext = await truapi.system.getProductContext();
+    /// assert(productContext.isOk(), "getProductContext failed:", productContext);
+    ///
     /// const result = await truapi.account.signVrf({
     ///   account: {
-    ///     dotNsIdentifier: "truapi-playground.dot",
+    ///     dotNsIdentifier: productContext.value.productId,
     ///     derivationIndex: { tag: "Index", value: 0 },
     ///   },
     ///   transcriptLabel: "0x706f703a61697264726f70",
@@ -149,12 +185,90 @@ pub trait Account: Send + Sync {
     /// assert(result.isOk(), "signVrf failed:", result);
     /// console.log("vrf signature:", result.value);
     /// ```
-    #[wire(request_id = 164)]
+    #[wire(request_id = 164, sensitive)]
     async fn sign_vrf(
         &self,
         _cx: &CallContext,
         _request: HostAccountSignVrfRequest,
     ) -> Result<HostAccountSignVrfResponse, CallError<HostAccountSignVrfError>> {
+        Err(CallError::unavailable())
+    }
+
+    /// Register a ring-VRF key owned by the calling product.
+    ///
+    /// ```ts
+    /// import { PASEO_NEXT_V2_INDIVIDUALITY } from "@parity/truapi";
+    ///
+    /// const PEOPLE_COLLECTION_ID =
+    ///   "0x706f703a706f6c6b61646f742e6e6574776f726b2f70656f706c652d6c697465";
+    ///
+    /// const result = await truapi.account.registerRingVrfKey({
+    ///   index: { tag: "Index", value: 0 },
+    ///   ring: {
+    ///     chainId: PASEO_NEXT_V2_INDIVIDUALITY.genesis,
+    ///     junctions: [
+    ///       { tag: "CollectionId", value: PEOPLE_COLLECTION_ID },
+    ///     ],
+    ///   },
+    /// });
+    /// assert(result.isOk(), "registerRingVrfKey failed:", result);
+    /// console.log("ring VRF public key:", result.value);
+    /// ```
+    #[wire(request_id = 168)]
+    async fn register_ring_vrf_key(
+        &self,
+        _cx: &CallContext,
+        _request: HostAccountRegisterRingVrfKeyRequest,
+    ) -> Result<HostAccountRegisterRingVrfKeyResponse, CallError<HostAccountRegisterRingVrfKeyError>>
+    {
+        Err(CallError::unavailable())
+    }
+
+    /// List registered ring-VRF keys owned by a product.
+    ///
+    /// ```ts
+    /// const productContext = await truapi.system.getProductContext();
+    /// assert(productContext.isOk(), "getProductContext failed:", productContext);
+    ///
+    /// const result = await truapi.account.listRingVrfKeys({
+    ///   owner: productContext.value.productId,
+    ///   disclosure: "PublicKey",
+    /// });
+    /// assert(result.isOk(), "listRingVrfKeys failed:", result);
+    /// console.log("registered ring VRF keys:", result.value);
+    /// ```
+    #[wire(request_id = 170)]
+    async fn list_ring_vrf_keys(
+        &self,
+        _cx: &CallContext,
+        _request: HostAccountListRingVrfKeysRequest,
+    ) -> Result<HostAccountListRingVrfKeysResponse, CallError<HostAccountListRingVrfKeysError>>
+    {
+        Err(CallError::unavailable())
+    }
+
+    /// Sign bytes directly with a registered ring-VRF member key.
+    ///
+    /// ```ts
+    /// const productContext = await truapi.system.getProductContext();
+    /// assert(productContext.isOk(), "getProductContext failed:", productContext);
+    ///
+    /// const result = await truapi.account.ringVrfSign({
+    ///   keyHandle: {
+    ///     dotNsIdentifier: productContext.value.productId,
+    ///     derivationIndex: { tag: "Index", value: 0 },
+    ///   },
+    ///   message: "0x48656c6c6f",
+    /// });
+    /// assert(result.isOk(), "ringVrfSign failed:", result);
+    /// console.log("ring VRF signature:", result.value);
+    /// ```
+    #[wire(request_id = 172)]
+    async fn ring_vrf_sign(
+        &self,
+        _cx: &CallContext,
+        _request: HostAccountRingVrfSignRequest,
+    ) -> Result<HostAccountRingVrfSignResponse, CallError<HostAccountRingVrfSignError>> {
         Err(CallError::unavailable())
     }
 
@@ -184,7 +298,7 @@ pub trait Account: Send + Sync {
     /// assert(result.isOk(), "getUserId failed:", result);
     /// console.log("user id:", result.value);
     /// ```
-    #[wire(request_id = 110)]
+    #[wire(request_id = 110, sensitive)]
     async fn get_user_id(
         &self,
         _cx: &CallContext,
@@ -205,7 +319,7 @@ pub trait Account: Send + Sync {
     /// assert(result.isOk(), "requestLogin failed:", result);
     /// console.log("login completed:", result.value);
     /// ```
-    #[wire(request_id = 112)]
+    #[wire(request_id = 112, sensitive)]
     async fn request_login(
         &self,
         _cx: &CallContext,

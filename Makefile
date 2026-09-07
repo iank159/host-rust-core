@@ -3,7 +3,7 @@
 # Run `make help` for the list of targets.
 
 .DEFAULT_GOAL := help
-.PHONY: help setup build codegen test check clean playground wasm wasm-crypto-test uniffi uniffi-kotlin ios-build ios-run ios-chat-run ios-chat-host-playground-run ios-chat-all android-jni android-publish-local dotli-link dev dev-bootstrap dev-link-check e2e-dotli e2e-signing-cli e2e-pairing-cli headless install matrix explorer xcframework
+.PHONY: help setup build codegen test check check-generated clean playground wasm wasm-crypto-test uniffi uniffi-kotlin android-check provider-android-check ios-build ios-run ios-chat-run ios-chat-host-playground-run ios-chat-all android-jni android-publish-local dotli-link dev dev-cli dev-bootstrap dev-link-check e2e-dotli e2e-cli-diagnosis e2e-signing-cli e2e-pairing-cli e2e-chat-cli e2e-cli-update headless install cli-runner cli-dist matrix explorer xcframework
 
 CARGO ?= cargo
 TRUAPI_PKG := js/packages/truapi
@@ -12,10 +12,13 @@ JS_PACKAGES := js/packages
 EXPLORER := explorer
 DOTLI := hosts/dotli
 HOST_WASM_PKG := $(JS_PACKAGES)/truapi-host
+PROVIDER_WASM_PKG := $(JS_PACKAGES)/truapi-provider
 HOST_CALLBACKS_GENERATED := $(HOST_WASM_PKG)/src/generated/host-callbacks.ts
 HOST_WASM_ADAPTER_GENERATED := $(HOST_WASM_PKG)/src/generated/host-callbacks-adapter.ts
 HOST_WASM_WORKER_CALLBACKS_GENERATED := $(HOST_WASM_PKG)/src/generated/worker-callbacks.ts
 HOST_WASM_WEB := $(HOST_WASM_PKG)/dist/wasm/web/truapi_server.js
+HOST_WASM_WEB_BINARY := $(HOST_WASM_PKG)/dist/wasm/web/truapi_server_bg.wasm
+DOTLI_HOST_VITE_CONFIG := $(DOTLI)/apps/host/vite.config.ts
 DOTLI_UI := $(DOTLI)/packages/ui
 DOTLI_NODE_MODULES := $(DOTLI)/node_modules
 DOTLI_TRUAPI_LINK := $(DOTLI_NODE_MODULES)/@parity/truapi
@@ -30,6 +33,19 @@ export VITE_NETWORKS
 # preview by default. Override with `DOTLI_PREVIEW=preview` to test production
 # preview behavior.
 DOTLI_PREVIEW ?= preview:debug
+
+# truapi-server declares these modules unconditionally, so the crate does not
+# parse without them. They are gitignored and produced by scripts/codegen.sh.
+GENERATED_RUST := \
+	rust/crates/truapi-server/src/generated/mod.rs \
+	rust/crates/truapi-server/src/generated/dispatcher.rs \
+	rust/crates/truapi-server/src/generated/wire_table.rs \
+	rust/crates/truapi-server/src/wasm/generated_bridge.rs
+
+check-generated:
+	@for file in $(GENERATED_RUST); do \
+		test -f "$$file" || { echo "Missing $$file. Run: make codegen"; exit 1; }; \
+	done
 
 help: ## Show this help.
 	@awk 'BEGIN { FS = ":.*##"; printf "Usage: make <target>\n\nTargets:\n" } \
@@ -46,12 +62,12 @@ setup: ## First-time setup: submodules, JS dependencies, generated artifacts.
 	cd $(DOTLI) && bun install --frozen-lockfile
 	$(MAKE) dotli-link
 
-build: ## Build the Rust workspace and the TypeScript client.
+build: check-generated ## Build the Rust workspace and the TypeScript client.
 	cargo build --workspace
 	cd $(TRUAPI_PKG) && npm run build
 	cd $(HOST_WASM_PKG) && npm run build
 
-headless: ## Build the truapi-host CLI and generated TypeScript client.
+headless: check-generated ## Build the truapi-host CLI and generated TypeScript client.
 	# The client build shells out to tsc, which `ensure-generated.sh` looks for at
 	# the root or in the package. Install workspace deps when neither is present so
 	# this target works on a checkout that has not run `make setup`.
@@ -61,14 +77,58 @@ headless: ## Build the truapi-host CLI and generated TypeScript client.
 	cd $(TRUAPI_PKG) && npm run build
 
 install: headless ## Install the truapi-host CLI into Cargo's bin dir; use as `make headless install`.
+	# A prebuilt install and a cargo one shadow each other depending on PATH
+	# order, so clear the prebuilt one before taking over.
+	bash scripts/truapi-host-installer.sh --uninstall
 	cargo install --path rust/crates/truapi-host-cli --bin truapi-host --locked --force
+	@echo
+	@echo "Installed a local build of truapi-host. It does not auto-update."
+	@echo "To go back to the prebuilt release:"
+	@echo "  curl -fsSL $(CLI_INSTALLER_URL) | bash"
+
+# Release packaging for the truapi-host binary. CLI_TARGET picks the triple;
+# CLI_VERSION defaults to the crate version, which tracks the protocol version.
+# The layout here is what scripts/truapi-host-installer.sh expects to download.
+CLI_INSTALLER_URL := https://raw.githubusercontent.com/paritytech/host-rust-core/main/scripts/truapi-host-installer.sh
+CLI_DIST_DIR := target/dist
+# Default to the triple that is actually published, not the rustc host: the
+# Linux releases are musl so one artifact per architecture runs anywhere.
+CLI_TARGET ?= $(shell rustc -vV | sed -n 's/^host: //p' | sed 's/-linux-gnu$$/-linux-musl/')
+CLI_VERSION ?= $(shell awk -F'"' '/^version = /{print $$2; exit}' rust/crates/truapi-host-cli/Cargo.toml)
+CLI_ARCHIVE := truapi-host-$(CLI_VERSION)-$(CLI_TARGET).tar.gz
+CLI_RUNNER := $(CLI_DIST_DIR)/runner.js
+CLI_STAGE := $(CLI_DIST_DIR)/$(CLI_TARGET)
+# macOS ships shasum, most Linux images ship only sha256sum.
+SHA256 := $(shell command -v sha256sum >/dev/null 2>&1 && echo "sha256sum" || echo "shasum -a 256")
+
+# The checkout's runner imports @parity/truapi by relative path, so it only
+# works from a built source tree. Bundling inlines the client, which is what
+# lets a downloaded binary run product scripts. Needs generated sources, so run
+# `make codegen` first on a fresh checkout. Architecture-independent, so a file
+# target: CI builds it once and every per-target archive reuses it.
+$(CLI_RUNNER):
+	mkdir -p $(CLI_DIST_DIR)
+	bun build rust/crates/truapi-host-cli/js/runner.ts --target=bun --outfile $@
+
+cli-runner: $(CLI_RUNNER) ## Bundle the self-contained product-script runner into target/dist.
+
+cli-dist: check-generated $(CLI_RUNNER) ## Package truapi-host for CLI_TARGET into target/dist in the release artifact layout.
+	rustup target add $(CLI_TARGET)
+	$(CARGO) build -p truapi-host-cli --release --target $(CLI_TARGET)
+	rm -rf $(CLI_STAGE)
+	mkdir -p $(CLI_STAGE)
+	cp target/$(CLI_TARGET)/release/truapi-host $(CLI_RUNNER) $(CLI_STAGE)/
+	tar -czf $(CLI_DIST_DIR)/$(CLI_ARCHIVE) -C $(CLI_STAGE) truapi-host runner.js
+	cd $(CLI_DIST_DIR) && $(SHA256) $(CLI_ARCHIVE) > $(CLI_ARCHIVE).sha256
+	@echo "packaged $(CLI_DIST_DIR)/$(CLI_ARCHIVE)"
 
 codegen: ## Regenerate generated TS/Rust artifacts from the Rust crates.
 	./scripts/codegen.sh
 	cd $(PLAYGROUND) && rm -rf node_modules/@parity && yarn install
 
-wasm: ## Rebuild the truapi-server WASM artifacts under js/packages/truapi-host/dist/wasm/.
+wasm: check-generated ## Rebuild the truapi-server and truapi-provider WASM bundles under js/packages/*/dist/.
 	cd $(HOST_WASM_PKG) && npm run build:wasm
+	cd $(PROVIDER_WASM_PKG) && npm run build:wasm
 
 wasm-crypto-test: ## Run crypto/vector tests on wasm32 via wasm-pack/node.
 	wasm-pack test --node rust/crates/truapi-server --test wasm_crypto_vectors --no-default-features
@@ -82,13 +142,16 @@ UNIFFI_CDYLIB_DIR := target/codegen
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
 UNIFFI_CDYLIB := $(UNIFFI_CDYLIB_DIR)/libtruapi_server.dylib
+PROVIDER_CDYLIB := $(UNIFFI_CDYLIB_DIR)/libtruapi_provider.dylib
 else
 UNIFFI_CDYLIB := $(UNIFFI_CDYLIB_DIR)/libtruapi_server.so
+PROVIDER_CDYLIB := $(UNIFFI_CDYLIB_DIR)/libtruapi_provider.so
 endif
 
 UNIFFI_SWIFT_TMP := target/uniffi-swift-out
+PROVIDER_SWIFT_TMP := target/uniffi-provider-swift-out
 
-uniffi: ## Generate Swift bindings from the truapi-server cdylib into target/uniffi-swift-out (consumed by ios/truapi-host/scripts/rebuild.sh).
+uniffi: check-generated ## Generate Swift bindings from the truapi-server cdylib into target/uniffi-swift-out (consumed by ios/truapi-host/scripts/rebuild.sh).
 	$(CARGO) build -p truapi-server --profile codegen --features ws-bridge
 	rm -rf $(UNIFFI_SWIFT_TMP)
 	mkdir -p $(UNIFFI_SWIFT_TMP)
@@ -179,7 +242,7 @@ ios-chat-all: ios-chat-run ios-chat-host-playground-run ## Run both local iOS Ch
 
 UNIFFI_KOTLIN_OUT := android/truapi-host/src/main/kotlin/generated
 
-uniffi-kotlin: ## Regenerate Kotlin UniFFI bindings from the truapi-server cdylib.
+uniffi-kotlin: check-generated ## Regenerate Kotlin UniFFI bindings from the truapi-server cdylib.
 	$(CARGO) build -p truapi-server --profile codegen --features ws-bridge
 	rm -rf $(UNIFFI_KOTLIN_OUT)
 	mkdir -p $(UNIFFI_KOTLIN_OUT)
@@ -193,29 +256,77 @@ uniffi-kotlin: ## Regenerate Kotlin UniFFI bindings from the truapi-server cdyli
 ANDROID_ABIS ?= arm64-v8a armeabi-v7a x86_64
 ANDROID_JNILIBS := android/truapi-host/src/main/jniLibs
 
-android-jni: ## Cross-compile libtruapi_server.so for Android ABIs into jniLibs (needs cargo-ndk + NDK).
+android-jni: check-generated ## Cross-compile libtruapi_server.so for Android ABIs into jniLibs (needs cargo-ndk + NDK).
 	@command -v cargo-ndk >/dev/null || { echo "cargo-ndk not found: cargo install cargo-ndk"; exit 1; }
 	$(CARGO) ndk $(foreach abi,$(ANDROID_ABIS),-t $(abi)) \
 		-o $(ANDROID_JNILIBS) \
 		build --release -p truapi-server --features ws-bridge
+	# cargo-ndk also copies dependency cdylib intermediates (hash-suffixed,
+	# statically linked into libtruapi_server.so already); keep only ours.
+	find $(ANDROID_JNILIBS) -name '*.so' ! -name 'libtruapi_server.so' -delete
 
-android-publish-local: uniffi-kotlin ## Generate Kotlin bindings, then publish the AAR to ~/.m2 (needs Gradle + JDK 17). The AAR does not bundle the cdylib; consumers build it per ABI (see android-jni).
+android-check: uniffi-kotlin ## Compile the Kotlin host adapter against freshly generated bindings (needs Gradle + Android SDK).
+	gradle :truapi-host:compileReleaseKotlin
+
+android-publish-local: uniffi-kotlin ## Generate Kotlin bindings, then publish the AAR to ~/.m2 as io.parity:truapi-host-android:0.0.0-local (needs Gradle + JDK 17). Run `make android-jni` first to bundle the per-ABI cdylibs into the AAR.
 	gradle :truapi-host:publishReleasePublicationToMavenLocal
 
-test: ## Run Rust + TypeScript client tests.
+# truapi-provider ships as its own per-platform artifacts (iOS xcframework,
+# Android AAR, npm wasm) so a host consumes chain transport without depending on
+# the Rust crate. The `uniffi` feature carries no `ws` backend: these builds are
+# the light client alone.
+PROVIDER_KOTLIN_OUT := android/truapi-provider/src/main/kotlin/generated
+PROVIDER_JNILIBS := android/truapi-provider/src/main/jniLibs
+
+provider-swift: ## Generate the TrUAPIProvider Swift bindings into target/uniffi-provider-swift-out (no Xcode, no iOS targets).
+	$(CARGO) build -p truapi-provider --profile codegen --no-default-features --features uniffi
+	rm -rf $(PROVIDER_SWIFT_TMP)
+	mkdir -p $(PROVIDER_SWIFT_TMP)
+	$(CARGO) run -p uniffi-bindgen-cli -- generate \
+		--library $(PROVIDER_CDYLIB) \
+		--language swift \
+		--out-dir $(PROVIDER_SWIFT_TMP)
+
+provider-ios: ## Build the TrUAPIProvider Swift bindings + xcframework (adds --sim-only via SIM_ONLY=1).
+	bash ios/truapi-provider/scripts/rebuild.sh $(if $(SIM_ONLY_ON),--sim-only,)
+
+provider-kotlin: ## Regenerate Kotlin UniFFI bindings from the truapi-provider cdylib.
+	$(CARGO) build -p truapi-provider --profile codegen --no-default-features --features uniffi
+	rm -rf $(PROVIDER_KOTLIN_OUT)
+	mkdir -p $(PROVIDER_KOTLIN_OUT)
+	$(CARGO) run -p uniffi-bindgen-cli -- generate \
+		--library $(PROVIDER_CDYLIB) \
+		--language kotlin \
+		--out-dir $(PROVIDER_KOTLIN_OUT)
+
+provider-android-jni: ## Cross-compile libtruapi_provider.so for Android ABIs into the module's jniLibs (needs cargo-ndk + NDK).
+	@command -v cargo-ndk >/dev/null || { echo "cargo-ndk not found: cargo install cargo-ndk"; exit 1; }
+	$(CARGO) ndk $(foreach abi,$(ANDROID_ABIS),-t $(abi)) \
+		-o $(PROVIDER_JNILIBS) \
+		build --release -p truapi-provider --no-default-features --features uniffi
+
+provider-android-check: provider-kotlin ## Compile the provider Kotlin bindings against freshly generated sources (needs Gradle + Android SDK).
+	@test -n "$$(find $(PROVIDER_KOTLIN_OUT) -name '*.kt' -print -quit)" \
+		|| { echo "no generated Kotlin under $(PROVIDER_KOTLIN_OUT): the module would compile an empty source set and pass"; exit 1; }
+	gradle :truapi-provider:compileReleaseKotlin
+
+provider-android-publish-local: provider-kotlin provider-android-jni ## Publish the self-contained provider AAR (bindings + cdylib) to ~/.m2.
+	gradle :truapi-provider:publishReleasePublicationToMavenLocal
+
+test: check-generated ## Run Rust + TypeScript client tests.
 	cargo test --workspace
 	cd $(TRUAPI_PKG) && npm test
-	cd $(JS_PACKAGES)/truapi-host && npm test
+	cd $(HOST_WASM_PKG) && npm run build && npm test
 
-check: ## Full verification suite (build, fmt, clippy, test, TS tests, playground build + lint).
+check: check-generated ## Full verification suite (build, fmt, clippy, test, TS tests, playground build + lint).
 	cargo build --workspace
 	cargo check --target wasm32-unknown-unknown -p truapi-server
 	cargo +nightly fmt --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cargo test --workspace --all-features --all-targets
 	cd $(TRUAPI_PKG) && npm run build && npm test
-	cd $(JS_PACKAGES)/truapi-host && npm install --no-fund --no-audit && npm test
-	cd $(PLAYGROUND) && yarn build && yarn lint
+	cd $(HOST_WASM_PKG) && npm install --no-fund --no-audit && npm run build && npm test
+	cd $(PLAYGROUND) && yarn build && yarn lint && yarn test:unit
 
 clean: ## Remove local build/test artifacts without deleting dependencies.
 	cargo clean
@@ -247,7 +358,14 @@ dev-bootstrap: ## Prepare ignored generated/build artifacts needed by dotli prev
 	if [ ! -d node_modules ]; then npm ci --ignore-scripts; fi
 	./scripts/codegen.sh
 	cd $(HOST_WASM_PKG) && npm run build
-	TRUAPI_WASM_PROFILE=dev $(MAKE) wasm
+	# Release profile, because dotli precaches the WASM in its service worker and
+	# vite-plugin-pwa fails the build outright on anything over its workbox limit.
+	# A dev-profile build is several times that limit; a release build is well
+	# under it. TRUAPI_WASM_PROFILE=dev is therefore not usable with `make dev`
+	# or `make e2e-dotli` at all: dev-link-check rejects the artifact rather than
+	# letting dotli fail deeper in. Build one directly with
+	# `TRUAPI_WASM_PROFILE=dev make wasm` if you need it for something else.
+	$(MAKE) wasm
 	cd $(PLAYGROUND) && yarn install --frozen-lockfile
 	cd $(DOTLI) && bun install --frozen-lockfile
 	$(MAKE) dev-link-check
@@ -258,12 +376,18 @@ dev-link-check: dotli-link ## Verify dotli can resolve the local @parity/truapi-
 	@test -f "$(HOST_WASM_WORKER_CALLBACKS_GENERATED)" || (echo "Missing generated host callbacks worker bridge. Run: make codegen"; exit 1)
 	@test -f "$(HOST_WASM_PKG)/dist/index.js" || (echo "Missing @parity/truapi-host dist. Run: npm run build --prefix $(HOST_WASM_PKG)"; exit 1)
 	@test -f "$(HOST_WASM_WEB)" || (echo "Missing @parity/truapi-host web WASM glue. Run: make wasm"; exit 1)
+	@test -f "$(HOST_WASM_WEB_BINARY)" || (echo "Missing @parity/truapi-host web WASM binary. Run: make wasm"; exit 1)
+	@node scripts/check-dotli-wasm-precache.mjs "$(HOST_WASM_WEB_BINARY)" "$(DOTLI_HOST_VITE_CONFIG)"
 	@test -e "$(DOTLI_TRUAPI_LINK)/package.json" || (echo "dotli cannot resolve @parity/truapi. Run top-level: make dotli-link"; exit 1)
 	@test -e "$(DOTLI_HOST_WASM_LINK)/package.json" || (echo "dotli cannot resolve @parity/truapi-host. Run top-level: make dotli-link"; exit 1)
 	@test ! -e "$(DOTLI_UI_TRUAPI_SHADOW)/package.json" || (echo "$(DOTLI_UI_TRUAPI_SHADOW) shadows the local workspace link. Run top-level: make dotli-link"; exit 1)
 	@test ! -e "$(DOTLI_UI_HOST_WASM_SHADOW)/package.json" || (echo "$(DOTLI_UI_HOST_WASM_SHADOW) shadows the local workspace link. Run top-level: make dotli-link"; exit 1)
 	@node -e 'const fs = require("node:fs"); const checks = [["$(DOTLI_TRUAPI_LINK)/package.json", "@parity/truapi"], ["$(DOTLI_HOST_WASM_LINK)/package.json", "@parity/truapi-host"]]; for (const [path, name] of checks) { const pkg = JSON.parse(fs.readFileSync(path, "utf8")); if (pkg.name !== name) { console.error(path + " resolves " + pkg.name + ", expected local " + name + ". Run: make dotli-link"); process.exit(1); } }'
 	cd $(DOTLI_UI) && bun -e 'await import("@parity/truapi-host"); await import("@parity/truapi-host/web");'
+
+dev-cli: ## Start the playground (:3000) against the local signing-host CLI; open http://localhost:3000
+	cargo build --release -p truapi-host-cli
+	cd $(PLAYGROUND) && "$(abspath target/release/truapi-host)" dev -- yarn dev
 
 dev: dev-bootstrap ## Start dotli host (:5173) + playground (:3000) together; open http://localhost:5173/localhost:3000. DEBUG=1 logs wire frames.
 	@trap 'kill 0' EXIT; \
@@ -277,11 +401,21 @@ e2e-dotli: ## Fully automated dotli + playground diagnosis e2e using the local s
 	cargo build -p truapi-host-cli
 	cd $(PLAYGROUND) && bun tests/e2e/dotli-diagnosis.ts
 
+e2e-cli-diagnosis: ## Full playground diagnosis in a plain browser tab, hosted by `truapi-host dev`.
+	cargo build --release -p truapi-host-cli
+	cd $(PLAYGROUND) && TRUAPI_HOST_BIN="$(abspath target/release/truapi-host)" bun tests/e2e/cli-diagnosis.ts
+
 e2e-signing-cli: ## Run the generated battery against the direct signing-host CLI.
 	scripts/battery.sh --signing-host
 
 e2e-pairing-cli: ## Run the generated battery against the paired pairing-host CLI.
 	scripts/battery.sh --pairing-host
+
+e2e-chat-cli: ## Run the Chat content-screening battery against a chat signing-host CLI.
+	scripts/battery.sh --chat-host
+
+e2e-cli-update: cli-dist ## Install the packaged truapi-host from a fake release and self-update it, with no network.
+	node scripts/e2e-cli-update.mjs
 
 matrix: ## Regenerate the host compatibility matrix from explorer/diagnosis-reports.
 	cd $(EXPLORER) && npm run generate-matrix
@@ -297,21 +431,34 @@ IOS_SIM_TARGET := aarch64-apple-ios-sim
 IOS_DEPLOYMENT_TARGET := 17.0
 XCFRAMEWORK_OUT := target/truapi_server.xcframework
 XCFRAMEWORK_HEADERS := target/xcframework-headers
+# Slices and cargo profile the xcframework is assembled from. The defaults are
+# what a release needs; a compile-only consumer overrides both for speed. The
+# profile name doubles as cargo's output directory.
+# SIM_ONLY=1 drops the device slice while iterating, which halves the target
+# builds. publish.sh refuses a framework missing either slice, so this cannot
+# reach a release asset. XCFRAMEWORK_TARGETS still overrides both.
+#
+# 0, false, no and off mean off. Make treats any non-empty value as true, so
+# without this SIM_ONLY=0 would drop the device slice.
+SIM_ONLY_ON := $(filter-out 0 false no off,$(SIM_ONLY))
+XCFRAMEWORK_TARGETS ?= $(if $(SIM_ONLY_ON),$(IOS_SIM_TARGET),$(IOS_DEVICE_TARGET) $(IOS_SIM_TARGET))
+XCFRAMEWORK_PROFILE ?= release
+XCFRAMEWORK_CARGO_FLAGS := $(if $(filter release,$(XCFRAMEWORK_PROFILE)),--release,)
 
-xcframework: uniffi ## Build truapi_server.xcframework for iOS device + simulator.
-	rustup target add $(IOS_DEVICE_TARGET) $(IOS_SIM_TARGET)
-	IPHONEOS_DEPLOYMENT_TARGET=$(IOS_DEPLOYMENT_TARGET) $(CARGO) build -p truapi-server --release \
-		--features ws-bridge --target $(IOS_DEVICE_TARGET)
-	IPHONEOS_DEPLOYMENT_TARGET=$(IOS_DEPLOYMENT_TARGET) $(CARGO) build -p truapi-server --release \
-		--features ws-bridge --target $(IOS_SIM_TARGET)
+xcframework: uniffi ## Build truapi_server.xcframework for iOS device + simulator (SIM_ONLY=1 for simulator only).
+	rustup target add $(XCFRAMEWORK_TARGETS)
+	for target in $(XCFRAMEWORK_TARGETS); do \
+		IPHONEOS_DEPLOYMENT_TARGET=$(IOS_DEPLOYMENT_TARGET) $(CARGO) build -p truapi-server \
+			$(XCFRAMEWORK_CARGO_FLAGS) --features ws-bridge --target $$target || exit 1; \
+	done
 	rm -rf $(XCFRAMEWORK_OUT) $(XCFRAMEWORK_HEADERS)
 	mkdir -p $(XCFRAMEWORK_HEADERS)
 	cp $(UNIFFI_SWIFT_TMP)/truapiFFI.h $(UNIFFI_SWIFT_TMP)/truapi_platformFFI.h \
 		$(UNIFFI_SWIFT_TMP)/truapi_serverFFI.h $(XCFRAMEWORK_HEADERS)/
 	cp $(UNIFFI_SWIFT_TMP)/truapi_serverFFI.modulemap $(XCFRAMEWORK_HEADERS)/module.modulemap
-	xcodebuild -create-xcframework \
-		-library target/$(IOS_DEVICE_TARGET)/release/libtruapi_server.a \
-		-headers $(XCFRAMEWORK_HEADERS) \
-		-library target/$(IOS_SIM_TARGET)/release/libtruapi_server.a \
-		-headers $(XCFRAMEWORK_HEADERS) \
-		-output $(XCFRAMEWORK_OUT)
+	slices=""; \
+	for target in $(XCFRAMEWORK_TARGETS); do \
+		slices="$$slices -library target/$$target/$(XCFRAMEWORK_PROFILE)/libtruapi_server.a \
+			-headers $(XCFRAMEWORK_HEADERS)"; \
+	done; \
+	xcodebuild -create-xcframework $$slices -output $(XCFRAMEWORK_OUT)
