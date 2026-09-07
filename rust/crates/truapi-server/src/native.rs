@@ -947,6 +947,7 @@ impl NativeProductExecution {
             chat_platform: self.chat.clone(),
             permission_status: Some(self.permission_status.clone()),
             chat: self.chat_connection.clone(),
+            pocket_platform: None,
         }
     }
 
