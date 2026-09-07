@@ -1,6 +1,29 @@
 //! Product-facing signing capability adapters.
 
-use super::super::*;
+use tracing::{debug, instrument};
+use truapi::api::Signing;
+use truapi::versioned::signing::{
+    HostCreateTransactionError, HostCreateTransactionRequest, HostCreateTransactionResponse,
+    HostCreateTransactionWithLegacyAccountError, HostCreateTransactionWithLegacyAccountRequest,
+    HostCreateTransactionWithLegacyAccountResponse, HostSignPayloadError, HostSignPayloadRequest,
+    HostSignPayloadResponse, HostSignPayloadWithLegacyAccountError,
+    HostSignPayloadWithLegacyAccountRequest, HostSignPayloadWithLegacyAccountResponse,
+    HostSignRawError, HostSignRawRequest, HostSignRawResponse, HostSignRawWithLegacyAccountError,
+    HostSignRawWithLegacyAccountRequest, HostSignRawWithLegacyAccountResponse,
+};
+use truapi::{CallContext, CallError, v01};
+use truapi_platform::{
+    CreateTransactionReview, SignPayloadReview, SignRawReview, UserConfirmationReview,
+};
+
+use crate::runtime::authority::{
+    CreateTransactionAuthorityRequest, SignPayloadAuthorityRequest, SignRawAuthorityRequest,
+};
+use crate::runtime::{
+    LEGACY_ACCOUNT_UNAVAILABLE_REASON, LEGACY_PRODUCT_ACCOUNT_MISMATCH_REASON, LegacySigner,
+    ProductRuntimeHost, remote_authority_call, remote_authority_context, signing_call_error,
+    transaction_call_error,
+};
 
 #[truapi::async_trait]
 impl Signing for ProductRuntimeHost {

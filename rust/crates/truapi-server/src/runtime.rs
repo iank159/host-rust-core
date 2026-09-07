@@ -39,29 +39,11 @@ use core::time::Duration;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 
-use crate::chain_runtime::RuntimeFailure;
-use crate::host_logic::bulletin::preimage_key;
-use crate::host_logic::dotns::{NavigateDecision, external_host, parse_navigate};
-use crate::host_logic::features::{chain_info, feature_supported, supported_chains};
-use crate::host_logic::permissions::PermissionsService;
-#[cfg(test)]
-use crate::host_logic::product_account::index_bytes;
-use crate::host_logic::product_account::{
-    derivation_index_bytes, derive_product_public_key, public_key_from_address,
-};
-use crate::host_logic::session::SessionInfo;
-#[cfg(test)]
-use crate::host_logic::session::SessionState;
-use crate::host_logic::sso::messages::RingVrfError;
-use crate::host_logic::sso::pairing::x25519_public_key;
-use crate::runtime::bulletin_rpc::BulletinSubmitError;
-#[cfg(test)]
-use crate::subscription::Spawner;
-pub(crate) use authority::{BulletinAllowanceKey, ProductAuthority};
+use authority::{AuthorityCancelError, AuthoritySession};
+pub(crate) use authority::{AuthorityError, BulletinAllowanceKey, ProductAuthority};
 pub(crate) use chat::{ChatConnection, chat_platform_for};
+use futures::{FutureExt, StreamExt, pin_mut};
 #[cfg(test)]
 use pairing_host::PairingHost;
 pub(crate) use pairing_host::PairingHost as PairingHostRole;
@@ -73,136 +55,39 @@ pub(crate) use signing_host::{
     respond_to_pairing, resume_pairing,
 };
 pub use signing_host::{PairedSsoPeer, ResponderExit};
-
-pub(crate) use authority::AuthorityError;
-use authority::{
-    AccountAliasAuthorityRequest, AuthorityCancelError, AuthoritySession,
-    CreateProofAuthorityRequest, CreateTransactionAuthorityRequest,
-    ListRingVrfKeysAuthorityRequest, RegisterRingVrfKeyAuthorityRequest,
-    RingVrfSignAuthorityRequest, SignPayloadAuthorityRequest, SignRawAuthorityRequest,
-};
-
-use futures::{FutureExt, StreamExt, pin_mut};
-#[cfg(test)]
-use parity_scale_codec::Encode;
-use tracing::{debug, instrument, warn};
-use truapi::api::{
-    Account, Chain, Chat, CoinPayment, Entropy, LocalStorage, Locale, Notifications, Payment,
-    Permissions, Preimage, ResourceAllocation, Signing, System, Theme,
-};
-use truapi::versioned::account::{
-    HostAccountConnectionStatusSubscribeItem, HostAccountCreateProofError,
-    HostAccountCreateProofRequest, HostAccountCreateProofResponse, HostAccountGetAliasError,
-    HostAccountGetAliasRequest, HostAccountGetAliasResponse, HostAccountGetError,
-    HostAccountGetRequest, HostAccountGetResponse, HostAccountListRingVrfKeysError,
-    HostAccountListRingVrfKeysRequest, HostAccountListRingVrfKeysResponse,
-    HostAccountRegisterRingVrfKeyError, HostAccountRegisterRingVrfKeyRequest,
-    HostAccountRegisterRingVrfKeyResponse, HostAccountRingVrfSignError,
-    HostAccountRingVrfSignRequest, HostAccountRingVrfSignResponse, HostAccountSignVrfError,
-    HostAccountSignVrfRequest, HostAccountSignVrfResponse, HostGetLegacyAccountsError,
-    HostGetLegacyAccountsRequest, HostGetLegacyAccountsResponse, HostGetUserIdError,
-    HostGetUserIdRequest, HostGetUserIdResponse, HostRequestLoginError, HostRequestLoginRequest,
-    HostRequestLoginResponse,
-};
-use truapi::versioned::chain::{
-    RemoteChainHeadBodyError, RemoteChainHeadBodyRequest, RemoteChainHeadBodyResponse,
-    RemoteChainHeadCallError, RemoteChainHeadCallRequest, RemoteChainHeadCallResponse,
-    RemoteChainHeadContinueError, RemoteChainHeadContinueRequest, RemoteChainHeadContinueResponse,
-    RemoteChainHeadFollowItem, RemoteChainHeadFollowRequest, RemoteChainHeadHeaderError,
-    RemoteChainHeadHeaderRequest, RemoteChainHeadHeaderResponse, RemoteChainHeadStopOperationError,
-    RemoteChainHeadStopOperationRequest, RemoteChainHeadStopOperationResponse,
-    RemoteChainHeadStorageError, RemoteChainHeadStorageRequest, RemoteChainHeadStorageResponse,
-    RemoteChainHeadUnpinError, RemoteChainHeadUnpinRequest, RemoteChainHeadUnpinResponse,
-    RemoteChainInfoError, RemoteChainInfoRequest, RemoteChainInfoResponse,
-    RemoteChainSpecChainNameError, RemoteChainSpecChainNameRequest,
-    RemoteChainSpecChainNameResponse, RemoteChainSpecGenesisHashError,
-    RemoteChainSpecGenesisHashRequest, RemoteChainSpecGenesisHashResponse,
-    RemoteChainSpecPropertiesError, RemoteChainSpecPropertiesRequest,
-    RemoteChainSpecPropertiesResponse, RemoteChainTransactionBroadcastError,
-    RemoteChainTransactionBroadcastRequest, RemoteChainTransactionBroadcastResponse,
-    RemoteChainTransactionStopError, RemoteChainTransactionStopRequest,
-    RemoteChainTransactionStopResponse,
-};
+use tracing::{instrument, warn};
+use truapi::api::Chat;
+use truapi::versioned::account::{HostAccountGetError, HostAccountSignVrfError};
 use truapi::versioned::chat::{
     HostChatActionSubscribeItem, HostChatCreateRoomError, HostChatCreateRoomRequest,
     HostChatCreateRoomResponse, HostChatListSubscribeItem, HostChatPostMessageError,
     HostChatPostMessageRequest, HostChatPostMessageResponse, HostChatRegisterBotError,
     HostChatRegisterBotRequest, HostChatRegisterBotResponse,
 };
-use truapi::versioned::coin_payment::{
-    HostCoinPaymentCreateChequeError, HostCoinPaymentCreateChequeRequest,
-    HostCoinPaymentCreateChequeResponse, HostCoinPaymentCreatePurseError,
-    HostCoinPaymentCreatePurseRequest, HostCoinPaymentCreatePurseResponse,
-    HostCoinPaymentCreateReceivableError, HostCoinPaymentCreateReceivableRequest,
-    HostCoinPaymentCreateReceivableResponse, HostCoinPaymentDeletePurseError,
-    HostCoinPaymentDeletePurseItem, HostCoinPaymentDeletePurseRequest, HostCoinPaymentDepositError,
-    HostCoinPaymentDepositItem, HostCoinPaymentDepositRequest, HostCoinPaymentListenForError,
-    HostCoinPaymentListenForItem, HostCoinPaymentListenForRequest, HostCoinPaymentQueryPurseError,
-    HostCoinPaymentQueryPurseRequest, HostCoinPaymentQueryPurseResponse,
-    HostCoinPaymentRebalancePurseError, HostCoinPaymentRebalancePurseItem,
-    HostCoinPaymentRebalancePurseRequest, HostCoinPaymentRefundError, HostCoinPaymentRefundItem,
-    HostCoinPaymentRefundRequest,
-};
-use truapi::versioned::entropy::{
-    HostDeriveEntropyError, HostDeriveEntropyRequest, HostDeriveEntropyResponse,
-};
-use truapi::versioned::local_storage::{
-    HostLocalStorageClearError, HostLocalStorageClearRequest, HostLocalStorageClearResponse,
-    HostLocalStorageReadError, HostLocalStorageReadRequest, HostLocalStorageReadResponse,
-    HostLocalStorageWriteError, HostLocalStorageWriteRequest, HostLocalStorageWriteResponse,
-};
-use truapi::versioned::locale::HostLocaleSubscribeItem;
-use truapi::versioned::notifications::{
-    HostPushNotificationCancelError, HostPushNotificationCancelRequest,
-    HostPushNotificationCancelResponse, HostPushNotificationError, HostPushNotificationRequest,
-    HostPushNotificationResponse,
-};
-use truapi::versioned::payment::{
-    HostPaymentBalanceSubscribeError, HostPaymentBalanceSubscribeItem,
-    HostPaymentBalanceSubscribeRequest, HostPaymentError, HostPaymentRequest, HostPaymentResponse,
-    HostPaymentStatusSubscribeError, HostPaymentStatusSubscribeItem,
-    HostPaymentStatusSubscribeRequest, HostPaymentTopUpError, HostPaymentTopUpRequest,
-    HostPaymentTopUpResponse,
-};
-use truapi::versioned::permissions::{
-    HostDevicePermissionError, HostDevicePermissionRequest, HostDevicePermissionResponse,
-    RemotePermissionError, RemotePermissionRequest, RemotePermissionResponse,
-};
-use truapi::versioned::preimage::{
-    RemotePreimageLookupSubscribeItem, RemotePreimageLookupSubscribeRequest,
-    RemotePreimageSubmitError, RemotePreimageSubmitRequest, RemotePreimageSubmitResponse,
-};
-use truapi::versioned::resource_allocation::{
-    HostRequestResourceAllocationError, HostRequestResourceAllocationRequest,
-    HostRequestResourceAllocationResponse,
-};
-use truapi::versioned::signing::{
-    HostCreateTransactionError, HostCreateTransactionRequest, HostCreateTransactionResponse,
-    HostCreateTransactionWithLegacyAccountError, HostCreateTransactionWithLegacyAccountRequest,
-    HostCreateTransactionWithLegacyAccountResponse, HostSignPayloadError, HostSignPayloadRequest,
-    HostSignPayloadResponse, HostSignPayloadWithLegacyAccountError,
-    HostSignPayloadWithLegacyAccountRequest, HostSignPayloadWithLegacyAccountResponse,
-    HostSignRawError, HostSignRawRequest, HostSignRawResponse, HostSignRawWithLegacyAccountError,
-    HostSignRawWithLegacyAccountRequest, HostSignRawWithLegacyAccountResponse,
-};
-use truapi::versioned::system::{
-    HostFeatureSupportedError, HostFeatureSupportedRequest, HostFeatureSupportedResponse,
-    HostGetProductContextError, HostGetProductContextRequest, HostGetProductContextResponse,
-    HostInfoError, HostInfoRequest, HostInfoResponse, HostNavigateToError, HostNavigateToRequest,
-    HostNavigateToResponse,
-};
-use truapi::versioned::theme::HostThemeSubscribeItem;
-use truapi::{CallContext, CallError, CancellationReason, Subscription};
-use truapi::{latest, v01};
-use truapi_platform::Platform;
+use truapi::versioned::preimage::RemotePreimageSubmitError;
+use truapi::{CallContext, CallError, CancellationReason, Subscription, v01};
 use truapi_platform::{
-    AccountAccessReview, ChatFieldError, CreateTransactionReview, IdentityDisclosureReview,
-    PermissionAuthorizationRequest, PermissionAuthorizationStatus, PreimageSubmitReview,
-    ProductContext, ProductStorageKey, ProductSubtreeReview, ResourceAllocationReview,
-    SessionUiInfo, SignPayloadReview, SignRawReview, UserConfirmationReview,
-    normalize_chat_identifier, normalize_product_identifier, validate_chat_icon,
-    validate_chat_message_content, validate_chat_name,
+    AccountAccessReview, ChatFieldError, IdentityDisclosureReview, PermissionAuthorizationRequest,
+    PermissionAuthorizationStatus, Platform, ProductContext, ProductStorageKey, SessionUiInfo,
+    UserConfirmationReview, normalize_chat_identifier, normalize_product_identifier,
+    validate_chat_icon, validate_chat_message_content, validate_chat_name,
 };
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
+use crate::chain_runtime::RuntimeFailure;
+use crate::host_logic::bulletin::preimage_key;
+use crate::host_logic::permissions::PermissionsService;
+use crate::host_logic::product_account::{
+    derivation_index_bytes, derive_product_public_key, public_key_from_address,
+};
+use crate::host_logic::session::SessionInfo;
+#[cfg(test)]
+use crate::host_logic::session::SessionState;
+use crate::host_logic::sso::messages::RingVrfError;
+use crate::host_logic::sso::pairing::x25519_public_key;
+#[cfg(test)]
+use crate::subscription::Spawner;
 
 /// Error reason surfaced to products when a remote permission is not granted.
 pub(super) const REMOTE_PERMISSION_DENIED_REASON: &str = "Permission denied";

@@ -3,7 +3,38 @@
 //! Account management uses shared session state and the account authority
 //! for alias, proof, and login operations.
 
-use super::super::*;
+use tracing::instrument;
+use truapi::api::Account;
+use truapi::versioned::account::{
+    HostAccountConnectionStatusSubscribeItem, HostAccountCreateProofError,
+    HostAccountCreateProofRequest, HostAccountCreateProofResponse, HostAccountGetAliasError,
+    HostAccountGetAliasRequest, HostAccountGetAliasResponse, HostAccountGetError,
+    HostAccountGetRequest, HostAccountGetResponse, HostAccountListRingVrfKeysError,
+    HostAccountListRingVrfKeysRequest, HostAccountListRingVrfKeysResponse,
+    HostAccountRegisterRingVrfKeyError, HostAccountRegisterRingVrfKeyRequest,
+    HostAccountRegisterRingVrfKeyResponse, HostAccountRingVrfSignError,
+    HostAccountRingVrfSignRequest, HostAccountRingVrfSignResponse, HostAccountSignVrfError,
+    HostAccountSignVrfRequest, HostAccountSignVrfResponse, HostGetLegacyAccountsError,
+    HostGetLegacyAccountsRequest, HostGetLegacyAccountsResponse, HostGetUserIdError,
+    HostGetUserIdRequest, HostGetUserIdResponse, HostRequestLoginError, HostRequestLoginRequest,
+    HostRequestLoginResponse,
+};
+use truapi::{CallContext, CallError, Subscription, latest, v01};
+use truapi_platform::{
+    PermissionAuthorizationStatus, ProductSubtreeReview, UserConfirmationReview,
+    normalize_product_identifier,
+};
+
+use crate::runtime::authority::{
+    AccountAliasAuthorityRequest, CreateProofAuthorityRequest, ListRingVrfKeysAuthorityRequest,
+    RegisterRingVrfKeyAuthorityRequest, RingVrfSignAuthorityRequest,
+};
+use crate::runtime::{
+    ProductRuntimeHost, account_access_authorization, account_get_authority_error,
+    remote_authority_call, remote_authority_context, ring_vrf_alias_error, ring_vrf_list_error,
+    ring_vrf_proof_error, ring_vrf_register_error, ring_vrf_sign_error, validate_vrf_transcript,
+    vrf_call_error,
+};
 
 #[truapi::async_trait]
 impl Account for ProductRuntimeHost {

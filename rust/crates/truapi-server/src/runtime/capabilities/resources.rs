@@ -1,6 +1,21 @@
 //! Product-facing resources capability adapters.
 
-use super::super::*;
+use tracing::instrument;
+use truapi::api::{Entropy, ResourceAllocation};
+use truapi::versioned::entropy::{
+    HostDeriveEntropyError, HostDeriveEntropyRequest, HostDeriveEntropyResponse,
+};
+use truapi::versioned::resource_allocation::{
+    HostRequestResourceAllocationError, HostRequestResourceAllocationRequest,
+    HostRequestResourceAllocationResponse,
+};
+use truapi::{CallContext, CallError, v01};
+use truapi_platform::{ResourceAllocationReview, UserConfirmationReview};
+
+use crate::runtime::{
+    ProductRuntimeHost, RESOURCE_ALLOCATION_REMOTE_AUTHORITY_RESPONSE_TIMEOUT,
+    remote_authority_call, remote_authority_context_with_default,
+};
 
 #[truapi::async_trait]
 impl ResourceAllocation for ProductRuntimeHost {

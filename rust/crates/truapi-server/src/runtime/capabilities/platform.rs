@@ -1,6 +1,36 @@
 //! Product-facing platform capability adapters.
 
-use super::super::*;
+use futures::StreamExt;
+use tracing::{instrument, warn};
+use truapi::api::{LocalStorage, Locale, Notifications, Permissions, System, Theme};
+use truapi::versioned::local_storage::{
+    HostLocalStorageClearError, HostLocalStorageClearRequest, HostLocalStorageClearResponse,
+    HostLocalStorageReadError, HostLocalStorageReadRequest, HostLocalStorageReadResponse,
+    HostLocalStorageWriteError, HostLocalStorageWriteRequest, HostLocalStorageWriteResponse,
+};
+use truapi::versioned::locale::HostLocaleSubscribeItem;
+use truapi::versioned::notifications::{
+    HostPushNotificationCancelError, HostPushNotificationCancelRequest,
+    HostPushNotificationCancelResponse, HostPushNotificationError, HostPushNotificationRequest,
+    HostPushNotificationResponse,
+};
+use truapi::versioned::permissions::{
+    HostDevicePermissionError, HostDevicePermissionRequest, HostDevicePermissionResponse,
+    RemotePermissionError, RemotePermissionRequest, RemotePermissionResponse,
+};
+use truapi::versioned::system::{
+    HostFeatureSupportedError, HostFeatureSupportedRequest, HostFeatureSupportedResponse,
+    HostGetProductContextError, HostGetProductContextRequest, HostGetProductContextResponse,
+    HostInfoError, HostInfoRequest, HostInfoResponse, HostNavigateToError, HostNavigateToRequest,
+    HostNavigateToResponse,
+};
+use truapi::versioned::theme::HostThemeSubscribeItem;
+use truapi::{CallContext, CallError, Subscription, v01};
+use truapi_platform::PermissionAuthorizationStatus;
+
+use crate::host_logic::dotns::{NavigateDecision, external_host, parse_navigate};
+use crate::host_logic::features::feature_supported;
+use crate::runtime::ProductRuntimeHost;
 
 #[truapi::async_trait]
 impl System for ProductRuntimeHost {

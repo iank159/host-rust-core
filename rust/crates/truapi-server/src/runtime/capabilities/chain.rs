@@ -4,7 +4,34 @@
 //! the platform provider, mapping JSON-RPC replies and follow notifications
 //! into typed TrUAPI results.
 
-use super::super::*;
+use futures::StreamExt;
+use tracing::instrument;
+use truapi::api::Chain;
+use truapi::versioned::chain::{
+    RemoteChainHeadBodyError, RemoteChainHeadBodyRequest, RemoteChainHeadBodyResponse,
+    RemoteChainHeadCallError, RemoteChainHeadCallRequest, RemoteChainHeadCallResponse,
+    RemoteChainHeadContinueError, RemoteChainHeadContinueRequest, RemoteChainHeadContinueResponse,
+    RemoteChainHeadFollowItem, RemoteChainHeadFollowRequest, RemoteChainHeadHeaderError,
+    RemoteChainHeadHeaderRequest, RemoteChainHeadHeaderResponse, RemoteChainHeadStopOperationError,
+    RemoteChainHeadStopOperationRequest, RemoteChainHeadStopOperationResponse,
+    RemoteChainHeadStorageError, RemoteChainHeadStorageRequest, RemoteChainHeadStorageResponse,
+    RemoteChainHeadUnpinError, RemoteChainHeadUnpinRequest, RemoteChainHeadUnpinResponse,
+    RemoteChainInfoError, RemoteChainInfoRequest, RemoteChainInfoResponse,
+    RemoteChainSpecChainNameError, RemoteChainSpecChainNameRequest,
+    RemoteChainSpecChainNameResponse, RemoteChainSpecGenesisHashError,
+    RemoteChainSpecGenesisHashRequest, RemoteChainSpecGenesisHashResponse,
+    RemoteChainSpecPropertiesError, RemoteChainSpecPropertiesRequest,
+    RemoteChainSpecPropertiesResponse, RemoteChainTransactionBroadcastError,
+    RemoteChainTransactionBroadcastRequest, RemoteChainTransactionBroadcastResponse,
+    RemoteChainTransactionStopError, RemoteChainTransactionStopRequest,
+    RemoteChainTransactionStopResponse,
+};
+use truapi::{CallContext, CallError, Subscription, v01};
+
+use crate::host_logic::features::{chain_info, supported_chains};
+use crate::runtime::{
+    ProductRuntimeHost, REMOTE_PERMISSION_DENIED_REASON, runtime_failure_to_call_error,
+};
 
 #[truapi::async_trait]
 impl Chain for ProductRuntimeHost {

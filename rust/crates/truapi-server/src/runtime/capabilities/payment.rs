@@ -2,7 +2,32 @@
 //!
 //! Payment returns typed domain errors; CoinPayment returns Unsupported.
 
-use super::super::*;
+use tracing::instrument;
+use truapi::api::{CoinPayment, Payment};
+use truapi::versioned::coin_payment::{
+    HostCoinPaymentCreateChequeError, HostCoinPaymentCreateChequeRequest,
+    HostCoinPaymentCreateChequeResponse, HostCoinPaymentCreatePurseError,
+    HostCoinPaymentCreatePurseRequest, HostCoinPaymentCreatePurseResponse,
+    HostCoinPaymentCreateReceivableError, HostCoinPaymentCreateReceivableRequest,
+    HostCoinPaymentCreateReceivableResponse, HostCoinPaymentDeletePurseError,
+    HostCoinPaymentDeletePurseItem, HostCoinPaymentDeletePurseRequest, HostCoinPaymentDepositError,
+    HostCoinPaymentDepositItem, HostCoinPaymentDepositRequest, HostCoinPaymentListenForError,
+    HostCoinPaymentListenForItem, HostCoinPaymentListenForRequest, HostCoinPaymentQueryPurseError,
+    HostCoinPaymentQueryPurseRequest, HostCoinPaymentQueryPurseResponse,
+    HostCoinPaymentRebalancePurseError, HostCoinPaymentRebalancePurseItem,
+    HostCoinPaymentRebalancePurseRequest, HostCoinPaymentRefundError, HostCoinPaymentRefundItem,
+    HostCoinPaymentRefundRequest,
+};
+use truapi::versioned::payment::{
+    HostPaymentBalanceSubscribeError, HostPaymentBalanceSubscribeItem,
+    HostPaymentBalanceSubscribeRequest, HostPaymentError, HostPaymentRequest, HostPaymentResponse,
+    HostPaymentStatusSubscribeError, HostPaymentStatusSubscribeItem,
+    HostPaymentStatusSubscribeRequest, HostPaymentTopUpError, HostPaymentTopUpRequest,
+    HostPaymentTopUpResponse,
+};
+use truapi::{CallContext, CallError, Subscription, v01};
+
+use crate::runtime::{PAYMENTS_NOT_IMPLEMENTED, ProductRuntimeHost};
 
 #[truapi::async_trait]
 impl CoinPayment for ProductRuntimeHost {

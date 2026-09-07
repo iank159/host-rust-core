@@ -1,13 +1,64 @@
 //! Shared runtime fixtures and cross-capability integration tests.
 
+use std::sync::Mutex;
+use std::sync::atomic::Ordering;
+
+use parity_scale_codec::Encode;
+use truapi::api::{
+    Account, Chain, Entropy, Notifications, Permissions, Preimage, ResourceAllocation, Signing,
+    System, Theme,
+};
+use truapi::versioned::account::{
+    HostAccountConnectionStatusSubscribeItem, HostAccountCreateProofError,
+    HostAccountCreateProofResponse, HostAccountGetAliasError, HostAccountGetAliasResponse,
+    HostAccountGetRequest, HostAccountGetResponse, HostAccountRingVrfSignError,
+    HostAccountRingVrfSignRequest, HostAccountRingVrfSignResponse, HostAccountSignVrfRequest,
+    HostAccountSignVrfResponse, HostGetLegacyAccountsRequest, HostGetLegacyAccountsResponse,
+    HostGetUserIdError, HostGetUserIdRequest, HostGetUserIdResponse,
+};
+use truapi::versioned::chain::{
+    RemoteChainInfoError, RemoteChainInfoRequest, RemoteChainInfoResponse,
+    RemoteChainTransactionBroadcastError, RemoteChainTransactionBroadcastRequest,
+};
+use truapi::versioned::entropy::{
+    HostDeriveEntropyError, HostDeriveEntropyRequest, HostDeriveEntropyResponse,
+};
+use truapi::versioned::notifications::{
+    HostPushNotificationCancelRequest, HostPushNotificationCancelResponse,
+    HostPushNotificationRequest, HostPushNotificationResponse,
+};
+use truapi::versioned::permissions::{HostDevicePermissionRequest, HostDevicePermissionResponse};
+use truapi::versioned::preimage::{
+    RemotePreimageLookupSubscribeItem, RemotePreimageLookupSubscribeRequest,
+    RemotePreimageSubmitRequest,
+};
+use truapi::versioned::resource_allocation::{
+    HostRequestResourceAllocationError, HostRequestResourceAllocationRequest,
+    HostRequestResourceAllocationResponse,
+};
+use truapi::versioned::signing::{
+    HostCreateTransactionError, HostCreateTransactionRequest, HostCreateTransactionResponse,
+    HostCreateTransactionWithLegacyAccountError, HostCreateTransactionWithLegacyAccountRequest,
+    HostCreateTransactionWithLegacyAccountResponse, HostSignPayloadError, HostSignPayloadRequest,
+    HostSignPayloadResponse, HostSignPayloadWithLegacyAccountError,
+    HostSignPayloadWithLegacyAccountRequest, HostSignRawError, HostSignRawRequest,
+    HostSignRawResponse, HostSignRawWithLegacyAccountError, HostSignRawWithLegacyAccountRequest,
+    HostSignRawWithLegacyAccountResponse,
+};
+use truapi::versioned::system::{
+    HostFeatureSupportedRequest, HostFeatureSupportedResponse, HostGetProductContextRequest,
+    HostGetProductContextResponse, HostNavigateToError, HostNavigateToRequest,
+    HostNavigateToResponse,
+};
+use truapi::versioned::theme::HostThemeSubscribeItem;
+use truapi_platform::{AuthState, CoreStorageKey, PermissionAuthorizationRequest};
+
 use super::*;
+use crate::host_logic::product_account::index_bytes;
 use crate::host_logic::sso::messages::{
     RemoteMessage, RemoteMessageData, RingVrfAliasResponse, RingVrfProofResponse, v1,
 };
 use crate::test_support::*;
-use std::sync::Mutex;
-use std::sync::atomic::Ordering;
-use truapi_platform::{AuthState, CoreStorageKey, PermissionAuthorizationRequest};
 
 fn test_product_subtree(product_id: &str) -> [u8; 32] {
     let root = crate::host_logic::product_account::derive_root_keypair_from_entropy(&[0xAB; 16])
@@ -1629,8 +1680,9 @@ fn chain_broadcast_requires_remote_permission_before_backend_call() {
 
 #[test]
 fn preimage_lookup_cache_hit_emits_once_and_stays_open() {
-    use crate::host_logic::bulletin::preimage_key;
     use futures::FutureExt;
+
+    use crate::host_logic::bulletin::preimage_key;
 
     let host = ProductRuntimeHost::new_compat(stub_platform(), test_spawner());
     let value = vec![4, 5, 6, 7];

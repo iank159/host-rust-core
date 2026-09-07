@@ -1,6 +1,27 @@
 //! Product-facing preimage capability adapters.
 
-use super::super::*;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+use futures::StreamExt;
+use tracing::{instrument, warn};
+use truapi::api::Preimage;
+use truapi::versioned::preimage::{
+    RemotePreimageLookupSubscribeItem, RemotePreimageLookupSubscribeRequest,
+    RemotePreimageSubmitError, RemotePreimageSubmitRequest, RemotePreimageSubmitResponse,
+};
+use truapi::{CallContext, CallError, Subscription, v01};
+use truapi_platform::{PreimageSubmitReview, UserConfirmationReview};
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+
+use crate::host_logic::bulletin::preimage_key;
+use crate::runtime::bulletin_rpc::BulletinSubmitError;
+use crate::runtime::{
+    PREIMAGE_REMOTE_AUTHORITY_RESPONSE_TIMEOUT, PREIMAGE_SUBMIT_TIMEOUT, ProductRuntimeHost,
+    REMOTE_PERMISSION_DENIED_REASON, bulletin_allowance_error_reason, preimage_submit_error,
+    remote_authority_call, remote_authority_context_until,
+};
 
 #[truapi::async_trait]
 impl Preimage for ProductRuntimeHost {
