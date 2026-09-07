@@ -207,6 +207,8 @@ pub(crate) fn snake_case(name: &str) -> String {
     out
 }
 
+/// Collect local types reachable from callback payloads, including transitive
+/// field references, for the Rust WASM and TypeScript host bridges.
 pub(crate) fn collect_local_bridge_payload_types(
     definition: &PlatformDefinition,
 ) -> BTreeSet<&str> {

@@ -1,4 +1,7 @@
 //! Product-facing account capability adapters.
+//!
+//! Account management uses shared session state and the account authority
+//! for alias, proof, and login operations.
 
 use super::super::*;
 

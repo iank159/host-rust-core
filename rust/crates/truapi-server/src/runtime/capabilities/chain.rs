@@ -1,4 +1,8 @@
 //! Product-facing chain capability adapters.
+//!
+//! `ChainRuntime` keeps one `chainHead_v1` connection per genesis hash over
+//! the platform provider, mapping JSON-RPC replies and follow notifications
+//! into typed TrUAPI results.
 
 use super::super::*;
 

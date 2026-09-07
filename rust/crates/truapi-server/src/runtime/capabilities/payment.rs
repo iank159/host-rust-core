@@ -1,4 +1,6 @@
 //! Product-facing payment capability adapters.
+//!
+//! Payment returns typed domain errors; CoinPayment returns Unsupported.
 
 use super::super::*;
 

@@ -825,10 +825,6 @@ fn runtime_failure_to_call_error<E>(failure: RuntimeFailure) -> CallError<E> {
     }
 }
 
-//
-// Account-management flows live in the Rust core itself, backed by the shared
-// session state and, for alias/proof/login success paths, the SSO service.
-
 /// Host-UI projection of an active session for `AuthState::Connected`.
 fn connected_session_ui_info(session: &SessionInfo) -> SessionUiInfo {
     SessionUiInfo {
@@ -1002,23 +998,6 @@ fn transaction_call_error<E>(
         }
     }))
 }
-
-//
-// The chain surface is backed by `ChainRuntime`, which keeps one
-// `chainHead_v1` connection per genesis hash on top of the platform-supplied
-// `ChainProvider::connect`. Requests go through `request_value` and parse
-// json-rpc responses into typed v01 results; follow notifications are
-// translated into `RemoteChainHeadFollowItem` items on the subscription
-// stream.
-
-// ---------------------------------------------------------------------------
-// Deferred product surfaces.
-//
-// Payment and full account proof are explicitly out of current host parity,
-// but products should still observe the host's typed "not implemented" errors
-// rather than a generic transport failure.
-// CoinPayment remains outside this milestone and keeps its generated trait
-// defaults until another host/product needs a real implementation.
 
 const PAYMENTS_NOT_IMPLEMENTED: &str = "Payments are not supported in dot.li";
 
@@ -1232,9 +1211,6 @@ fn bulletin_allowance_error_reason(err: AuthorityError) -> String {
         other => other.to_string(),
     }
 }
-
-// `Notifications` delegates to the platform so hosts can own scheduling and
-// cancellation while the core preserves the typed TrUAPI wire shape.
 
 #[cfg(test)]
 mod tests;

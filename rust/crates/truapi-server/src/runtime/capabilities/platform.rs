@@ -220,6 +220,9 @@ impl Locale for ProductRuntimeHost {
     }
 }
 
+// `Notifications` delegates to the platform so hosts can own scheduling and
+// cancellation while the core preserves the typed TrUAPI wire shape.
+
 #[truapi::async_trait]
 impl Notifications for ProductRuntimeHost {
     #[instrument(skip_all, fields(runtime.method = "notifications.send_push_notification"))]

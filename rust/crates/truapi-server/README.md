@@ -88,6 +88,10 @@ the wallet-authority tail (`sign_*`, `create_transaction`, `account_alias`,
 `Arc<dyn ProductAuthority>` handle with an `AuthoritySession` snapshot the
 role revalidates before touching key material.
 
+`runtime.rs` owns the product runtime and shared helpers. The trait adapters
+are grouped by surface under `runtime/capabilities/`; cross-capability fixtures
+and tests live in `runtime/tests.rs` and `runtime/tests/`.
+
 ### Permission flow
 
 Permission grants are scoped by product id and typed request, so a grant for
