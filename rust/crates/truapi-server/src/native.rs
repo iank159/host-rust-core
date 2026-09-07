@@ -31,7 +31,7 @@ use truapi_platform::{
 
 use crate::SigningHostRuntime;
 use crate::host_logic::dotns;
-pub use crate::host_logic::dotns::NavigateDecision;
+pub use crate::host_logic::dotns::{NavigateDecision, PocketDeeplinkAction};
 use crate::host_logic::sso::messages::{
     RemoteMessage, RemoteMessageData, SsoRequestOutcome as CoreSsoRequestOutcome,
     decode_remote_message, v1,

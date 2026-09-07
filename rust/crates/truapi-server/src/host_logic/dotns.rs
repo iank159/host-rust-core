@@ -8,6 +8,16 @@ use truapi_platform::{has_dotns_tld, normalize_remote_domain};
 use unicode_normalization::UnicodeNormalization;
 use url::Url;
 
+/// What a `/-/pocket/...` deeplink asks the host to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_arch = "wasm32"), derive(uniffi::Enum))]
+pub enum PocketDeeplinkAction {
+    /// Offer to add a published card, behind the host's approval dialog.
+    Add,
+    /// Expand a card that is already present.
+    Open,
+}
+
 /// How the input URL should be opened. Kept in one enum rather than passing
 /// a raw string so the dispatcher can reject invalid input before reaching
 /// any platform callback. The open variants carry the ready-to-load canonical
@@ -33,6 +43,20 @@ pub enum NavigateDecision {
         /// Path/query/hash suffix without a leading `/`.
         path: String,
         /// Loadable `http://` URL for this decision.
+        canonical_url: String,
+    },
+    /// A dotNS product's host-handled Pocket target. The first path segment
+    /// `-` is reserved for these, so no App route can shadow one.
+    Pocket {
+        /// Lower-cased dotNS host of the product that backs the card.
+        identifier: String,
+        /// Requested Pocket action.
+        action: PocketDeeplinkAction,
+        /// Card named by the `card` query parameter.
+        card_id: String,
+        /// Normalized `polkadot://` form of the deeplink, which is what
+        /// `navigate_to` hands the host. A host with no Pocket surface opens
+        /// `https://<identifier>` instead.
         canonical_url: String,
     },
     /// An absolute external URL with an `http(s):` scheme prepended if missing.
@@ -132,12 +156,48 @@ fn classify_dotns(input: &str) -> Option<NavigateDecision> {
     }
 
     let identifier = normalize_host(hostname);
+    if let Some(decision) = classify_host_target(&parsed, &identifier) {
+        return Some(decision);
+    }
+
     let path = strip_leading_slash(parsed.path()) + &suffix(&parsed);
     let canonical_url = join_url("https://", &identifier, &path);
     Some(NavigateDecision::DotName {
         identifier,
         path,
         canonical_url,
+    })
+}
+
+/// Recognize the reserved `/-/` namespace, which names a host modality rather
+/// than an App route. `None` means an ordinary App path.
+fn classify_host_target(url: &Url, identifier: &str) -> Option<NavigateDecision> {
+    let mut segments = url.path_segments()?;
+    if segments.next() != Some("-") {
+        return None;
+    }
+    let reject = |reason: String| Some(NavigateDecision::Reject { reason });
+    let target: Vec<&str> = segments.filter(|segment| !segment.is_empty()).collect();
+    let (action, verb) = match target.as_slice() {
+        ["pocket", "add"] => (PocketDeeplinkAction::Add, "add"),
+        ["pocket", "open"] => (PocketDeeplinkAction::Open, "open"),
+        _ => {
+            return reject(format!("`{}` is not a host-handled target", url.path()));
+        }
+    };
+    let card_id = url
+        .query_pairs()
+        .find(|(key, _)| key == "card")
+        .map(|(_, value)| value.into_owned())
+        .filter(|card_id| !card_id.is_empty());
+    let Some(card_id) = card_id else {
+        return reject("pocket deeplink names no card".to_string());
+    };
+    Some(NavigateDecision::Pocket {
+        identifier: identifier.to_string(),
+        action,
+        canonical_url: format!("polkadot://{identifier}/-/pocket/{verb}?card={card_id}"),
+        card_id,
     })
 }
 
@@ -250,6 +310,19 @@ mod tests {
         })
     }
 
+    fn pocket(identifier: &str, action: PocketDeeplinkAction, card_id: &str) -> Expected {
+        let verb = match action {
+            PocketDeeplinkAction::Add => "add",
+            PocketDeeplinkAction::Open => "open",
+        };
+        Expected::Decision(NavigateDecision::Pocket {
+            identifier: identifier.to_string(),
+            action,
+            card_id: card_id.to_string(),
+            canonical_url: format!("polkadot://{identifier}/-/pocket/{verb}?card={card_id}"),
+        })
+    }
+
     fn localhost(host: &str, path: &str) -> Expected {
         Expected::Decision(NavigateDecision::Localhost {
             host: host.to_string(),
@@ -321,6 +394,36 @@ mod tests {
                 name: "polkadot scheme dot host",
                 input: "polkadot://currenthost.dot/mytestapp.dot",
                 expected: dot("currenthost.dot", "mytestapp.dot"),
+            },
+            TestCase {
+                name: "pocket add deeplink",
+                input: "polkadot://game.dot/-/pocket/add?card=loyalty",
+                expected: pocket("game.dot", PocketDeeplinkAction::Add, "loyalty"),
+            },
+            TestCase {
+                name: "pocket open deeplink over the https spelling",
+                input: "https://Game.DOT/-/pocket/open?card=loyalty",
+                expected: pocket("game.dot", PocketDeeplinkAction::Open, "loyalty"),
+            },
+            TestCase {
+                name: "pocket deeplink without a card is rejected",
+                input: "polkadot://game.dot/-/pocket/add",
+                expected: Expected::Reject,
+            },
+            TestCase {
+                name: "unknown host handled target is rejected",
+                input: "polkadot://game.dot/-/wallet/open",
+                expected: Expected::Reject,
+            },
+            TestCase {
+                name: "bare reserved segment is rejected",
+                input: "polkadot://game.dot/-",
+                expected: Expected::Reject,
+            },
+            TestCase {
+                name: "a dash inside an ordinary path is an app route",
+                input: "polkadot://game.dot/shop/-/pocket",
+                expected: dot("game.dot", "shop/-/pocket"),
             },
             TestCase {
                 name: "polkadot scheme non dot host falls through",
