@@ -74,13 +74,36 @@ pub enum ProtocolErrorV1 {
 /// Decode a [`PROTOCOL_ERROR_KEY`] frame's payload. Like every other payload
 /// it carries no version tag: the frame's `version` byte states it, and
 /// [`PROTOCOL_ERROR_VERSION`] is the only one this shape has.
-pub(crate) fn decode_protocol_error_payload(payload: &[u8]) -> Result<ProtocolErrorV1, CodecError> {
-    let mut input = payload;
-    let error = ProtocolErrorV1::decode(&mut input)?;
-    if !input.is_empty() {
-        return Err("protocol error payload has trailing bytes".into());
+///
+/// `Ok(None)` is a protocol error this build does not know: a variant index it
+/// has never heard of, from a peer built against a later protocol. That must
+/// not fail the frame. This is the one address every peer answers on, so a
+/// peer that rejects an unrecognised payload here cannot be told anything new
+/// without breaking the connection, and the channel would be frozen at
+/// whatever shape shipped first. A caller that gets `None` should settle the
+/// correlated call as an unspecified protocol failure and carry on.
+///
+/// A payload whose variant *is* known stays strict: a truncated or
+/// over-long [`ProtocolErrorV1::UnsupportedMessage`] is corruption, not a
+/// newer peer, and still fails.
+pub(crate) fn decode_protocol_error_payload(
+    payload: &[u8],
+) -> Result<Option<ProtocolErrorV1>, CodecError> {
+    match payload.first() {
+        None => Err("protocol error payload is empty".into()),
+        // Every variant this build knows. Decode strictly.
+        Some(&0) => {
+            let mut input = payload;
+            let error = ProtocolErrorV1::decode(&mut input)?;
+            if !input.is_empty() {
+                return Err("protocol error payload has trailing bytes".into());
+            }
+            Ok(Some(error))
+        }
+        // A variant from a later protocol. Its length is unknowable here, so
+        // the remaining bytes are skipped rather than validated.
+        Some(_) => Ok(None),
     }
-    Ok(error)
 }
 
 /// Downgrade a call error's domain payload to the version its caller speaks.
@@ -536,6 +559,36 @@ mod tests {
         assert!(ProtocolMessage::decode(&mut &bytes[..]).is_err());
     }
 
+    /// The reserved `(255, 255)` address is the one channel every peer must
+    /// answer on, so a build that rejected an unfamiliar payload here could
+    /// never be told anything new without the connection dying. An unknown
+    /// variant index therefore decodes to `None` and leaves the frame intact,
+    /// which is what lets a later protocol add a richer protocol error without
+    /// a wire break.
+    #[test]
+    fn an_unknown_protocol_error_variant_is_tolerated() {
+        // A variant index this build has never heard of, with a payload whose
+        // length it cannot know either.
+        for payload in [vec![7], vec![7, 1, 2, 3], vec![200, 0xff]] {
+            assert_eq!(
+                decode_protocol_error_payload(&payload).expect("tolerated"),
+                None,
+                "unknown variant must not fail the payload decode"
+            );
+
+            let mut bytes = Vec::new();
+            "p:1".to_string().encode_to(&mut bytes);
+            bytes.push(PROTOCOL_ERROR_TRAIT_ID);
+            bytes.push(PROTOCOL_ERROR_METHOD_ID);
+            bytes.push(PROTOCOL_ERROR_VERSION);
+            bytes.push(MESSAGE_TYPE_RESPONSE);
+            bytes.extend_from_slice(&payload);
+            let decoded = ProtocolMessage::decode(&mut &bytes[..])
+                .expect("an unknown protocol error must still decode as a frame");
+            assert_eq!(decoded.payload.value, payload);
+        }
+    }
+
     #[test]
     fn protocol_error_payload_has_stable_versioned_shape() {
         let error = ProtocolErrorV1::UnsupportedMessage {
@@ -548,7 +601,7 @@ mod tests {
         // payload this one carries no version tag - the frame's `version` byte
         // states `PROTOCOL_ERROR_VERSION`. Trait and method differ here on
         // purpose, so transposing the two fields cannot pass.
-        assert_eq!((encoded, decoded), (vec![0, 250, 251], error));
+        assert_eq!((encoded, decoded), (vec![0, 250, 251], Some(error)));
     }
 
     #[test]
@@ -557,11 +610,16 @@ mod tests {
         // bytes, then dropping the version tag made it 3, so `[0, 250, 0]` -
         // the old trailing-byte case - now decodes cleanly as the pair
         // (250, 0) and would silently stop testing anything.
+        //
+        // An unknown variant index is deliberately absent from this list: it
+        // is a newer peer, not corruption, and is tolerated so the
+        // protocol-error channel stays extensible. See
+        // `an_unknown_protocol_error_variant_is_tolerated`.
         for payload in [
-            vec![0],              // no address at all
-            vec![0, 250],         // trait present, method truncated
-            vec![0, 250, 251, 0], // one trailing byte past a full pair
-            vec![1, 250, 251],    // unknown ProtocolErrorV1 variant index
+            vec![],               // no payload at all
+            vec![0],              // known variant, no address
+            vec![0, 250],         // known variant, trait present, method truncated
+            vec![0, 250, 251, 0], // known variant, one trailing byte
         ] {
             let message = ProtocolMessage {
                 request_id: "p:1".into(),

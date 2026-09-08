@@ -464,10 +464,10 @@ impl HostInitiatedSubscriptionManager {
         // guarding on the trait first would make the arm below dead code and
         // silently drop the frame that reports our start as unsupported.
         if key == PROTOCOL_ERROR_KEY {
-            let Ok(ProtocolErrorV1::UnsupportedMessage {
+            let Ok(Some(ProtocolErrorV1::UnsupportedMessage {
                 trait_id,
                 method_id,
-            }) = decode_protocol_error_payload(&message.payload.value)
+            })) = decode_protocol_error_payload(&message.payload.value)
             else {
                 return None;
             };

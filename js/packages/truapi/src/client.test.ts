@@ -523,13 +523,18 @@ describe("generated client transport", () => {
         // then dropping the version tag made it 3, so the old trailing-byte
         // fixture `[0, 194, 0]` decodes cleanly as the pair (194, 0) and would
         // have silently stopped testing anything.
+        //
+        // An unknown variant index is deliberately absent: that is a newer
+        // peer, not corruption, and it must NOT close the transport. See
+        // "settles one call without closing the transport on an unrecognised
+        // protocol error".
         const malformedPayloads = [
+            [new Uint8Array([]), "empty"],
             [new Uint8Array([0]), "expected 3 bytes, received 1"],
             // trait present, method truncated
             [new Uint8Array([0, 194]), "expected 3 bytes, received 2"],
             // one trailing byte past a full pair
             [new Uint8Array([0, 194, 193, 0]), "expected 3 bytes, received 4"],
-            [new Uint8Array([1, 194, 193]), "unknown error discriminant 1"],
         ] as const;
 
         for (const [payload, message] of malformedPayloads) {
@@ -547,6 +552,52 @@ describe("generated client transport", () => {
             await expect(outcome).rejects.toThrow(`Malformed protocol error payload: ${message}`);
             expect(fixture.sent).toHaveLength(1);
         }
+    });
+
+    it("settles one call without closing the transport on an unrecognised protocol error", async () => {
+        // `(255, 255)` is the one address every peer answers on, so rejecting a
+        // payload this build cannot read would mean a newer peer could never
+        // report anything new without killing the connection, freezing the
+        // channel at whatever shape shipped first. An unknown variant settles
+        // the correlated call and leaves the transport usable.
+        const fixture = providerFixture();
+        const transport = createTransport(fixture.provider);
+
+        const first = transport.request<undefined, CallErrorValue<never>>({
+            ids: { trait: 200, method: 194, kind: "request" },
+            payload: new Uint8Array(),
+            version: 1,
+            decodeResponse: () => ({ success: true, value: undefined }),
+        });
+        // Variant 7 with a payload whose length this build cannot know.
+        fixture.receive(protocolError("p:1", new Uint8Array([7, 0xaa, 0xbb])));
+
+        expect((await first)._unsafeUnwrapErr()).toEqual({ tag: "Unsupported" });
+
+        // The transport is still alive: a second call goes out and completes.
+        const second = transport.request<undefined, CallErrorValue<never>>({
+            ids: W.LOCAL_STORAGE_READ,
+            payload: new Uint8Array(),
+            version: 1,
+            decodeResponse: () => ({ success: true, value: undefined }),
+        });
+        expect(fixture.sent).toHaveLength(2);
+        fixture.receive(
+            unwrap(
+                encodeWireMessage({
+                    requestId: "p:2",
+                    payload: {
+                        traitId: W.LOCAL_STORAGE_READ.trait,
+                        methodId: W.LOCAL_STORAGE_READ.method,
+                        version: 1,
+                        messageType: MESSAGE_TYPE_RESPONSE,
+                        value: new Uint8Array(),
+                    },
+                }),
+                "encode second response",
+            ),
+        );
+        expect((await second)._unsafeUnwrap()).toBeUndefined();
     });
 
     it("rejects an unknown host-initiated message without starting an error loop", () => {

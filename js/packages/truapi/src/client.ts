@@ -136,23 +136,35 @@ function pairKey(traitId: number, methodId: number): string {
 }
 
 /**
- * Decode `UnsupportedMessage { trait_id, method_id }`. Codec 2 addresses a
- * frame by a pair, so the payload is three bytes: the error variant index,
- * then the trait and method of the frame the peer could not handle. Its
- * version is the frame's own `version` byte, as for every other payload.
+ * Decode a protocol-error payload from the reserved `(255, 255)` address.
+ *
+ * `undefined` is a protocol error this build does not know: a variant index it
+ * has never heard of, from a peer built against a later protocol. Returning it
+ * rather than throwing is deliberate. This is the one address every peer
+ * answers on, and the caller answers a throw by closing the transport, so a
+ * build that rejected an unfamiliar payload here could never be told anything
+ * new without the whole connection dying. That would freeze this channel at
+ * whatever shape shipped first.
+ *
+ * A payload whose variant *is* known stays strict: codec 2 addresses a frame
+ * by a pair, so `UnsupportedMessage` is exactly three bytes (variant index,
+ * then the trait and method the peer could not handle), and a truncated or
+ * over-long one is corruption rather than a newer peer.
  */
-function decodeUnsupportedMessage(payload: Uint8Array): {
-  traitId: number;
-  methodId: number;
-} {
+function decodeUnsupportedMessage(
+  payload: Uint8Array,
+): { traitId: number; methodId: number } | undefined {
+  if (payload.length === 0) {
+    throw new Error("Malformed protocol error payload: empty");
+  }
+  if (payload[0] !== 0) {
+    // A variant from a later protocol. Its length is unknowable here, so the
+    // remaining bytes are not validated.
+    return undefined;
+  }
   if (payload.length !== 3) {
     throw new Error(
       `Malformed protocol error payload: expected 3 bytes, received ${payload.length}`,
-    );
-  }
-  if (payload[0] !== 0) {
-    throw new Error(
-      `Malformed protocol error payload: unknown error discriminant ${payload[0]}`,
     );
   }
   return { traitId: payload[1], methodId: payload[2] };
@@ -263,11 +275,35 @@ export function createTransport(
       payload.traitId === PROTOCOL_ERROR_TRAIT_ID &&
       payload.methodId === PROTOCOL_ERROR_METHOD_ID
     ) {
-      let unsupported: { traitId: number; methodId: number };
+      let unsupported: { traitId: number; methodId: number } | undefined;
       try {
         unsupported = decodeUnsupportedMessage(payload.value);
       } catch (error) {
         closeWithError(error);
+        return;
+      }
+
+      if (unsupported === undefined) {
+        // A protocol error from a later peer. `requestId` still correlates it,
+        // so settle that one call and leave the transport up: the pair cannot
+        // be checked because this build cannot read the payload that carries
+        // it.
+        reportProtocolViolation(
+          `unrecognised protocol error for request ${requestId}: discriminant ${payload.value[0]}`,
+        );
+        const orphan = pending.get(requestId);
+        if (orphan) {
+          pending.delete(requestId);
+          orphan.resolveUnsupported();
+          return;
+        }
+        const stream = subscriptions.get(requestId);
+        if (stream) {
+          subscriptions.delete(requestId);
+          stream.onClose?.(
+            new UnsupportedMessageError(stream.ids.trait, stream.ids.method),
+          );
+        }
         return;
       }
 
