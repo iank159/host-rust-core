@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::fmt;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -19,20 +18,18 @@ use crate::attestation;
 use crate::network::NetworkConfig;
 use truapi_server::statement_allowance as alloc;
 use truapi_server::statement_allowance::collection::PersonhoodCollection;
-use zeroize::Zeroize;
+use zeroize::ZeroizeOnDrop;
 
 const ACCOUNT_STORE_FILE: &str = "accounts.json";
 const ACCOUNT_STORE_LOCK_FILE: &str = "accounts.json.lock";
 const DEFAULT_USERNAME_PREFIX: &str = "headless";
 const IMPORTED_ACCOUNT_NAME: &str = "imported";
 
-/// Placeholder rendered by `Debug` in place of secret material.
-const REDACTED: &str = "<redacted>";
-
 /// Signer material selected for a signing-host session.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 pub struct ResolvedSigner {
     /// BIP-39 entropy backing the selected signer account.
+    #[debug("\"<redacted>\"")]
     pub entropy: Vec<u8>,
     /// Stored account name when this came from `accounts.json`.
     pub account_name: Option<String>,
@@ -44,12 +41,20 @@ pub struct ResolvedSigner {
 
 /// A mnemonic whose existing on-chain identity and personhood membership have
 /// been verified, but which has not yet been persisted into a session.
+#[derive(derive_more::Debug, ZeroizeOnDrop)]
 pub struct ImportedSigner {
+    #[debug("\"<redacted>\"")]
     mnemonic: String,
+    #[debug("\"<redacted>\"")]
     entropy: Vec<u8>,
+    #[zeroize(skip)]
     username: Option<String>,
+    #[zeroize(skip)]
     session_name: String,
+    #[zeroize(skip)]
+    #[debug("0x{}", hex::encode(public_key))]
     public_key: [u8; 32],
+    #[zeroize(skip)]
     address: String,
 }
 
@@ -71,49 +76,15 @@ impl ImportedSigner {
     }
 }
 
-impl fmt::Debug for ImportedSigner {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ImportedSigner")
-            .field("mnemonic", &REDACTED)
-            .field("entropy", &REDACTED)
-            .field("username", &self.username)
-            .field("session_name", &self.session_name)
-            .field(
-                "public_key",
-                &format_args!("0x{}", hex::encode(self.public_key)),
-            )
-            .field("address", &self.address)
-            .finish()
-    }
-}
-
-impl Drop for ImportedSigner {
-    fn drop(&mut self) {
-        self.mnemonic.zeroize();
-        self.entropy.zeroize();
-    }
-}
-
-impl fmt::Debug for ResolvedSigner {
-    /// Redacts `entropy` so signer material cannot reach a log or error string.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResolvedSigner")
-            .field("entropy", &REDACTED)
-            .field("account_name", &self.account_name)
-            .field("lite_username", &self.lite_username)
-            .field("auto_managed", &self.auto_managed)
-            .finish()
-    }
-}
-
 /// Inputs for resolving a signing-host account.
-#[derive(Clone)]
+#[derive(Clone, derive_more::Debug)]
 pub struct ResolveSignerConfig<'a> {
     /// Directory containing the local account store.
     pub base_path: &'a Path,
     /// Network whose identity backend and People chain should be used.
     pub network: NetworkConfig,
     /// Explicit mnemonic. When present, the account store is not used.
+    #[debug("{:?}", mnemonic.as_ref().map(|_| "<redacted>"))]
     pub mnemonic: Option<String>,
     /// Named stored account. Mutually exclusive with `mnemonic`.
     pub account: Option<String>,
@@ -124,28 +95,15 @@ pub struct ResolveSignerConfig<'a> {
     pub reserved_username: Option<String>,
 }
 
-impl fmt::Debug for ResolveSignerConfig<'_> {
-    /// Redacts `mnemonic` while keeping the non-secret resolution inputs.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResolveSignerConfig")
-            .field("base_path", &self.base_path)
-            .field("network", &self.network)
-            .field("mnemonic", &self.mnemonic.as_ref().map(|_| REDACTED))
-            .field("account", &self.account)
-            .field("lite_username_prefix", &self.lite_username_prefix)
-            .field("reserved_username", &self.reserved_username)
-            .finish()
-    }
-}
-
 /// Stored signer account record.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, derive_more::Debug)]
 pub struct AccountRecord {
     /// Stable local account name, for example `auto-1`.
     pub name: String,
     /// Network id this account belongs to.
     pub network: String,
     /// BIP-39 mnemonic for this local test signer.
+    #[debug("\"<redacted>\"")]
     pub mnemonic: String,
     /// Lite username registered through the identity backend.
     pub lite_username: String,
@@ -172,28 +130,6 @@ enum AccountOrigin {
     #[default]
     Auto,
     Imported,
-}
-
-impl fmt::Debug for AccountRecord {
-    /// Redacts `mnemonic`. `AccountStoreData` and `AccountStore` render records
-    /// through this impl, so neither can print stored signer material either.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AccountRecord")
-            .field("name", &self.name)
-            .field("network", &self.network)
-            .field("mnemonic", &REDACTED)
-            .field("lite_username", &self.lite_username)
-            .field("public_key_hex", &self.public_key_hex)
-            .field("address", &self.address)
-            .field("created_at_unix", &self.created_at_unix)
-            .field("attested", &self.attested)
-            .field("origin", &self.origin)
-            .field(
-                "exhausted_statement_periods",
-                &self.exhausted_statement_periods,
-            )
-            .finish()
-    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -934,7 +870,7 @@ mod tests {
             !rendered.contains("171"),
             "entropy bytes leaked: {rendered}"
         );
-        assert!(rendered.contains(REDACTED));
+        assert!(rendered.contains("<redacted>"));
         assert!(rendered.contains("auto-1"), "non-secret fields dropped");
 
         let config = ResolveSignerConfig {
@@ -947,7 +883,7 @@ mod tests {
         };
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("abandon"), "mnemonic leaked: {rendered}");
-        assert!(rendered.contains(REDACTED));
+        assert!(rendered.contains("<redacted>"));
 
         // AccountStoreData renders records through AccountRecord's impl, so the
         // whole store is covered by redacting the record.
@@ -958,7 +894,7 @@ mod tests {
         store.upsert(record("auto-1", "paseo-next-v2", true));
         let rendered = format!("{:?}", store.data);
         assert!(!rendered.contains("abandon"), "mnemonic leaked: {rendered}");
-        assert!(rendered.contains(REDACTED));
+        assert!(rendered.contains("<redacted>"));
     }
 
     #[test]
@@ -1140,7 +1076,7 @@ mod tests {
 
         let rendered = format!("{imported:?}");
         assert!(!rendered.contains("abandon"), "mnemonic leaked: {rendered}");
-        assert!(rendered.contains(REDACTED));
+        assert!(rendered.contains("<redacted>"));
         Ok(())
     }
 
