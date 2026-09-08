@@ -3,13 +3,24 @@ import { Link, useOutletContext } from "react-router-dom";
 import { Check, ChevronDown, Minus, X } from "lucide-react";
 import type { VersionEntry } from "../data/types";
 import { methodPath } from "../data/registry";
-import { chatCompatibility, compatibility } from "../data/compatibility";
+import {
+  chatCompatibility,
+  compatibility,
+  pocketCompatibility,
+} from "../data/compatibility";
 
 /**
  * Execution kinds that serve the Chat modality. `Chat` is the name protocol
  * versions up to 0.9.0 declared; `Worker` is the name that replaced it.
  */
 const CHAT_EXECUTIONS: ReadonlySet<string> = new Set(["Chat", "Worker"]);
+
+/**
+ * Execution kinds that serve Pocket. Only `Worker`: Pocket arrived after the
+ * `Chat` kind name was retired, so no archived version records it under that
+ * name.
+ */
+const POCKET_EXECUTIONS: ReadonlySet<string> = new Set(["Worker"]);
 import type {
   CompatibilityMatrix,
   CompatStatus,
@@ -20,7 +31,10 @@ import { playgroundDiagnosisUrl } from "../data/playground";
 export default function CompatibilityPage() {
   const { version } = useOutletContext<{ version: VersionEntry }>();
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const hostCount = compatibility.hosts.length + chatCompatibility.hosts.length;
+  const hostCount =
+    compatibility.hosts.length +
+    chatCompatibility.hosts.length +
+    pocketCompatibility.hosts.length;
 
   if (hostCount === 0) {
     return (
@@ -105,6 +119,15 @@ export default function CompatibilityPage() {
           description="Chat API coverage measured from the product's Worker execution."
           executions={CHAT_EXECUTIONS}
           matrix={chatCompatibility}
+          version={version}
+          expandedId={expandedId}
+          onToggle={setExpandedId}
+        />
+        <CompatibilitySection
+          title="Pocket compatibility"
+          description="Pocket API coverage measured from the product's Worker execution."
+          executions={POCKET_EXECUTIONS}
+          matrix={pocketCompatibility}
           version={version}
           expandedId={expandedId}
           onToggle={setExpandedId}

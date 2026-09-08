@@ -110,6 +110,10 @@ impl CliPocketHost {
     }
 
     /// Append one line to the transcript, if one is configured.
+    ///
+    /// The line and its terminator go out in a single write: several writes
+    /// would let a concurrent connection's line land in the middle of this
+    /// one.
     fn record(&self, line: serde_json::Value) {
         let Some(path) = self.transcript.as_ref() else {
             return;
@@ -118,7 +122,7 @@ impl CliPocketHost {
             .create(true)
             .append(true)
             .open(path)
-            .and_then(|mut file| writeln!(file, "{line}"));
+            .and_then(|mut file| file.write_all(format!("{line}\n").as_bytes()));
         if let Err(error) = appended {
             tracing::warn!(?path, %error, "pocket transcript could not be appended to");
         }
