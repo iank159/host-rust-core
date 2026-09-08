@@ -13,6 +13,7 @@ generated from [Conventional Commits](https://www.conventionalcommits.org/).
   server and browser asset distribution independent (#540)
 - pin `truapi-polkavm-host` to the reviewed ABI 2 runtime with bounded
   large-guest browser code generation
+- update the pinned PolkaVM runtime to fix offscreen GPU render passes
 
 ## [0.13.1] - 2026-09-02
 

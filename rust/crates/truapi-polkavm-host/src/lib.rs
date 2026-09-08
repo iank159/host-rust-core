@@ -13,4 +13,4 @@ pub const TRUAPI_POLKAVM_HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Version of the pinned PolkaVM host runtime.
 pub const POLKAVM_HOST_RUNTIME_VERSION: &str = "0.2.0";
 /// Immutable source revision of the pinned PolkaVM host runtime.
-pub const POLKAVM_HOST_RUNTIME_SOURCE_REVISION: &str = "b3ec7175ffe50ebef5577a491010f5a0229dbbe8";
+pub const POLKAVM_HOST_RUNTIME_SOURCE_REVISION: &str = "e6e1c91e23929a6c2d28cfda56f244d3d43add41";
