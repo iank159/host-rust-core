@@ -46,7 +46,7 @@ The original nested-enum sketch in the review thread makes both points at once: 
 [requestId: SCALE str][trait: u8][method: u8][version: u8][message_type: u8][payload bytes]
 ```
 
-One method id now serves every version and every leg a method has. `version` is 1-based, matching the payload wrapper's own `V1`/`V2`/... numbering, and precedes `message_type` because it selects the shape the message type is then read against. `message_type` is a plain `u8`, not a SCALE enum tag on some shared generic — the dispatcher already knows, from a method's own registration, which shape (request/response or subscription) it expects, so the two families reuse the same small integers rather than spreading across one combined space:
+One method id now serves every version and every leg a method has. `version` is 1-based, matching the payload wrapper's own `V1`/`V2`/... numbering, so `0` names no version any peer can decode and is refused at the frame boundary alongside the trait and method checks. It precedes `message_type` because it selects the shape the message type is then read against. `message_type` is a plain `u8`, not a SCALE enum tag on some shared generic — the dispatcher already knows, from a method's own registration, which shape (request/response or subscription) it expects, so the two families reuse the same small integers rather than spreading across one combined space:
 
 ```text
 MESSAGE_TYPE_REQUEST   = 0   MESSAGE_TYPE_START     = 0
@@ -73,6 +73,8 @@ Stripping it is mechanical rather than structural. A versioned wrapper's SCALE e
 ### Routing is unchanged
 
 The dispatcher still keys on `(trait_id, method_id)`, one lookup. `message_type` is a second-level check the handler for that method already expects: a request/response registration accepts `Request` inbound and answers `Response`; a subscription registration accepts `Start`/`Stop` inbound and answers `Receive`/`Interrupt`. A frame carrying a `message_type` its registered handler does not expect (an outbound-shaped tag arriving inbound, or an unrecognized value) is a protocol violation, answered with `CallError::MalformedFrame`, exactly as an undecodable payload is today.
+
+The reserved `(255, 255)` address is the exception, because it is the one address every peer answers on. A protocol error whose variant index this build does not recognize settles the correlated call and leaves the frame and the connection intact, rather than being rejected: a peer that refused an unfamiliar payload here could never be told anything new without the connection dying, which would freeze that channel at whatever shape shipped first. A recognized variant stays strict, since a malformed one is corruption rather than a newer peer.
 
 ### Adding a leg or a version later
 

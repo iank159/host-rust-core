@@ -61,7 +61,7 @@ Trait discriminants are assigned per trait in the `truapi` crate via the trait-l
 
 #### The version and message type bytes
 
-A `(trait, method)` pair names a method, not a version or a leg: request and response share it, and so do a subscription's four phases. Both the version a frame speaks and which leg it carries are bytes in the outer envelope, ahead of the payload rather than nested inside it. `version` is 1-based, matching the payload wrapper's own `V1`/`V2`/... numbering. `message_type` takes these values:
+A `(trait, method)` pair names a method, not a version or a leg: request and response share it, and so do a subscription's four phases. Both the version a frame speaks and which leg it carries are bytes in the outer envelope, ahead of the payload rather than nested inside it. `version` is 1-based, matching the payload wrapper's own `V1`/`V2`/... numbering, so `0` names no version any peer can decode and MUST be refused at the frame boundary alongside the trait and method checks. `message_type` takes these values:
 
 ```text
 MESSAGE_TYPE_REQUEST   = 0   MESSAGE_TYPE_START     = 0
@@ -111,7 +111,7 @@ Every request expects exactly one response. Each Host or Product MUST send a res
 
 If a receiver has no handler for an incoming `(trait, method)` pair, it MUST send a protocol-error frame addressed to `(255, 255)` with the same `requestId`, `message_type` set to `MESSAGE_TYPE_RESPONSE`, `version` set to the protocol-error payload's own version (`1`) rather than echoing a frame it could not decode, and payload `UnsupportedMessage { trait_id, method_id }` — encoded as the three bytes `[0, unsupported_trait, unsupported_method]`, the variant index followed by the pair the peer could not handle. The sender maps this method-independent response to its own pending request or subscription and reports a generic unsupported error. A receiver MUST NOT answer a protocol-error frame with another protocol error.
 
-A protocol-error frame MUST NOT receive another protocol-error response. An unmatched error is ignored, while a malformed protocol-error payload is rejected as a wire violation. These rules prevent error loops without hiding malformed control messages.
+A protocol-error frame MUST NOT receive another protocol-error response. An unmatched error is ignored. A protocol-error payload whose variant index the receiver does not recognize MUST settle the correlated call and leave the frame and the connection intact: `(255, 255)` is the one address every peer answers on, so a receiver that rejected an unfamiliar payload here could never be told anything new without the connection dying, which would freeze this channel at whatever shape shipped first. A payload whose variant IS recognized stays strict, and a malformed one is rejected as a wire violation. These rules prevent error loops and keep the channel extensible without hiding corrupt control messages.
 
 Hosts and Products released before this control frame was introduced still silently drop unknown discriminants. They must be upgraded once before they can safely reject APIs introduced by later peers. Existing API frames and codec version 1 remain unchanged.
 
