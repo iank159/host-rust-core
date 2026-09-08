@@ -137,6 +137,13 @@ dependency on the crate:
   Kotlin bindings and the cdylib per ABI, built by
   `make provider-android-publish-local`.
 
+A light client that starts cold warp syncs from the checkpoint in the chain spec, so
+every artifact resumes from stored finalized state instead, including the relay a
+parachain syncs through. The provider owns when a blob is read and written; the
+host owns where the bytes live. The crate stores nothing itself: a host implements
+`StorageClient` over storage it already owns, on web and native alike, so it keeps
+control of quota and of whether the bytes are backed up or encrypted.
+
 ## How it works
 
 1. The protocol is defined as Rust traits in [`rust/crates/truapi/`](rust/crates/truapi/), with each trait tagged `#[wire_trait(id = N)]` and each method tagged `#[wire(id = N)]` for a stable byte-level `(trait, method)` dispatch table. Every method's doc comment must carry a ` ```ts ` example, which codegen extracts into the playground's EXAMPLE tab; the build fails if any method is missing one.
