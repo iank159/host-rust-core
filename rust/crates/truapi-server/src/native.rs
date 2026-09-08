@@ -567,6 +567,24 @@ pub trait NativeChatCallbacks: Send + Sync {
     fn list_rooms(&self) -> Result<Vec<v01::ChatRoom>, HostRejection>;
 }
 
+/// Native Pocket collection adapter. Hosts with a Pocket surface pass an
+/// implementation to [`NativeTrUApiHostRuntime::open_product_execution`]; hosts
+/// without one pass `None`. Callbacks run inline on the process-wide dispatch
+/// pool shared by every product execution, so one that blocks stalls the
+/// others.
+///
+/// The core reads `list_cards` to decide `Privileged`, so `remove_card` is
+/// only ever asked for a card this host reported as present and removable.
+#[uniffi::export(rust, foreign)]
+pub trait NativePocketCallbacks: Send + Sync {
+    /// Return the product's cards as this host currently holds them, each with
+    /// the flag saying whether the host pinned it.
+    fn list_cards(&self) -> Result<Vec<v01::PocketCard>, HostRejection>;
+
+    /// Remove one non-privileged card this host holds for the product.
+    fn remove_card(&self, card_id: String) -> Result<(), HostRejection>;
+}
+
 /// Process-owned native TrUAPI runtime shared by all executable connections.
 #[derive(uniffi::Object)]
 pub struct NativeTrUApiHostRuntime {
@@ -619,6 +637,7 @@ impl NativeTrUApiHostRuntime {
         &self,
         callbacks: Arc<dyn HostCallbacks>,
         chat_callbacks: Option<Arc<dyn NativeChatCallbacks>>,
+        pocket_callbacks: Option<Arc<dyn NativePocketCallbacks>>,
         product: ProductContext,
     ) -> Arc<NativeProductExecution> {
         let events = Arc::new(NativeEventBus::default());
@@ -636,11 +655,19 @@ impl NativeTrUApiHostRuntime {
                     events: events.clone(),
                 })
             });
+        let pocket: Option<Arc<dyn truapi_platform::PocketPlatform>> =
+            pocket_callbacks.map(|pocket| -> Arc<dyn truapi_platform::PocketPlatform> {
+                Arc::new(PocketCallbackPlatform {
+                    pocket,
+                    events: events.clone(),
+                })
+            });
         let execution = Arc::new(NativeProductExecution {
             runtime: self.runtime.clone(),
             product: product.clone(),
             platform,
             chat,
+            pocket,
             permission_status,
             events,
             shared_events: self.events.clone(),
@@ -764,15 +791,22 @@ impl NativeTrUApiHostRuntime {
 
     /// Open a connection-scoped execution with immutable trusted context.
     /// `chat_callbacks` installs the host's Chat adapter; hosts without the
-    /// Chat modality pass `None`.
+    /// Chat modality pass `None`. `pocket_callbacks` does the same for the
+    /// card collection.
     pub fn open_product_execution(
         &self,
         callbacks: Arc<dyn HostCallbacks>,
         chat_callbacks: Option<Arc<dyn NativeChatCallbacks>>,
+        pocket_callbacks: Option<Arc<dyn NativePocketCallbacks>>,
         execution_config: NativeProductExecutionConfig,
     ) -> Result<Arc<NativeProductExecution>, NativeRuntimeConfigError> {
         let product: ProductContext = execution_config.try_into()?;
-        Ok(self.open_product_execution_with_callbacks(callbacks, chat_callbacks, product))
+        Ok(self.open_product_execution_with_callbacks(
+            callbacks,
+            chat_callbacks,
+            pocket_callbacks,
+            product,
+        ))
     }
 
     /// Core-owned logout for the process-wide authentication session.
@@ -918,6 +952,7 @@ pub struct NativeProductExecution {
     product: ProductContext,
     platform: Arc<dyn truapi_platform::Platform>,
     chat: Option<Arc<dyn truapi_platform::ChatPlatform>>,
+    pocket: Option<Arc<dyn truapi_platform::PocketPlatform>>,
     /// The same `CallbackPlatform` as `platform`, kept separately because
     /// `Arc<dyn Platform>` cannot be downcast to the optional capability.
     permission_status: Arc<dyn truapi_platform::PermissionStatusHost>,
@@ -947,7 +982,7 @@ impl NativeProductExecution {
             chat_platform: self.chat.clone(),
             permission_status: Some(self.permission_status.clone()),
             chat: self.chat_connection.clone(),
-            pocket_platform: None,
+            pocket_platform: self.pocket.clone(),
         }
     }
 
@@ -1120,6 +1155,11 @@ impl NativeProductExecution {
         }
     }
 
+    /// Push a complete native Pocket card-list replacement to this execution.
+    pub fn notify_pocket_cards_changed(&self, cards: Vec<v01::PocketCard>) {
+        self.events.notify_pocket_cards_changed(cards);
+    }
+
     /// Permanently shut down this executable and all of its connection state.
     ///
     /// This is named `shutdown` rather than `close` because UniFFI Kotlin
@@ -1237,6 +1277,7 @@ struct NativeEventBus {
     preimage_changes: Mutex<Vec<PreimageSubscription>>,
     chain_responses: Mutex<HashMap<u32, mpsc::UnboundedSender<String>>>,
     chat_room_changes: Mutex<Vec<mpsc::UnboundedSender<v01::HostChatListSubscribeItem>>>,
+    pocket_card_changes: Mutex<Vec<mpsc::UnboundedSender<v01::HostPocketListSubscribeItem>>>,
 }
 
 struct PreimageSubscription {
@@ -1353,6 +1394,26 @@ impl NativeEventBus {
         self.chat_room_changes
             .lock()
             .expect("native Chat room subscribers mutex poisoned")
+            .retain(|tx| tx.unbounded_send(item.clone()).is_ok());
+    }
+
+    fn subscribe_pocket_cards(
+        &self,
+        current: v01::HostPocketListSubscribeItem,
+    ) -> BoxStream<'static, v01::HostPocketListSubscribeItem> {
+        let (tx, rx) = mpsc::unbounded();
+        self.pocket_card_changes
+            .lock()
+            .expect("native Pocket card subscribers mutex poisoned")
+            .push(tx);
+        stream::once(async move { current }).chain(rx).boxed()
+    }
+
+    fn notify_pocket_cards_changed(&self, cards: Vec<v01::PocketCard>) {
+        let item = v01::HostPocketListSubscribeItem { cards };
+        self.pocket_card_changes
+            .lock()
+            .expect("native Pocket card subscribers mutex poisoned")
             .retain(|tx| tx.unbounded_send(item.clone()).is_ok());
     }
 }
@@ -1757,6 +1818,49 @@ impl truapi_platform::ChatPlatform for ChatCallbackPlatform {
     }
 }
 
+/// [`truapi_platform::PocketPlatform`] served by host-provided
+/// [`NativePocketCallbacks`]; constructed only when the host passed one.
+struct PocketCallbackPlatform {
+    pocket: Arc<dyn NativePocketCallbacks>,
+    events: Arc<NativeEventBus>,
+}
+
+#[async_trait]
+impl truapi_platform::PocketPlatform for PocketCallbackPlatform {
+    fn subscribe_pocket_cards(
+        &self,
+        _product: &ProductContext,
+    ) -> BoxStream<'static, Result<v01::HostPocketListSubscribeItem, v01::GenericError>> {
+        let current = v01::HostPocketListSubscribeItem {
+            cards: self.pocket.list_cards().unwrap_or_default(),
+        };
+        Box::pin(self.events.subscribe_pocket_cards(current).map(Ok))
+    }
+
+    async fn remove_pocket_card(
+        &self,
+        _product: &ProductContext,
+        request: v01::HostPocketRemoveCardRequest,
+    ) -> Result<(), v01::HostPocketRemoveCardError> {
+        let unknown = |error: HostRejection| v01::HostPocketRemoveCardError::Unknown {
+            reason: error.to_string(),
+        };
+        let cards = self.pocket.list_cards().map_err(unknown)?;
+        match cards.iter().find(|card| card.card_id == request.card_id) {
+            // A card this host does not hold is already removed.
+            None => Ok(()),
+            Some(card) if card.privileged => Err(v01::HostPocketRemoveCardError::Privileged),
+            Some(_) => {
+                self.pocket.remove_card(request.card_id).map_err(unknown)?;
+                if let Ok(cards) = self.pocket.list_cards() {
+                    self.events.notify_pocket_cards_changed(cards);
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1908,6 +2012,8 @@ mod tests {
         chat_bot_rejection: Mutex<Option<String>>,
         chat_post_rejection: Mutex<Option<String>>,
         chat_posted: Mutex<Vec<(String, v01::ChatMessageContent)>>,
+        pocket_cards: Mutex<Vec<v01::PocketCard>>,
+        pocket_removed: Mutex<Vec<String>>,
         theme: Mutex<v01::HostThemeSubscribeItem>,
         locale: Mutex<v01::HostLocaleSubscribeItem>,
         preimages: Mutex<PreimageFixtureEntries>,
@@ -1938,6 +2044,8 @@ mod tests {
                 chat_bot_rejection: Mutex::new(None),
                 chat_post_rejection: Mutex::new(None),
                 chat_posted: Mutex::new(Vec::new()),
+                pocket_cards: Mutex::new(Vec::new()),
+                pocket_removed: Mutex::new(Vec::new()),
                 theme: Mutex::new(v01::HostThemeSubscribeItem {
                     name: v01::ThemeName::Default,
                     variant: v01::ThemeVariant::Light,
@@ -2077,6 +2185,28 @@ mod tests {
         }
     }
 
+    impl NativePocketCallbacks for EventCallbacks {
+        fn list_cards(&self) -> Result<Vec<v01::PocketCard>, HostRejection> {
+            Ok(self
+                .pocket_cards
+                .lock()
+                .expect("pocket cards mutex poisoned")
+                .clone())
+        }
+
+        fn remove_card(&self, card_id: String) -> Result<(), HostRejection> {
+            self.pocket_cards
+                .lock()
+                .expect("pocket cards mutex poisoned")
+                .retain(|card| card.card_id != card_id);
+            self.pocket_removed
+                .lock()
+                .expect("pocket removed mutex poisoned")
+                .push(card_id);
+            Ok(())
+        }
+    }
+
     impl NativeChatCallbacks for EventCallbacks {
         fn create_room(
             &self,
@@ -2210,6 +2340,7 @@ mod tests {
         host.open_product_execution(
             callbacks,
             None,
+            None,
             native_execution_config(product_id, ProductExecutionKind::App),
         )
         .expect("product execution config should be valid")
@@ -2226,6 +2357,7 @@ mod tests {
             .open_product_execution(
                 Arc::new(EventCallbacks::new()),
                 None,
+                None,
                 native_execution_config("shared.dot", ProductExecutionKind::App),
             )
             .expect("App execution should open");
@@ -2234,6 +2366,7 @@ mod tests {
             .open_product_execution(
                 chat_host.clone(),
                 Some(chat_host.clone()),
+                None,
                 native_execution_config("shared.dot", ProductExecutionKind::Worker),
             )
             .expect("Chat execution should open");
@@ -2250,6 +2383,7 @@ mod tests {
             .open_product_execution(
                 chat_host.clone(),
                 Some(chat_host.clone()),
+                None,
                 native_execution_config("shared.dot", ProductExecutionKind::Worker),
             )
             .expect("replacement Chat execution should open");
@@ -2264,6 +2398,70 @@ mod tests {
     }
 
     #[test]
+    fn native_pocket_adapter_refuses_privileged_removal_before_calling_the_host() {
+        let pocket_host = Arc::new(EventCallbacks::new());
+        *pocket_host
+            .pocket_cards
+            .lock()
+            .expect("pocket cards mutex poisoned") = vec![
+            v01::PocketCard {
+                card_id: "loyalty".to_string(),
+                privileged: false,
+            },
+            v01::PocketCard {
+                card_id: "humanity".to_string(),
+                privileged: true,
+            },
+        ];
+        let events = Arc::new(NativeEventBus::default());
+        let platform = PocketCallbackPlatform {
+            pocket: pocket_host.clone(),
+            events,
+        };
+        let product = ProductContext::new("pocket.dot".to_string()).expect("valid product id");
+        let remove = |card_id: &str| {
+            futures::executor::block_on(truapi_platform::PocketPlatform::remove_pocket_card(
+                &platform,
+                &product,
+                v01::HostPocketRemoveCardRequest {
+                    card_id: card_id.to_string(),
+                },
+            ))
+        };
+        let mut cards =
+            truapi_platform::PocketPlatform::subscribe_pocket_cards(&platform, &product);
+        let first = futures::executor::block_on(cards.next())
+            .expect("the current list arrives on subscribe")
+            .expect("no stream error");
+        assert_eq!(first.cards.len(), 2);
+
+        assert!(matches!(
+            remove("humanity"),
+            Err(v01::HostPocketRemoveCardError::Privileged)
+        ));
+        assert!(
+            remove("absent").is_ok(),
+            "an absent card is already removed"
+        );
+        assert!(remove("loyalty").is_ok());
+        assert_eq!(
+            pocket_host
+                .pocket_removed
+                .lock()
+                .expect("pocket removed mutex poisoned")
+                .as_slice(),
+            ["loyalty"],
+            "only a removable card the host holds reaches the host"
+        );
+
+        let republished = futures::executor::block_on(cards.next())
+            .expect("a removal republishes the list")
+            .expect("no stream error");
+        assert_eq!(republished.cards.len(), 1);
+        assert_eq!(republished.cards[0].card_id, "humanity");
+    }
+
+    #[test]
     fn native_chat_entrypoint_is_unsupported_without_an_adapter() {
         let mut config = native_host_runtime_config();
         config.local_session_secret = Some(vec![7; 32]);
@@ -2273,6 +2471,7 @@ mod tests {
         let execution = host
             .open_product_execution(
                 Arc::new(EventCallbacks::new()),
+                None,
                 None,
                 native_execution_config("chat-product.dot", ProductExecutionKind::Worker),
             )
@@ -2955,6 +3154,7 @@ mod tests {
             .open_product_execution(
                 Arc::new(EventCallbacks::new()),
                 None,
+                None,
                 native_execution_config("chain.dot", ProductExecutionKind::App),
             )
             .expect("App execution should open");
@@ -3599,6 +3799,7 @@ mod tests {
                 Arc::new(EventCallbacks::refusing(
                     v01::HostDevicePermissionRequest::Camera,
                 )),
+                None,
                 None,
                 native_execution_config("gated.dot", ProductExecutionKind::App),
             )
