@@ -1,0 +1,11 @@
+error[E0277]: the trait bound `SsoReply<messages::BarResponse>: From<SsoReply<messages::FooResponse>>` is not satisfied
+ --> tests/ui/sso/fail/wrong_reply.rs:9:1
+  |
+9 | #[truapi_macros::sso_service]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+  |
+  = help: the trait `From<SsoReply<messages::FooResponse>>` is not implemented for `SsoReply<messages::BarResponse>`
+          but trait `From<Result<u32, String>>` is implemented for it
+  = help: for that trait implementation, expected `Result<u32, String>`, found `SsoReply<messages::FooResponse>`
+  = note: required for `SsoReply<messages::FooResponse>` to implement `Into<SsoReply<messages::BarResponse>>`
+  = note: this error originates in the attribute macro `truapi_macros::sso_service` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,0 +1,13 @@
+error[E0271]: type mismatch resolving `<FooResponse as SsoResponse>::Ok == &str`
+ --> tests/ui/sso/fail/wrong_payload.rs:9:1
+  |
+9 | #[truapi_macros::sso_service]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ type mismatch resolving `<FooResponse as SsoResponse>::Ok == &str`
+  |
+note: expected this to be `&str`
+ --> tests/ui/sso/fail/../support/wire.rs
+  |
+  |                 pub payload: Result<u32, String>,
+  |                                     ^^^
+  = note: required for `Result<&str, String>` to implement `Into<SsoReply<messages::FooResponse>>`
+  = note: this error originates in the attribute macro `truapi_macros::sso_service` (in Nightly builds, run with -Z macro-backtrace for more info)

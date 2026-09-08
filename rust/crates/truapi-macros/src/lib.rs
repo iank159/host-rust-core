@@ -1,5 +1,11 @@
 //! Proc-macros for TrUAPI trait annotations.
 //!
+//! `SsoWire`, `SsoResponse`, and `sso_service` describe `truapi-server`'s
+//! inter-host SSO protocol. The derives expose wire classification and response
+//! payloads; the service attribute pairs requests and responses from method
+//! signatures in an inherent implementation and generates dispatch. They are
+//! documented in [`sso`].
+//!
 //! `versioned_type!` is a function-like macro that generates versioned message
 //! envelopes: the `Vn` enums (with SCALE codec indices) plus their
 //! `Versioned`/`IntoLatest`/`FromLatest` impls from `truapi::versioned`.
@@ -19,6 +25,8 @@
 //! unless they are declared via a tool prefix or consumed by an active
 //! proc-macro. Re-emitting the marker as a `#[doc]` line lets the value reach
 //! rustdoc through the only attribute that is always preserved verbatim.
+
+mod sso;
 
 use proc_macro::TokenStream;
 use proc_macro2::Literal;
@@ -450,4 +458,68 @@ fn expand_versioned_enum(def: &VersionedEnum) -> syn::Result<proc_macro2::TokenS
     }
 
     Ok(tokens)
+}
+
+/// Classify the SSO wire enum's request, response, and disconnect variants.
+///
+/// Emits crate-private `AnyRequest`, `Incoming`, `classify()`, request wrapping,
+/// and the enum's `name()`, `responding_to()`, and `with_responding_to()` next to
+/// the enum. Request/response pairing comes from `#[sso_service]`. Only valid
+/// inside `truapi-server`.
+#[proc_macro_derive(SsoWire)]
+pub fn derive_sso_wire(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::DeriveInput);
+    match sso::derive_sso_wire(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Implement `SsoResponse` for a response struct made of `responding_to` and
+/// one `Result<Ok, Err>` payload field. `#[sso(outcome = path)]` swaps the
+/// transcript classification for a bespoke function. Only valid inside
+/// `truapi-server`.
+#[proc_macro_derive(SsoResponse, attributes(sso))]
+pub fn derive_sso_response(item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as syn::DeriveInput);
+    match sso::derive_sso_response(input) {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+/// Define SSO handlers in a dedicated inherent implementation.
+///
+/// Every method must be `async fn name(&self, cx: &SsoRequestContext, request:
+/// <Request>) -> <Response>`. Each signature supplies `SsoRequest` pairing;
+/// the macro generates an exhaustive `dispatch` method on the service type.
+/// Handler return types expand to `SsoReply<Response>`, and bodies return
+/// ordinary `Result` payloads or explicit replies with a transcript outcome.
+/// An inner async block preserves `return` and `?` semantics. Constructors and
+/// other helpers belong in a separate, unannotated implementation.
+///
+/// The macro uses native async methods and refers to the context and reply
+/// types in `crate::runtime::sso_service`. It only works inside `truapi-server`.
+#[proc_macro_attribute]
+pub fn sso_service(args: TokenStream, item: TokenStream) -> TokenStream {
+    if !args.is_empty() {
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`sso_service` takes no arguments",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let item = parse_macro_input!(item as syn::Item);
+    let result = match item {
+        syn::Item::Impl(item) => sso::expand_sso_service(item),
+        other => Err(syn::Error::new_spanned(
+            other,
+            "sso_service requires an inherent implementation",
+        )),
+    };
+    match result {
+        Ok(tokens) => tokens.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
 }

@@ -66,7 +66,7 @@ See [`js/packages/truapi/README.md`](js/packages/truapi/README.md) for the full 
 rust/crates/
   truapi/                Rust traits, versioned envelopes, and latest payload re-exports
   truapi-codegen/        rustdoc JSON to TypeScript client + Rust dispatcher
-  truapi-macros/         #[wire(id = N)] proc-macro
+  truapi-macros/         TrUAPI wire annotations and inter-host SSO proc macros
   truapi-platform/       Host syscall traits used by truapi-server (storage, navigation, consent, ...)
   truapi-provider/       Network provider backends (WebSocket RPC or smoldot light-client)
   truapi-server/         Host runtime: dispatcher, typed SCALE logic, chain signing, WASM surface
@@ -91,6 +91,8 @@ docs/                      Design docs, RFCs, feature proposals
 scripts/codegen.sh         Regenerate the TS client from the Rust source
 scripts/battery.sh         Run the generated battery against both headless CLI host roles
 ```
+
+See the [proc-macro guide](rust/crates/truapi-macros/README.md) for the SSO handler and wire contracts.
 
 The Swift host adapter (the `TrUAPIHost` SPM package over the truapi-server
 UniFFI core) lives under [`ios/truapi-host/`](ios/truapi-host), with its SPM
