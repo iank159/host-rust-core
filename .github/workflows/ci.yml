@@ -101,6 +101,23 @@ jobs:
         with:
           command: check licenses
 
+  cargo-consumer:
+    name: External Cargo consumer
+    runs-on: ubuntu-latest
+    steps:
+      # No submodules: the point of the check is that a consumer resolves the
+      # crates without them.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # stable
+        with:
+          toolchain: stable
+
+      - name: An external consumer initializes no host submodule
+        run: ./scripts/check-cargo-consumer.sh
+
   codegen:
     name: Codegen
     runs-on: ubuntu-latest
@@ -535,8 +552,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          submodules: recursive
           persist-credentials: false
+
+      # `hosts/dotli` is `update = none` so Cargo consumers skip it, which means
+      # a recursive checkout no longer populates it either. This job is the one
+      # place in CI that needs it, so it asks for it by name and forces the
+      # strategy the same way the Makefile does.
+      - name: Check out the dotli host
+        run: git submodule update --init --checkout hosts/dotli
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -589,6 +612,7 @@ jobs:
         rust,
         wasm-provider,
         licenses,
+        cargo-consumer,
         codegen,
         ios-bindings,
         ios-changes,

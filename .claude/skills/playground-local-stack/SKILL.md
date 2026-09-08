@@ -21,7 +21,7 @@ and the playground detects the parent host and connects. Plain
    from the repo root:
 
    ```bash
-   git submodule update --init --recursive
+   git submodule update --init --checkout hosts/dotli
    ```
 
 2. **dotli deps installed.** If `hosts/dotli/node_modules/` does not exist:

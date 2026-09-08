@@ -52,7 +52,7 @@ help: ## Show this help.
 	      /^[a-zA-Z0-9_-]+:.*?##/ { printf "  %-12s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)
 
 setup: ## First-time setup: submodules, JS dependencies, generated artifacts.
-	git submodule update --init --recursive
+	git submodule update --init --checkout hosts/dotli
 	# --ignore-scripts: the workspace `prepare` builds need generated sources
 	# that only exist after codegen.sh, which also builds the packages.
 	npm ci --ignore-scripts
@@ -352,7 +352,7 @@ playground: ## Refresh the playground's @parity/truapi snapshot and rebuild.
 	cd $(PLAYGROUND) && yarn build
 
 dev-bootstrap: ## Prepare ignored generated/build artifacts needed by dotli preview.
-	git submodule update --init --recursive
+	git submodule update --init --checkout hosts/dotli
 	# --ignore-scripts: the workspace `prepare` builds need generated sources
 	# that only exist after codegen.sh, which also builds the packages.
 	if [ ! -d node_modules ]; then npm ci --ignore-scripts; fi

@@ -15,7 +15,7 @@ Rust crates  →  codegen  →  @parity/truapi  →  playground  →  dotli ifra
 ## Pre-flight (once per session)
 
 ```bash
-git submodule update --init --recursive
+git submodule update --init --checkout hosts/dotli
 ( cd js/packages/truapi && npm install )
 ( cd playground && yarn install --frozen-lockfile )
 ( cd hosts/dotli && bun install )

@@ -163,7 +163,7 @@ scripts/truapi-host-installer.sh
 
 ```bash
 # Check out the dotli submodule
-git submodule update --init --recursive
+git submodule update --init --checkout hosts/dotli
 
 # Build the TypeScript client (triggers tsc via `prepare`)
 ( cd js/packages/truapi && npm install )

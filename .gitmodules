@@ -1,4 +1,14 @@
+# `update = none` keeps this gitlink out of the Rust crate graph. Cargo
+# recursively initializes a git dependency's submodules, and it honours this
+# strategy ("Skipping git submodule ... due to update strategy in .gitmodules"),
+# so an anonymous consumer taking `truapi` or `truapi-server` by exact rev
+# resolves without credentials for this private host repository.
+#
+# It also means `git submodule update --init --recursive` neither populates nor
+# advances this path. Every caller that wants dotli names it and forces the
+# strategy: `git submodule update --init --checkout hosts/dotli`.
 [submodule "hosts/dotli"]
 	path = hosts/dotli
 	url = https://github.com/paritytech/dotli-community
 	branch = main
+	update = none

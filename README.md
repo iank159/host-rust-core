@@ -108,6 +108,31 @@ ignored) and `prepareDisconnectRequest` (builds the SCALE-encoded wire message
 for a wallet-initiated disconnect) on `TrUAPIHostRuntime`. Response posting and
 session-record cleanup remain on the wallet side.
 
+### Consuming the Rust crates
+
+The crates are not on crates.io. The supported mechanism is an exact Git
+dependency on a release commit:
+
+```toml
+[dependencies]
+truapi = { git = "https://github.com/paritytech/host-rust-core", rev = "<release commit>" }
+truapi-server = { git = "https://github.com/paritytech/host-rust-core", rev = "<release commit>" }
+```
+
+Pin a commit, not a branch: the wire ids are `u8` discriminants that get
+reassigned as the protocol evolves, so two hosts built from different commits do
+not interoperate.
+
+No organization credentials are needed. `hosts/` holds host applications rather
+than crates, and those gitlinks are marked `update = none` in `.gitmodules`, so
+Cargo skips them instead of initializing a private repository it does not need.
+`scripts/check-cargo-consumer.sh` asserts that from a clean cache, and CI runs it
+on every pull request.
+
+The crates depend on one other Git source, `verifiable`, pinned by rev in
+`rust/crates/truapi-server/Cargo.toml`. Publishing to crates.io needs that
+dependency published first and is tracked separately.
+
 ### JS Host SDKs
 
 JS hosts integrate the Rust core through [`@parity/truapi-host`](js/packages/truapi-host),
