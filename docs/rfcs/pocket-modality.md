@@ -22,10 +22,20 @@ product can remove a card. Three privileged cards, Humanity, Balance and Scarcit
 neither.
 
 A face is drawn through the [Unified Renderer](unified-renderer.md)'s `PocketCard` context, and a visible face is one
-worker reference in [Worker Lifecycle](worker-lifecycle.md) terms. What this RFC adds is the collection: one `Pocket`
-trait with two methods, a Pocket section in the Worker manifest, and a deeplink grammar that names a target modality.
+worker reference in [Worker Lifecycle](worker-lifecycle.md) terms. The collection itself is one `Pocket` trait with two
+methods, a Pocket section in the Worker manifest, and a deeplink grammar that names a target modality.
 
 Tracking issue: [#563](https://github.com/paritytech/host-rust-core/issues/563).
+
+## Motivation
+
+The iOS host shows Humanity, Balance and Scarcity as cards whose content and interactions are hard-coded into it.
+Personhood is becoming a product ([RFC 0024](0024-personhood-as-product.md)), which declares
+`includes: { pocket: true }` and expects a card. No contract stands behind that flag: nothing says which cards a product
+may back, how one enters the collection, or who can take it out.
+
+The first iteration ships three host-placed cards before anyone publishes one, so the collection rules hold for a
+host-placed card on their own and the add flow layers on top without changing them.
 
 ## Approach
 
