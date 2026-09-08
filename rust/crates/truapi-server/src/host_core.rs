@@ -574,7 +574,7 @@ impl SigningHostRuntime {
             spawner,
             chat_platform,
         );
-        let signing_host = SigningHostRole::new(services.clone());
+        let signing_host = SigningHostRole::new(services.clone(), config.network_suffix);
         Self {
             services,
             signing_host,
@@ -2312,6 +2312,7 @@ mod tests {
             PlatformInfo::default(),
             [0; 32],
             [0xbb; 32],
+            "paseo".to_string(),
         )
         .expect("signing host config is valid");
         let runtime =
@@ -2358,6 +2359,7 @@ mod tests {
             PlatformInfo::default(),
             [0; 32],
             [0xbb; 32],
+            "paseo".to_string(),
         )
         .expect("signing host config is valid");
         let runtime =
