@@ -3,11 +3,17 @@
 This crate provides TrUAPI wire annotations and versioned envelopes, plus
 server-specific macros for inter-host SSO contracts.
 
+Each macro has its own implementation module. [`lib.rs`](src/lib.rs) contains
+the thin public entry points, which Rust requires at the proc-macro crate root.
+
 | Macro | Input | Generated code |
 | --- | --- | --- |
-| `SsoWire` | Hand-written `v1::RemoteMessage` enum | Request classification and wrapping, message names, and correlation helpers |
-| `SsoResponse` | Response struct with `responding_to: String` followed by one `Result<Ok, Err>` field | Payload types and accessors, response construction, wire wrapping, and transcript outcome |
-| `sso_service` | Dedicated inherent impl of SSO handlers | Request/response pairing, exhaustive dispatch, and handler reply conversion |
+| [`service`](src/service.rs) | TrUAPI service trait | Required middleware metadata for codegen |
+| [`wire`](src/wire.rs) | TrUAPI method | Wire IDs and flags for codegen |
+| [`versioned_type!`](src/versioned_type.rs) | Versioned envelope declarations | SCALE enums and version conversion traits |
+| [`SsoWire`](src/sso_wire.rs) | Hand-written `v1::RemoteMessage` enum | Request classification and wrapping, message names, and correlation helpers |
+| [`SsoResponse`](src/sso_response.rs) | Response struct with `responding_to: String` followed by one `Result<Ok, Err>` field | Payload types and accessors, response construction, wire wrapping, and transcript outcome |
+| [`sso_service`](src/sso_service.rs) | Dedicated inherent impl of SSO handlers | Request/response pairing, exhaustive dispatch, and handler reply conversion |
 
 ## Handler contract
 

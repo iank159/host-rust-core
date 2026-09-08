@@ -12,6 +12,7 @@ rust/crates/
   truapi-codegen/        rustdoc JSON → TypeScript client + Rust dispatcher
   truapi-macros/         #[wire(id = N)] proc-macro; SsoWire/SsoResponse derives and
                          #[sso_service] for truapi-server's inter-host SSO protocol
+                         One implementation module per macro; lib.rs holds entry points
   truapi-platform/       Host syscall traits (storage, navigation, consent, ...)
   truapi-provider/       network provider backends (WebSocket RPC or smoldot light-client)
   truapi-server/         Rust runtime hosts implement; ships as WASM (browser/node)
