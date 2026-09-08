@@ -59,11 +59,11 @@ MESSAGE_TYPE_RESPONSE  = 1   MESSAGE_TYPE_RECEIVE   = 1
 
 There is no generic wrapper type carrying a leg's payload, and no version tag inside one: the header's `version` byte is the only version on the wire, and a peer reconstructs the wrapper variant from it. Each leg's payload bytes are:
 
-- **Request**: `{Method}Request`'s own encoding (its `V1`/`V2`/... tag is the sole version signal for this leg).
-- **Response**: `Result<{Method}Response, CallError<{Method}Error>>`, both sides already-versioned wrappers.
-- **Start**: the request wrapper's own encoding, or zero bytes when the subscription takes no request at all.
-- **Receive**: the item wrapper's own encoding.
-- **Interrupt**: `Option<CallError<{Method}Error>>` — `None` is natural completion, `Some(err)` is a failure, replacing the previous silent-empty-frame convention with an explicit, decodable case. A subscription with no domain-specific error uses a bare `GenericError` in the same position.
+- **Request**: `{Method}Request`'s payload for the header's version, with the wrapper's own tag removed.
+- **Response**: `Result<{Method}Response, CallError<{Method}Error>>`. The `Result` tag stays, and on the error side so does the `CallError` tag; only the versioned payload behind them loses its tag. Framework errors (`Denied`, `Unsupported`, `MalformedFrame`, `HostFailure`) hold no versioned payload and are untouched.
+- **Start**: the request payload, or zero bytes when the subscription takes no request at all.
+- **Receive**: the item payload.
+- **Interrupt**: `Option<CallError<{Method}Error>>` — `None` is natural completion, `Some(err)` is a failure, replacing the previous silent-empty-frame convention with an explicit, decodable case. A subscription with no domain-specific error uses a bare `GenericError`, which is not a versioned wrapper and so carries no tag to remove.
 - **Stop**: zero bytes, unconditionally — there is nothing left to version once a subscription is being torn down.
 
 A frame's `version` byte describes its own payload, not the exchange. Because a method's legs version independently, a request at v2 can only be answered in a version the response wrapper actually has: if that wrapper stopped at v1, the response frame says `1`. Echoing the request's version instead would name a variant the bytes do not contain, and the peer would fail to decode an answer that is otherwise correct. Frames carrying nothing versioned — a `Stop`, a clean `Interrupt`, a framework-only error — report the version their caller asked in. The version appears exactly once; the payload never restates it, so the two can never disagree.

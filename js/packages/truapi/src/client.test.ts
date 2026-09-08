@@ -1149,6 +1149,47 @@ describe("generated client transport", () => {
         expect(fixture.sent).toHaveLength(1);
     });
 
+    it("keeps a plain subscription's interrupt reason intact", async () => {
+        // A plain subscription's interrupt error is the UNVERSIONED
+        // `GenericError`, so its payload has no version tag. Restoring one
+        // anyway shifts every byte after it: the `reason` string's
+        // compact-length byte is read one position late and the reason decodes
+        // empty, which is exactly the failure this pins. Only a result
+        // subscription's versioned error wrapper has a tag to restore.
+        const fixture = providerFixture();
+        const transport = createTransport(fixture.provider);
+        const client = createClient(transport);
+        const errors: SubscriptionError<S.CallErrorValue<T.GenericError>>[] = [];
+
+        const sub = client.account
+            .connectionStatusSubscribe()
+            .subscribe({ error: (error) => errors.push(error) });
+
+        const reason = "chain unavailable";
+        const frame = unwrap(
+            encodeWireMessage({
+                requestId: sub.subscriptionId,
+                payload: {
+                    traitId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.trait,
+                    methodId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.method,
+                    version: 1,
+                    messageType: MESSAGE_TYPE_INTERRUPT,
+                    // Encoded exactly as the host sends it: nothing stripped,
+                    // because there is no version tag in this shape.
+                    value: S.Option(S.CallError(T.GenericError)).enc({
+                        tag: "Domain",
+                        value: { reason },
+                    }),
+                },
+            }),
+            "encode plain-subscription interrupt",
+        );
+        fixture.receive(frame);
+
+        expect(errors).toHaveLength(1);
+        expect(errors[0].reason).toEqual({ tag: "Domain", value: { reason } });
+    });
+
     it("uses the same typed-interrupt envelope for RFC0017 coin-payment streams", () => {
         const fixture = providerFixture();
         const transport = createTransport(fixture.provider);

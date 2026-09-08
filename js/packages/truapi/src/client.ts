@@ -505,7 +505,14 @@ export function createTransport(
     }
   }
 
-  function interruptHostSubscription(route: HostRoute, requestId: string) {
+  // `version` is the one the `Start` arrived in. The decline payload is a
+  // fixed `HostFailure`, which carries nothing versioned, so the frame states
+  // the version its caller asked in rather than the registration's own.
+  function interruptHostSubscription(
+    route: HostRoute,
+    requestId: string,
+    version: number,
+  ) {
     const instance = route.instances.get(requestId);
     if (instance) {
       route.instances.delete(requestId);
@@ -517,7 +524,7 @@ export function createTransport(
         payload: {
           traitId: route.ids.trait,
           methodId: route.ids.method,
-          version: route.version,
+          version,
           messageType: MESSAGE_TYPE_INTERRUPT,
           value: route.interruptPayload,
         },
@@ -543,7 +550,8 @@ export function createTransport(
     if (!handler) {
       if (route.buffered.length === route.bufferCapacity) {
         const evicted = route.buffered.shift();
-        if (evicted) interruptHostSubscription(route, evicted.requestId);
+        if (evicted)
+          interruptHostSubscription(route, evicted.requestId, evicted.version);
       }
       route.buffered.push({ requestId, payload, version });
       return;
@@ -553,7 +561,7 @@ export function createTransport(
     try {
       source = handler(route.decodeRequest(payload, version));
     } catch {
-      interruptHostSubscription(route, requestId);
+      interruptHostSubscription(route, requestId, version);
       return;
     }
 
@@ -575,6 +583,9 @@ export function createTransport(
             send({
               requestId,
               payload: {
+                // `route.version`, not the `Start`'s: `encodeItem` encodes at
+                // the version this registration was generated for, and the
+                // header states the version of the bytes it carries.
                 traitId: route.ids.trait,
                 methodId: route.ids.method,
                 version: route.version,
@@ -583,11 +594,11 @@ export function createTransport(
               },
             });
           } catch {
-            interruptHostSubscription(route, requestId);
+            interruptHostSubscription(route, requestId, version);
           }
         },
         error() {
-          if (active) interruptHostSubscription(route, requestId);
+          if (active) interruptHostSubscription(route, requestId, version);
         },
         // Completion deliberately keeps the instance alive and its last tree
         // on screen until the host sends `_stop`.
@@ -595,7 +606,7 @@ export function createTransport(
       });
       if (!active) sourceSubscription.unsubscribe();
     } catch {
-      interruptHostSubscription(route, requestId);
+      interruptHostSubscription(route, requestId, version);
     }
   }
 
