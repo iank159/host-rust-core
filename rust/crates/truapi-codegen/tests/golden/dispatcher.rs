@@ -83,21 +83,6 @@ pub(crate) fn chat_custom_message_render(
     )
 }
 
-/// Start the host-initiated `pocket_card_render` subscription.
-pub(crate) fn pocket_card_render(
-    subscriptions: &HostInitiatedSubscriptionManager,
-    transport: Arc<dyn Transport>,
-    request: versioned::pocket::ProductPocketCardRenderRequest,
-) -> truapi::Subscription<
-    Result<versioned::pocket::ProductPocketCardRenderItem, truapi::latest::GenericError>,
-> {
-    subscriptions.start(
-        wire_table::POCKET_CARD_RENDER,
-        parity_scale_codec::Encode::encode(&request),
-        transport,
-    )
-}
-
 fn register_account<P>(dispatcher: &mut Dispatcher, host: Arc<P>)
 where
     P: Account + Send + Sync + 'static,
@@ -2033,7 +2018,7 @@ where
     }
     {
         let execution_allowed = dispatcher.allows_execution(ProductExecutionKind::Worker);
-        let host = host.clone();
+        let host = host;
         dispatcher.on_request(wire_table::POCKET_REMOVE_CARD, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
@@ -2073,20 +2058,6 @@ where
                         target_version,
                     ),
                 ))
-            })
-        });
-    }
-    {
-        let execution_allowed = dispatcher.allows_execution(ProductExecutionKind::Worker);
-        let host = host;
-        dispatcher.on_subscription(wire_table::POCKET_ACTION_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
-            let host = host.clone();
-            Box::pin(async move {
-                let _ = bytes;
-                let cx = CallContext::with_request_id(request_id.clone());
-                if !execution_allowed { return Err(Vec::new()); }
-                let stream = host.action_subscribe(&cx).await;
-                Ok(subscription_stream::<versioned::pocket::HostPocketActionSubscribeItem, _>(stream))
             })
         });
     }

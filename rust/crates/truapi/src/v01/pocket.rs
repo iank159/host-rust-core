@@ -38,23 +38,3 @@ pub enum HostPocketRemoveCardError {
         reason: String,
     },
 }
-
-/// An action the user triggered on one of the calling product's card faces.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct HostPocketActionSubscribeItem {
-    /// Card whose face carried the action.
-    pub card_id: String,
-    /// `Button.click_action` or `TextField.value_change_action` from the face tree.
-    pub action_id: String,
-    /// Optional additional data, such as the new text-field value.
-    pub payload: Option<Vec<u8>>,
-}
-
-/// Render work sent by the host while a card's face is on screen.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct ProductPocketCardRenderRequest {
-    /// Card whose face to stream.
-    pub card_id: String,
-}
