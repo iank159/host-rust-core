@@ -3,17 +3,17 @@
 //!
 //! For each method the emitter produces an `on_request` (or
 //! `on_subscription`) registration that:
-//! 1. SCALE-decodes the versioned request wrapper directly from the wire
-//!    bytes (the wrapper's own variant tag carries its version — there is no
-//!    outer envelope).
+//! 1. Reconstructs the versioned request wrapper from the frame's `version`
+//!    byte and the payload bytes, which carry no version tag of their own.
 //! 2. Calls the host trait method (which receives the wrapper directly
 //!    and matches `_::V1(inner)` internally).
-//! 3. SCALE-encodes the versioned response wrapper back onto the wire.
+//! 3. Encodes the versioned response wrapper back onto the wire, again
+//!    without its version tag: the frame header states it once.
 //!
-//! Which leg of the exchange a frame carries (request/response, or a
-//! subscription's start/receive/interrupt/stop) is the outer wire's own
-//! `message_type` byte, addressed alongside `(trait, method)` by the
-//! framework — this module never encodes or matches on it.
+//! A frame's version and which leg of the exchange it carries (request/
+//! response, or a subscription's start/receive/interrupt/stop) are both outer
+//! wire bytes, addressed alongside `(trait, method)` by the framework — this
+//! module reads `version` but never encodes or matches on `message_type`.
 //!
 //! The generated file expects to live inside a `truapi-server` crate
 //! and references `crate::dispatcher::Dispatcher`. The codegen itself
@@ -191,7 +191,8 @@ fn write_host_initiated_callers(
                 ) -> truapi::Subscription<Result<{item_path}, truapi::latest::GenericError>> {{
                     subscriptions.start(
                         wire_table::{ids},
-                        parity_scale_codec::Encode::encode(&request),
+                        truapi::versioned::Versioned::version(&request),
+                        encode_without_version(&request),
                         transport,
                     )
                 }}
@@ -344,6 +345,18 @@ impl MethodEmission {
             .as_ref()
             .map(|name| format!("versioned::{module}::{name}"));
         let response_ty = response_path.as_deref().unwrap_or("()");
+        // Only the error side of a unit-payload response can carry a version
+        // tag, so it gets its own encoder.
+        let response_encode = if response_path.is_some() {
+            "encode_response_without_version"
+        } else {
+            "encode_unit_response_without_version"
+        };
+        let version_of = if response_path.is_some() {
+            "response_version"
+        } else {
+            "unit_response_version"
+        };
 
         writeln!(out, "    {{").unwrap();
         self.write_execution_binding(out);
@@ -353,7 +366,7 @@ impl MethodEmission {
             &formatdoc! {
                 r#"
                 let host = {host_expr};
-                dispatcher.on_request(wire_table::{ids}, move |request_id: String, bytes: Vec<u8>| {{
+                dispatcher.on_request(wire_table::{ids}, move |request_id: String, version: u8, bytes: Vec<u8>| {{
                     let host = host.clone();
                     Box::pin(async move {{
                 "#
@@ -365,16 +378,17 @@ impl MethodEmission {
             16,
             &formatdoc! {
                 r#"
-                let request: {request_path} = match Decode::decode(&mut &bytes[..]) {{
+                // The version tag lives in the frame header, not the payload.
+                let request: {request_path} = match decode_with_version(version, &bytes) {{
                     Ok(request) => request,
                     Err(err) => {{
                         let error: truapi::CallError<{error_path}> =
                             truapi::CallError::MalformedFrame {{ reason: err.to_string() }};
                         let result: Result<{response_ty}, truapi::CallError<{error_path}>> = Err(error);
-                        return Ok(result.encode());
+                        return Ok(({version_of}(&result, version), {response_encode}(&result)));
                     }}
                 }};
-                let target_version = request.version();
+                let target_version = version;
                 let cx = CallContext::with_request_id(request_id.clone());
                 "#
             },
@@ -389,7 +403,7 @@ impl MethodEmission {
                     if !execution_allowed {{
                         let error: truapi::CallError<{error_path}> = truapi::CallError::Denied;
                         let result: Result<{response_ty}, truapi::CallError<{error_path}>> = Err(error);
-                        return Ok(result.encode());
+                        return Ok(({version_of}(&result, version), {response_encode}(&result)));
                     }}
                     "#
                 },
@@ -411,7 +425,10 @@ impl MethodEmission {
                                 )),
                                 Err(err) => Err(downgrade_call_error(err, target_version)),
                             }};
-                        Ok(result.encode())
+                        Ok((
+                            response_version(&result, version),
+                            encode_response_without_version(&result),
+                        ))
                         "#
                     },
                 );
@@ -426,7 +443,10 @@ impl MethodEmission {
                             Ok(()) => Ok(()),
                             Err(err) => Err(downgrade_call_error(err, target_version)),
                         }};
-                        Ok(result.encode())
+                        Ok((
+                            unit_response_version(&result, version),
+                            encode_unit_response_without_version(&result),
+                        ))
                         "#
                     },
                 );
@@ -493,6 +513,26 @@ impl MethodEmission {
             "truapi::latest::GenericError".to_string()
         };
 
+        // A `Start` payload is the request wrapper minus its version tag, which
+        // the frame header carries. A paramless start has an empty payload and
+        // no wrapper to reconstruct, so it decodes as the unit type.
+        let start_decode = if has_request {
+            "decode_with_version(version, &bytes)".to_string()
+        } else {
+            "Decode::decode(&mut &bytes[..])".to_string()
+        };
+        // Only a result subscription's error is a versioned wrapper with a tag
+        // to strip; a plain subscription's `GenericError` carries none.
+        // A result subscription's error wrapper is versioned and reports its
+        // own version; a plain subscription's `GenericError` is not, so its
+        // interrupt answers in the version the start asked in.
+        let interrupt_answer = if is_result_sub {
+            "{ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) }"
+                .to_string()
+        } else {
+            "(version, Some(error).encode())".to_string()
+        };
+
         writeln!(out, "    {{").unwrap();
         self.write_execution_binding(out);
         write_indented(
@@ -501,7 +541,7 @@ impl MethodEmission {
             &formatdoc! {
                 r#"
                 let host = {host_expr};
-                dispatcher.on_subscription(wire_table::{ids}, move |request_id: String, bytes: Vec<u8>| {{
+                dispatcher.on_subscription(wire_table::{ids}, move |request_id: String, version: u8, bytes: Vec<u8>| {{
                     let host = host.clone();
                     Box::pin(async move {{
                 "#
@@ -513,33 +553,21 @@ impl MethodEmission {
             16,
             &formatdoc! {
                 r#"
-                let {request_binding}: {start_ty} = match Decode::decode(&mut &bytes[..]) {{
+                let {request_binding}: {start_ty} = match {start_decode} {{
                     Ok(request) => request,
                     Err(err) => {{
                         let error: truapi::CallError<{error_ty}> =
                             truapi::CallError::MalformedFrame {{ reason: err.to_string() }};
-                        return Err(Some(error).encode());
+                        return Err({interrupt_answer});
                     }}
                 }};
                 "#
             },
         );
 
-        if has_request {
-            writeln!(
-                out,
-                "                let target_version = request.version();"
-            )
-            .unwrap();
-        } else {
-            write_indented(
-                out,
-                16,
-                &format!(
-                    "let target_version = <{item_path} as truapi::versioned::Versioned>::LATEST;\n"
-                ),
-            );
-        }
+        // The frame header states the version for every leg, including a
+        // paramless start whose payload is empty.
+        write_indented(out, 16, "let target_version = version;\n");
         write_indented(
             out,
             16,
@@ -554,7 +582,7 @@ impl MethodEmission {
                     r#"
                     if !execution_allowed {{
                         let error: truapi::CallError<{error_ty}> = truapi::CallError::Denied;
-                        return Err(Some(error).encode());
+                        return Err({interrupt_answer});
                     }}
                     "#
                 },
@@ -573,7 +601,7 @@ impl MethodEmission {
                         Ok(sub) => sub,
                         Err(err) => {{
                             let error = downgrade_call_error(err, target_version);
-                            return Err(Some(error).encode());
+                            return Err({interrupt_answer});
                         }}
                     }};
                     "#
@@ -749,11 +777,15 @@ fn write_imports(out: &mut String, traits: &[&TraitDef]) {
         out,
         r#"
         }};
-        use truapi::versioned::{{self, Versioned}};
+        use truapi::versioned::{{self}};
         use truapi_platform::ProductExecutionKind;
 
         use crate::dispatcher::Dispatcher;
-        use crate::frame::downgrade_call_error;
+        use crate::frame::{{
+            decode_with_version, downgrade_call_error, encode_interrupt_without_version,
+            encode_response_without_version, encode_unit_response_without_version,
+            encode_without_version, interrupt_version, response_version, unit_response_version,
+        }};
         use crate::generated::wire_table;
         use crate::subscription::{{HostInitiatedSubscriptionManager, subscription_stream}};
         use crate::transport::Transport;

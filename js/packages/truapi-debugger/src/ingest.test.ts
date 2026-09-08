@@ -79,6 +79,7 @@ function envelope(
     payload: {
       traitId: Math.floor(frameId / 256),
       methodId: frameId % 256,
+      version: 1,
       messageType,
       value: innerValue,
     },

@@ -28,6 +28,7 @@ function frame(
     requestId: "req-1",
     frameId,
     messageType: 0,
+    version: 1,
     role,
     byteLength: 8,
     timestamp,

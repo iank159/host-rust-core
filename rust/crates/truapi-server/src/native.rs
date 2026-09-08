@@ -1742,6 +1742,7 @@ impl truapi_platform::ChatPlatform for ChatCallbackPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::{encode_response_without_version, encode_without_version};
     use truapi::Bytes32;
     use truapi::v01::LegacyAccountTxPayload;
     use truapi_platform::CreateTransactionReview;
@@ -3322,15 +3323,17 @@ mod tests {
         let (feature_response, permission_response) = rt.block_on(async {
             let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("dial");
 
-            let permission_value = truapi::versioned::permissions::HostDevicePermissionRequest::V1(
-                v01::HostDevicePermissionRequest::Camera,
-            )
-            .encode();
+            let permission_value = encode_without_version(
+                &truapi::versioned::permissions::HostDevicePermissionRequest::V1(
+                    v01::HostDevicePermissionRequest::Camera,
+                ),
+            );
             let permission_frame = ProtocolMessage {
                 request_id: "p:permission".into(),
                 payload: Payload {
                     trait_id: permission_ids.trait_id,
                     method_id: permission_ids.method_id,
+                    version: 1,
                     message_type: crate::frame::MESSAGE_TYPE_REQUEST,
                     value: permission_value,
                 },
@@ -3351,17 +3354,19 @@ mod tests {
                 "permission callback was not invoked"
             );
 
-            let feature_value = truapi::versioned::system::HostFeatureSupportedRequest::V1(
-                v01::HostFeatureSupportedRequest::Chain {
-                    genesis_hash: vec![0u8; 32],
-                },
-            )
-            .encode();
+            let feature_value = encode_without_version(
+                &truapi::versioned::system::HostFeatureSupportedRequest::V1(
+                    v01::HostFeatureSupportedRequest::Chain {
+                        genesis_hash: vec![0u8; 32],
+                    },
+                ),
+            );
             let feature_frame = ProtocolMessage {
                 request_id: "p:feature".into(),
                 payload: Payload {
                     trait_id: feature_ids.trait_id,
                     method_id: feature_ids.method_id,
+                    version: 1,
                     message_type: crate::frame::MESSAGE_TYPE_REQUEST,
                     value: feature_value,
                 },
@@ -3438,7 +3443,7 @@ mod tests {
         );
         assert_eq!(
             permission_response.payload.value,
-            expected_permission.encode()
+            encode_response_without_version(&expected_permission)
         );
 
         execution.stop_ws_bridge();

@@ -180,6 +180,7 @@ impl Transport for ResponseTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::{encode_response_without_version, encode_without_version};
     use parity_scale_codec::Encode;
     use truapi::v01;
 
@@ -199,12 +200,15 @@ mod tests {
             genesis_hash: vec![0u8; 32],
         };
         let ids = request_ids("system_feature_supported").expect("known request method");
-        let value = truapi::versioned::system::HostFeatureSupportedRequest::V1(request).encode();
+        let value = encode_without_version(
+            &truapi::versioned::system::HostFeatureSupportedRequest::V1(request),
+        );
         let frame = ProtocolMessage {
             request_id: "p:1".into(),
             payload: Payload {
                 trait_id: ids.trait_id,
                 method_id: ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_REQUEST,
                 value,
             },
@@ -226,7 +230,10 @@ mod tests {
         > = Ok(truapi::versioned::system::HostFeatureSupportedResponse::V1(
             v01::HostFeatureSupportedResponse { supported: true },
         ));
-        assert_eq!(response.payload.value, expected.encode());
+        assert_eq!(
+            response.payload.value,
+            encode_response_without_version(&expected)
+        );
     }
 
     /// Drive a request frame through `TrUApiCore::receive_from_product` and
@@ -242,6 +249,7 @@ mod tests {
             payload: Payload {
                 trait_id: ids.trait_id,
                 method_id: ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_REQUEST,
                 value: request_value,
             },
@@ -279,7 +287,9 @@ mod tests {
         let payload = run_request(
             &core,
             "local_storage_read",
-            truapi::versioned::local_storage::HostLocalStorageReadRequest::V1(request).encode(),
+            encode_without_version(
+                &truapi::versioned::local_storage::HostLocalStorageReadRequest::V1(request),
+            ),
         );
         let expected: Result<
             truapi::versioned::local_storage::HostLocalStorageReadResponse,
@@ -289,7 +299,7 @@ mod tests {
                 v01::HostLocalStorageReadResponse { value: None },
             ),
         );
-        assert_eq!(payload, expected.encode());
+        assert_eq!(payload, encode_response_without_version(&expected));
     }
 
     #[test]
@@ -302,13 +312,15 @@ mod tests {
         let payload = run_request(
             &core,
             "local_storage_write",
-            truapi::versioned::local_storage::HostLocalStorageWriteRequest::V1(request).encode(),
+            encode_without_version(
+                &truapi::versioned::local_storage::HostLocalStorageWriteRequest::V1(request),
+            ),
         );
         let expected: Result<
             truapi::versioned::local_storage::HostLocalStorageWriteResponse,
             truapi::CallError<truapi::versioned::local_storage::HostLocalStorageWriteError>,
         > = Ok(truapi::versioned::local_storage::HostLocalStorageWriteResponse::V1);
-        assert_eq!(payload, expected.encode());
+        assert_eq!(payload, encode_response_without_version(&expected));
     }
 
     #[test]
@@ -318,13 +330,15 @@ mod tests {
         let payload = run_request(
             &core,
             "local_storage_clear",
-            truapi::versioned::local_storage::HostLocalStorageClearRequest::V1(request).encode(),
+            encode_without_version(
+                &truapi::versioned::local_storage::HostLocalStorageClearRequest::V1(request),
+            ),
         );
         let expected: Result<
             truapi::versioned::local_storage::HostLocalStorageClearResponse,
             truapi::CallError<truapi::versioned::local_storage::HostLocalStorageClearError>,
         > = Ok(truapi::versioned::local_storage::HostLocalStorageClearResponse::V1);
-        assert_eq!(payload, expected.encode());
+        assert_eq!(payload, encode_response_without_version(&expected));
     }
 
     #[test]
@@ -338,7 +352,9 @@ mod tests {
         let payload = run_request(
             &core,
             "notifications_send_push_notification",
-            truapi::versioned::notifications::HostPushNotificationRequest::V1(request).encode(),
+            encode_without_version(
+                &truapi::versioned::notifications::HostPushNotificationRequest::V1(request),
+            ),
         );
         let expected: Result<
             truapi::versioned::notifications::HostPushNotificationResponse,
@@ -348,7 +364,7 @@ mod tests {
                 v01::HostPushNotificationResponse { id: 0 },
             ),
         );
-        assert_eq!(payload, expected.encode());
+        assert_eq!(payload, encode_response_without_version(&expected));
     }
 
     #[test]
@@ -360,7 +376,9 @@ mod tests {
         let payload = run_request(
             &core,
             "permissions_request_remote_permission",
-            truapi::versioned::permissions::RemotePermissionRequest::V1(request).encode(),
+            encode_without_version(
+                &truapi::versioned::permissions::RemotePermissionRequest::V1(request),
+            ),
         );
         // Stub permissions grants every request.
         let expected: Result<
@@ -371,7 +389,7 @@ mod tests {
                 v01::RemotePermissionResponse { granted: true },
             ),
         );
-        assert_eq!(payload, expected.encode());
+        assert_eq!(payload, encode_response_without_version(&expected));
     }
 
     /// `connection_status_subscribe` produces a stream whose first item is
@@ -408,6 +426,7 @@ mod tests {
             payload: Payload {
                 trait_id: sub_ids.trait_id,
                 method_id: sub_ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_START,
                 // No request wrapper for this method: an empty Start payload.
                 value: Vec::new(),
@@ -436,10 +455,11 @@ mod tests {
             first.payload.message_type,
             crate::frame::MESSAGE_TYPE_RECEIVE
         );
-        let expected = truapi::versioned::account::HostAccountConnectionStatusSubscribeItem::V1(
-            v01::HostAccountConnectionStatusSubscribeItem::Disconnected,
-        )
-        .encode();
+        let expected = encode_without_version(
+            &truapi::versioned::account::HostAccountConnectionStatusSubscribeItem::V1(
+                v01::HostAccountConnectionStatusSubscribeItem::Disconnected,
+            ),
+        );
         assert_eq!(first.payload.value, expected);
     }
 }

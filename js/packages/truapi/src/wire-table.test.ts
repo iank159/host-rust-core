@@ -28,14 +28,16 @@ function expectedWire(
     methodId: number,
     messageType: number,
     valueBytes: Uint8Array,
+    version = 1,
 ): Uint8Array {
     const idBytes = str.enc(reqId);
-    const out = new Uint8Array(idBytes.length + 3 + valueBytes.length);
+    const out = new Uint8Array(idBytes.length + 4 + valueBytes.length);
     out.set(idBytes, 0);
     out[idBytes.length] = traitId;
     out[idBytes.length + 1] = methodId;
-    out[idBytes.length + 2] = messageType;
-    out.set(valueBytes, idBytes.length + 3);
+    out[idBytes.length + 2] = version;
+    out[idBytes.length + 3] = messageType;
+    out.set(valueBytes, idBytes.length + 4);
     return out;
 }
 
@@ -82,6 +84,7 @@ describe("generated wire-table round-trip", () => {
                 payload: {
                     traitId,
                     methodId,
+                    version: 1,
                     messageType: MESSAGE_TYPE_REQUEST,
                     value: sentinel,
                 },
@@ -96,6 +99,7 @@ describe("generated wire-table round-trip", () => {
         expect(decoded.requestId).toBe(requestId);
         expect(decoded.payload.traitId).toBe(traitId);
         expect(decoded.payload.methodId).toBe(methodId);
+        expect(decoded.payload.version).toBe(1);
         expect(decoded.payload.messageType).toBe(MESSAGE_TYPE_REQUEST);
         expect(toHex(decoded.payload.value)).toBe(toHex(sentinel));
     });

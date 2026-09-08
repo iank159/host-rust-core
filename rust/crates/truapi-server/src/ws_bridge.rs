@@ -504,6 +504,7 @@ impl FrameSink for WsFrameSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::{encode_response_without_version, encode_without_version};
     use parity_scale_codec::Decode;
     use parity_scale_codec::Encode;
     use truapi::v01;
@@ -635,17 +636,19 @@ mod tests {
         let response_bytes = rt.block_on(async {
             let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.expect("dial");
 
-            let value = truapi::versioned::system::HostFeatureSupportedRequest::V1(
-                v01::HostFeatureSupportedRequest::Chain {
-                    genesis_hash: vec![0u8; 32],
-                },
-            )
-            .encode();
+            let value = encode_without_version(
+                &truapi::versioned::system::HostFeatureSupportedRequest::V1(
+                    v01::HostFeatureSupportedRequest::Chain {
+                        genesis_hash: vec![0u8; 32],
+                    },
+                ),
+            );
             let request_frame = ProtocolMessage {
                 request_id: "p:1".into(),
                 payload: Payload {
                     trait_id: ids.trait_id,
                     method_id: ids.method_id,
+                    version: 1,
                     message_type: crate::frame::MESSAGE_TYPE_REQUEST,
                     value,
                 },
@@ -679,7 +682,10 @@ mod tests {
         > = Ok(truapi::versioned::system::HostFeatureSupportedResponse::V1(
             v01::HostFeatureSupportedResponse { supported: true },
         ));
-        assert_eq!(response.payload.value, expected.encode());
+        assert_eq!(
+            response.payload.value,
+            encode_response_without_version(&expected)
+        );
 
         bridge.stop();
     }

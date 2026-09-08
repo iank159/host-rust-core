@@ -1496,6 +1496,7 @@ impl Transport for SinkTransport {
 mod tests {
     use super::*;
     use crate::frame::{Payload, ProtocolMessage, subscription_ids};
+    use crate::frame::{encode_response_without_version, encode_without_version};
     use crate::test_support::{StubPlatform, runtime_config, test_spawner, wait_until};
     use parity_scale_codec::Encode;
     use std::sync::atomic::Ordering;
@@ -1644,6 +1645,7 @@ mod tests {
             payload: Payload {
                 trait_id: ids.trait_id,
                 method_id: ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_START,
                 value: Vec::new(),
             },
@@ -1798,6 +1800,7 @@ mod tests {
             payload: Payload {
                 trait_id: ids.trait_id,
                 method_id: ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_START,
                 value: Vec::new(),
             },
@@ -1917,6 +1920,7 @@ mod tests {
             payload: Payload {
                 trait_id: ids.trait_id,
                 method_id: ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_START,
                 value: Vec::new(),
             },
@@ -1974,6 +1978,7 @@ mod tests {
             payload: Payload {
                 trait_id: ids.trait_id,
                 method_id: ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_START,
                 value: Vec::new(),
             },
@@ -2118,12 +2123,15 @@ mod tests {
             name: "Room".into(),
             icon: String::new(),
         };
-        let value = truapi::versioned::chat::HostChatCreateRoomRequest::V1(request).encode();
+        let value = encode_without_version(
+            &truapi::versioned::chat::HostChatCreateRoomRequest::V1(request),
+        );
         let frame = ProtocolMessage {
             request_id: "chat:1".into(),
             payload: Payload {
                 trait_id: ids.trait_id,
                 method_id: ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_REQUEST,
                 value,
             },
@@ -2144,7 +2152,10 @@ mod tests {
             truapi::versioned::chat::HostChatCreateRoomResponse,
             truapi::CallError<truapi::versioned::chat::HostChatCreateRoomError>,
         > = Err(truapi::CallError::Denied);
-        assert_eq!(response.payload.value, expected.encode());
+        assert_eq!(
+            response.payload.value,
+            encode_response_without_version(&expected)
+        );
     }
 
     #[test]
@@ -2164,12 +2175,15 @@ mod tests {
             name: "Bot".into(),
             icon: String::new(),
         };
-        let value = truapi::versioned::chat::HostChatRegisterBotRequest::V1(request).encode();
+        let value = encode_without_version(
+            &truapi::versioned::chat::HostChatRegisterBotRequest::V1(request),
+        );
         let frame = ProtocolMessage {
             request_id: "chat:bot".into(),
             payload: Payload {
                 trait_id: ids.trait_id,
                 method_id: ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_REQUEST,
                 value,
             },
@@ -2190,7 +2204,10 @@ mod tests {
             truapi::versioned::chat::HostChatRegisterBotResponse,
             truapi::CallError<truapi::versioned::chat::HostChatRegisterBotError>,
         > = Err(truapi::CallError::Denied);
-        assert_eq!(response.payload.value, expected.encode());
+        assert_eq!(
+            response.payload.value,
+            encode_response_without_version(&expected)
+        );
     }
 
     #[test]
@@ -2210,6 +2227,7 @@ mod tests {
             payload: Payload {
                 trait_id: ids.trait_id,
                 method_id: ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_START,
                 // No request wrapper for this method: an empty Start payload.
                 value: Vec::new(),
@@ -2256,6 +2274,7 @@ mod tests {
             payload: Payload {
                 trait_id: ids.trait_id,
                 method_id: ids.method_id,
+                version: 1,
                 message_type: crate::frame::MESSAGE_TYPE_START,
                 value: Vec::new(),
             },

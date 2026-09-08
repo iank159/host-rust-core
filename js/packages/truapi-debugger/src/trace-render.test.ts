@@ -59,6 +59,7 @@ function viewOf(
     requestId: "p:1",
     frameId,
     messageType: MESSAGE_TYPE[frameId] ?? 0,
+    version: 1,
     byteLength: 8,
     timestamp,
   }));

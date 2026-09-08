@@ -53,7 +53,10 @@ export interface FrameDecoderOptions {
    * Frame-id → messageType → decoder map. Defaults to the generated
    * {@link WIRE_DECODE_TABLE}; overridable for tests.
    */
-  decodeTable?: Record<number, Record<number, (payload: Uint8Array) => unknown>>;
+  decodeTable?: Record<
+    number,
+    Record<number, (payload: Uint8Array, version: number) => unknown>
+  >;
 }
 
 /** A gated per-frame value decoder for the drill-down detail path. */
@@ -98,7 +101,7 @@ export function createFrameDecoder(
     const decode = decodeTable[frame.frameId]?.[frame.messageType];
     if (!decode || !frame.bytes) return bytesFallback();
     try {
-      return { kind: "decoded", value: decode(frame.bytes) };
+      return { kind: "decoded", value: decode(frame.bytes, frame.version) };
     } catch {
       // A malformed or version-skewed payload must not break the drill-down;
       // fall back to the raw hex.

@@ -11,6 +11,7 @@ import {
   MESSAGE_TYPE_STOP,
   PROTOCOL_ERROR_METHOD_ID,
   PROTOCOL_ERROR_TRAIT_ID,
+  PROTOCOL_ERROR_VERSION,
   type HostInitiatedSubscriptionHandler,
   type MethodIds,
   type ObservableSource,
@@ -98,10 +99,12 @@ const HANDSHAKE_RESPONSE_CODEC = S.Result(
  * `Ok(HostHandshakeResponse::V1)`.
  */
 function encodeSuccessfulHandshakeResponse(): Uint8Array {
-  return HANDSHAKE_RESPONSE_CODEC.enc({
-    success: true,
-    value: { tag: "V1" },
-  });
+  return S.encodeResponseWithoutVersion(
+    HANDSHAKE_RESPONSE_CODEC.enc({
+      success: true,
+      value: { tag: "V1" },
+    }),
+  );
 }
 
 /**
@@ -110,16 +113,18 @@ function encodeSuccessfulHandshakeResponse(): Uint8Array {
  * UnsupportedProtocolVersion)))`.
  */
 function encodeUnsupportedHandshakeResponse(): Uint8Array {
-  return HANDSHAKE_RESPONSE_CODEC.enc({
-    success: false,
-    value: {
-      tag: "Domain",
+  return S.encodeResponseWithoutVersion(
+    HANDSHAKE_RESPONSE_CODEC.enc({
+      success: false,
       value: {
-        tag: "V1",
-        value: { tag: "UnsupportedProtocolVersion", value: undefined },
+        tag: "Domain",
+        value: {
+          tag: "V1",
+          value: { tag: "UnsupportedProtocolVersion", value: undefined },
+        },
       },
-    },
-  });
+    }),
+  );
 }
 
 /**
@@ -131,30 +136,26 @@ function pairKey(traitId: number, methodId: number): string {
 }
 
 /**
- * Decode `V1(UnsupportedMessage { trait_id, method_id })`. Codec 2 addresses a
- * frame by a pair, so the payload is four bytes: version index, error variant
- * index, then the trait and method of the frame the peer could not handle.
+ * Decode `UnsupportedMessage { trait_id, method_id }`. Codec 2 addresses a
+ * frame by a pair, so the payload is three bytes: the error variant index,
+ * then the trait and method of the frame the peer could not handle. Its
+ * version is the frame's own `version` byte, as for every other payload.
  */
 function decodeUnsupportedMessage(payload: Uint8Array): {
   traitId: number;
   methodId: number;
 } {
-  if (payload.length !== 4) {
+  if (payload.length !== 3) {
     throw new Error(
-      `Malformed protocol error payload: expected 4 bytes, received ${payload.length}`,
+      `Malformed protocol error payload: expected 3 bytes, received ${payload.length}`,
     );
   }
   if (payload[0] !== 0) {
     throw new Error(
-      `Malformed protocol error payload: unsupported version ${payload[0]}`,
+      `Malformed protocol error payload: unknown error discriminant ${payload[0]}`,
     );
   }
-  if (payload[1] !== 0) {
-    throw new Error(
-      `Malformed protocol error payload: unknown error discriminant ${payload[1]}`,
-    );
-  }
-  return { traitId: payload[2], methodId: payload[3] };
+  return { traitId: payload[1], methodId: payload[2] };
 }
 
 /**
@@ -172,7 +173,7 @@ export function createTransport(
     string,
     {
       ids: MethodIds;
-      resolve: (value: Uint8Array) => void;
+      resolve: (value: Uint8Array, version: number) => void;
       resolveUnsupported: () => void;
       reject: (error: Error) => void;
     }
@@ -181,15 +182,20 @@ export function createTransport(
     string,
     {
       ids: MethodIds;
-      onReceive: (payload: Uint8Array) => void;
-      onInterrupt?: (payload: Uint8Array) => void;
+      onReceive: (payload: Uint8Array, version: number) => void;
+      onInterrupt?: (payload: Uint8Array, version: number) => void;
       onClose?: (error: Error) => void;
     }
   >();
-  type BufferedHostStart = { requestId: string; payload: Uint8Array };
+  type BufferedHostStart = {
+    requestId: string;
+    payload: Uint8Array;
+    version: number;
+  };
   type HostRoute = {
     ids: MethodIds;
-    decodeRequest: (payload: Uint8Array) => unknown;
+    version: number;
+    decodeRequest: (payload: Uint8Array, version: number) => unknown;
     encodeItem: (item: unknown) => Uint8Array;
     interruptPayload: Uint8Array;
     bufferCapacity: number;
@@ -315,7 +321,9 @@ export function createTransport(
       // unsupported-version answer rather than a raw SCALE error.
       let response: Uint8Array;
       try {
-        const request = T.VersionedHostHandshakeRequest.dec(payload.value);
+        const request = T.VersionedHostHandshakeRequest.dec(
+          S.decodeWithVersion(payload.version, payload.value),
+        );
         const requestedCodecVersion = request.value.codecVersion;
         response =
           requestedCodecVersion === codecVersion
@@ -335,6 +343,7 @@ export function createTransport(
           payload: {
             traitId: W.SYSTEM_HANDSHAKE.trait,
             methodId: W.SYSTEM_HANDSHAKE.method,
+            version: payload.version,
             messageType: MESSAGE_TYPE_RESPONSE,
             value: response,
           },
@@ -350,7 +359,7 @@ export function createTransport(
     );
     if (hostRoute) {
       if (payload.messageType === MESSAGE_TYPE_START) {
-        startHostSubscription(hostRoute, requestId, payload.value);
+        startHostSubscription(hostRoute, requestId, payload.value, payload.version);
       } else if (payload.messageType === MESSAGE_TYPE_STOP) {
         const bufferedIndex = hostRoute.buffered.findIndex(
           (start) => start.requestId === requestId,
@@ -388,7 +397,7 @@ export function createTransport(
       } else {
         pending.delete(requestId);
         try {
-          p.resolve(payload.value);
+          p.resolve(payload.value, payload.version);
         } catch (error) {
           p.reject(toError(error));
         }
@@ -404,7 +413,7 @@ export function createTransport(
         payload.messageType === MESSAGE_TYPE_RECEIVE
       ) {
         try {
-          subscription.onReceive(payload.value);
+          subscription.onReceive(payload.value, payload.version);
         } catch (error) {
           // A consumer-side decode/handler error must not tear down the
           // provider's message loop and silently break every other
@@ -419,7 +428,7 @@ export function createTransport(
         payload.messageType === MESSAGE_TYPE_INTERRUPT
       ) {
         subscriptions.delete(requestId);
-        subscription.onInterrupt?.(payload.value);
+        subscription.onInterrupt?.(payload.value, payload.version);
       } else {
         reportProtocolViolation(
           `ignoring frame for subscription ${requestId}: got discriminant (${payload.traitId}, ${payload.methodId}) messageType ${payload.messageType}, expected receive (${MESSAGE_TYPE_RECEIVE}) or interrupt (${MESSAGE_TYPE_INTERRUPT}) on (${subscription.ids.trait}, ${subscription.ids.method})`,
@@ -464,8 +473,9 @@ export function createTransport(
         payload: {
           traitId: PROTOCOL_ERROR_TRAIT_ID,
           methodId: PROTOCOL_ERROR_METHOD_ID,
+          version: PROTOCOL_ERROR_VERSION,
           messageType: MESSAGE_TYPE_RESPONSE,
-          value: new Uint8Array([0, 0, payload.traitId, payload.methodId]),
+          value: new Uint8Array([0, payload.traitId, payload.methodId]),
         },
       });
     } catch {
@@ -507,6 +517,7 @@ export function createTransport(
         payload: {
           traitId: route.ids.trait,
           methodId: route.ids.method,
+          version: route.version,
           messageType: MESSAGE_TYPE_INTERRUPT,
           value: route.interruptPayload,
         },
@@ -520,6 +531,7 @@ export function createTransport(
     route: HostRoute,
     requestId: string,
     payload: Uint8Array,
+    version: number,
   ) {
     const previous = route.instances.get(requestId);
     if (previous) {
@@ -533,13 +545,13 @@ export function createTransport(
         const evicted = route.buffered.shift();
         if (evicted) interruptHostSubscription(route, evicted.requestId);
       }
-      route.buffered.push({ requestId, payload });
+      route.buffered.push({ requestId, payload, version });
       return;
     }
 
     let source: ObservableSource<unknown>;
     try {
-      source = handler(route.decodeRequest(payload));
+      source = handler(route.decodeRequest(payload, version));
     } catch {
       interruptHostSubscription(route, requestId);
       return;
@@ -565,6 +577,7 @@ export function createTransport(
               payload: {
                 traitId: route.ids.trait,
                 methodId: route.ids.method,
+                version: route.version,
                 messageType: MESSAGE_TYPE_RECEIVE,
                 value: route.encodeItem(item),
               },
@@ -595,6 +608,7 @@ export function createTransport(
     request<Ok, Err>({
       ids,
       payload,
+      version,
       decodeResponse,
     }: RequestParams<Ok, Err>): ResultAsync<Ok, Err | UnsupportedCallError> {
       const promise = new Promise<
@@ -630,9 +644,9 @@ export function createTransport(
 
         pending.set(requestId, {
           ids,
-          resolve: (response) => {
+          resolve: (response, responseVersion) => {
             clearTimeout(deadline);
-            resolve(decodeResponse(response));
+            resolve(decodeResponse(response, responseVersion));
           },
           // Clears the deadline like the other two: an explicit `Unsupported`
           // settles the call, and leaving the timer armed holds the event loop
@@ -655,6 +669,7 @@ export function createTransport(
             payload: {
               traitId: ids.trait,
               methodId: ids.method,
+              version,
               messageType: MESSAGE_TYPE_REQUEST,
               value: payload,
             },
@@ -676,6 +691,7 @@ export function createTransport(
     subscribeRaw({
       ids,
       payload,
+      version,
       onReceive,
       onInterrupt,
       onClose,
@@ -698,6 +714,7 @@ export function createTransport(
           payload: {
             traitId: ids.trait,
             methodId: ids.method,
+            version,
             messageType: MESSAGE_TYPE_START,
             value: payload,
           },
@@ -720,6 +737,7 @@ export function createTransport(
               payload: {
                 traitId: ids.trait,
                 methodId: ids.method,
+                version,
                 messageType: MESSAGE_TYPE_STOP,
                 value: STOP_FRAME,
               },
@@ -732,6 +750,7 @@ export function createTransport(
     },
     registerHostInitiatedSubscription<Request, Item>({
       ids,
+      version,
       decodeRequest,
       encodeItem,
       interruptPayload,
@@ -745,6 +764,7 @@ export function createTransport(
       }
       const route: HostRoute = {
         ids,
+        version,
         decodeRequest: decodeRequest as (payload: Uint8Array) => unknown,
         encodeItem: encodeItem as (item: unknown) => Uint8Array,
         interruptPayload,
@@ -760,7 +780,12 @@ export function createTransport(
           ) => ObservableSource<unknown>;
           route.handler = installed;
           for (const start of route.buffered.splice(0)) {
-            startHostSubscription(route, start.requestId, start.payload);
+            startHostSubscription(
+              route,
+              start.requestId,
+              start.payload,
+              start.version,
+            );
           }
           return {
             unsubscribe() {

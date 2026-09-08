@@ -68,15 +68,17 @@ fn request_camera(status: Option<Arc<dyn PermissionStatusHost>>) -> bool {
     let product_runtime = runtime.product_runtime(product, sink.clone());
 
     let ids = request_ids("permissions_request_device_permission").expect("known request method");
-    let value = truapi::versioned::permissions::HostDevicePermissionRequest::V1(
-        v01::HostDevicePermissionRequest::Camera,
-    )
-    .encode();
+    let value = truapi_server::frame::encode_without_version(
+        &truapi::versioned::permissions::HostDevicePermissionRequest::V1(
+            v01::HostDevicePermissionRequest::Camera,
+        ),
+    );
     let frame = ProtocolMessage {
         request_id: "p:1".into(),
         payload: Payload {
             trait_id: ids.trait_id,
             method_id: ids.method_id,
+            version: 1,
             message_type: truapi_server::frame::MESSAGE_TYPE_REQUEST,
             value,
         },
@@ -108,7 +110,9 @@ fn request_camera(status: Option<Arc<dyn PermissionStatusHost>>) -> bool {
                 v01::HostDevicePermissionResponse { granted },
             ),
         );
-        if response.payload.value == expected.encode() {
+        if response.payload.value
+            == truapi_server::frame::encode_response_without_version(&expected)
+        {
             return granted;
         }
     }

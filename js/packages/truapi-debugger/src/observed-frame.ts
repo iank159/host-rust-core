@@ -83,6 +83,12 @@ export interface ObservedFrame {
    * that failed to decode at all (the `"malformed"` sentinel).
    */
   messageType: number;
+  /**
+   * The wire's own version byte (`Payload.version`): the protocol version this
+   * frame's payload speaks. Payloads carry no version tag of their own, so a
+   * decoder needs this to read one.
+   **/
+  version: number;
   /** Best-effort lifecycle role inferred from the frame id and `messageType`. */
   role: FrameRole;
   /** Encoded SCALE payload length in bytes. */

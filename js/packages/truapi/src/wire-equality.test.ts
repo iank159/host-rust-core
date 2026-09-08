@@ -28,14 +28,16 @@ function expectedWire(
     methodId: number,
     messageType: number,
     valueBytes: Uint8Array,
+    version = 1,
 ): Uint8Array {
     const reqId = str.enc("p:1");
-    const out = new Uint8Array(reqId.length + 3 + valueBytes.length);
+    const out = new Uint8Array(reqId.length + 4 + valueBytes.length);
     out.set(reqId, 0);
     out[reqId.length] = traitId;
     out[reqId.length + 1] = methodId;
-    out[reqId.length + 2] = messageType;
-    out.set(valueBytes, reqId.length + 3);
+    out[reqId.length + 2] = version;
+    out[reqId.length + 3] = messageType;
+    out.set(valueBytes, reqId.length + 4);
     return out;
 }
 
@@ -50,7 +52,7 @@ function unwrap<T>(result: Result<T, { message: string }>, message: string): T {
 }
 
 describe("encodeWireMessage / decodeWireMessage wire equality", () => {
-    it("pins the handshake frame end-to-end: requestId + 0x01 0x00 0x00 + payload", () => {
+    it("pins the handshake frame end-to-end: requestId + 0x01 0x00 0x01 0x00 + payload", () => {
         // Trait 1 = system, method 0 = handshake request. The handshake is the
         // first frame either side sends, so its envelope must never drift.
         expect(W.SYSTEM_HANDSHAKE.trait).toBe(1);
@@ -63,6 +65,7 @@ describe("encodeWireMessage / decodeWireMessage wire equality", () => {
                 payload: {
                     traitId: W.SYSTEM_HANDSHAKE.trait,
                     methodId: W.SYSTEM_HANDSHAKE.method,
+                    version: 1,
                     messageType: MESSAGE_TYPE_REQUEST,
                     value: inner,
                 },
@@ -70,8 +73,8 @@ describe("encodeWireMessage / decodeWireMessage wire equality", () => {
             "encode handshake_request",
         );
         // [0c 70 3a 31] "p:1" + [01] system trait + [00] handshake request
-        // + [00] messageType=Request + payload.
-        expect(toHex(encoded)).toBe("0c703a310100000002");
+        // + [01] version + [00] messageType=Request + payload.
+        expect(toHex(encoded)).toBe("0c703a3101000100" + "0002");
         expect(toHex(encoded)).toBe(toHex(expectedWire(1, 0, MESSAGE_TYPE_REQUEST, inner)));
 
         const decoded = unwrap(decodeWireMessage(encoded), "decode handshake_request");
@@ -103,6 +106,7 @@ describe("encodeWireMessage / decodeWireMessage wire equality", () => {
                 payload: {
                     traitId: W.ACCOUNT_GET_ACCOUNT.trait,
                     methodId: W.ACCOUNT_GET_ACCOUNT.method,
+                    version: 1,
                     messageType: MESSAGE_TYPE_REQUEST,
                     value: inner,
                 },
@@ -119,7 +123,7 @@ describe("encodeWireMessage / decodeWireMessage wire equality", () => {
         // Byte-for-byte identical to the pre-messageType-byte fixture: the
         // wrapper's own V1 tag now sits where the old envelope's direction
         // tag used to, and both happen to be 0x00.
-        expect(toHex(encoded)).toBe("0c703a31020100000c666f6f0000000000");
+        expect(toHex(encoded)).toBe("0c703a3102010100" + "000c666f6f0000000000");
     });
 
     it("round-trips a local_storage_read frame through encode + decode", () => {
@@ -130,6 +134,7 @@ describe("encodeWireMessage / decodeWireMessage wire equality", () => {
                 payload: {
                     traitId: W.LOCAL_STORAGE_READ.trait,
                     methodId: W.LOCAL_STORAGE_READ.method,
+                    version: 1,
                     messageType: MESSAGE_TYPE_REQUEST,
                     value: inner,
                 },
@@ -150,6 +155,7 @@ describe("encodeWireMessage / decodeWireMessage wire equality", () => {
             payload: {
                 traitId: 256,
                 methodId: 0,
+                version: 1,
                 messageType: MESSAGE_TYPE_REQUEST,
                 value: new Uint8Array(),
             },
@@ -164,6 +170,7 @@ describe("encodeWireMessage / decodeWireMessage wire equality", () => {
             payload: {
                 traitId: 0,
                 methodId: 256,
+                version: 1,
                 messageType: MESSAGE_TYPE_REQUEST,
                 value: new Uint8Array(),
             },
@@ -178,6 +185,7 @@ describe("encodeWireMessage / decodeWireMessage wire equality", () => {
             payload: {
                 traitId: 0,
                 methodId: 0,
+                version: 1,
                 messageType: 256,
                 value: new Uint8Array(),
             },
@@ -203,12 +211,24 @@ describe("encodeWireMessage / decodeWireMessage wire equality", () => {
         expect(result._unsafeUnwrapErr().message).toMatch(/missing method discriminant byte/);
     });
 
-    it("rejects a truncated frame with a method byte but no message-type byte", () => {
+    it("rejects a truncated frame with a method byte but no version byte", () => {
         const reqId = str.enc("p:1");
         const truncated = new Uint8Array(reqId.length + 2);
         truncated.set(reqId, 0);
         truncated[reqId.length] = 0x00;
         truncated[reqId.length + 1] = 0x00;
+        const result = decodeWireMessage(truncated);
+        expect(result.isErr()).toBe(true);
+        expect(result._unsafeUnwrapErr().message).toMatch(/missing version byte/);
+    });
+
+    it("rejects a truncated frame with a version byte but no message-type byte", () => {
+        const reqId = str.enc("p:1");
+        const truncated = new Uint8Array(reqId.length + 3);
+        truncated.set(reqId, 0);
+        truncated[reqId.length] = 0x00;
+        truncated[reqId.length + 1] = 0x00;
+        truncated[reqId.length + 2] = 0x01;
         const result = decodeWireMessage(truncated);
         expect(result.isErr()).toBe(true);
         expect(result._unsafeUnwrapErr().message).toMatch(/missing message-type byte/);
@@ -225,6 +245,7 @@ describe("encodeWireMessage / decodeWireMessage wire equality", () => {
                 payload: {
                     traitId: W.ACCOUNT_GET_ACCOUNT.trait,
                     methodId: W.ACCOUNT_GET_ACCOUNT.method,
+                    version: 1,
                     messageType: MESSAGE_TYPE_REQUEST,
                     value: inner,
                 },
