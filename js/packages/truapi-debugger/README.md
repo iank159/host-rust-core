@@ -138,6 +138,28 @@ target are rejected — and `localhost` passes that check but resolves `::1` fir
 on macOS, while the server binds `127.0.0.1` alone. A native host then dials an
 address nothing is listening on and logs nothing.
 
+## Enable the dial in a web host
+
+A browser host reads its debugger URL from `localStorage`:
+
+```js
+localStorage.setItem("truapi:debugger", "ws://127.0.0.1:9231");
+```
+
+Two things have to hold for that key to be read at all:
+
+- **The bundle must be a development build.** The gate is the literal
+  `import.meta.env.DEV`, so a production bundle compiles the dial out and a stray
+  key does nothing. `vite build` defaults to production mode, so build the host
+  with `NODE_ENV=development` to keep the dial in.
+- **The key is per-origin and per-browser-profile.** A key set on
+  `http://localhost:5173` is invisible to a host served from any other origin,
+  and invisible to a different browser profile on the same origin.
+
+The host reports which of those failed rather than going quiet: `production-build`
+when the gate compiled the dial out, `production-build-switch-set` when the key is
+set but the gate is still off. Read the host console before suspecting the server.
+
 For the in-app mount, feed frames straight to the session:
 
 ```ts
