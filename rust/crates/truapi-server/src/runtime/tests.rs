@@ -55,7 +55,9 @@ use truapi::versioned::system::{
     HostNavigateToResponse,
 };
 use truapi::versioned::theme::HostThemeSubscribeItem;
-use truapi_platform::{AuthState, CoreStorageKey, PermissionAuthorizationRequest};
+use truapi_platform::{
+    AuthState, CoreStorage as PlatformCoreStorage, CoreStorageKey, PermissionAuthorizationRequest,
+};
 
 use super::*;
 use crate::host_logic::product_account::index_bytes;
@@ -225,10 +227,10 @@ fn a_read_naming_the_caller_in_another_spelling_is_still_its_own() {
 }
 
 #[test]
-fn a_foreign_read_is_refused_without_a_manifest_reader() {
-    // No manifest reader exists, so no grant can be established and every
-    // foreign read is refused. The refusal must be the dedicated variant,
-    // not a generic error a product would retry.
+fn a_foreign_read_is_refused_when_no_grant_can_be_established() {
+    // A host with no Asset Hub configured cannot resolve a manifest, so no
+    // grant exists and the read is refused. The refusal must be the
+    // dedicated variant, not a generic error a product would retry.
     let host = ProductRuntimeHost::new_compat(stub_platform(), test_spawner());
     assert_eq!(
         read_storage(&host, Some("wallet.dot"), "k").unwrap_err(),
@@ -254,6 +256,105 @@ fn an_unresolvable_product_is_refused_identically_to_an_ungranted_one() {
     assert_eq!(
         read_storage(&host, Some("wallet.dot"), "k").unwrap_err(),
         refusal
+    );
+}
+
+/// Seeds `owner`'s cached manifest, so a grant resolves without a chain.
+fn cache_manifest(platform: &StubPlatform, owner: &str, trusted: &str, age_secs: u64) {
+    let json = format!(
+        r#"{{"$v":1,"displayName":"D","description":"d",
+                "icon":{{"cid":"c","format":"png"}},"trustedProducts":{trusted}}}"#
+    );
+    let entry = CachedManifest {
+        fetched_at_secs: unix_time_secs()
+            .expect("clock is after the epoch")
+            .saturating_sub(age_secs),
+        json,
+    };
+    futures::executor::block_on(platform.write_core_storage(
+        CoreStorageKey::ProductManifest {
+            product_id: owner.to_string(),
+        },
+        entry.encode(),
+    ))
+    .expect("stub core storage accepts the entry");
+}
+
+#[test]
+fn a_cached_grant_reads_the_granting_products_storage() {
+    // The caller is `unknown.dot`, so the manifest names the bare label.
+    //
+    // Seeding only the target's namespace is what makes this a regression pin:
+    // keying the read off the caller instead would miss the value entirely.
+    let platform = stub_platform();
+    cache_manifest(&platform, "wallet.dot", r#"{"unknown":["storage"]}"#, 0);
+    platform.local_storage.lock().expect("mutex").insert(
+        ProductStorageKey::new("wallet.dot", "k")
+            .expect("the owner normalizes")
+            .encode(),
+        b"wallet's own value".to_vec(),
+    );
+    let host = ProductRuntimeHost::new_compat(platform, test_spawner());
+    let HostLocalStorageReadResponse::V2(v01::HostLocalStorageReadResponse { value }) =
+        read_storage(&host, Some("wallet.dot"), "k").expect("the grant admits the read")
+    else {
+        panic!("a v2 request answers with a v2 response");
+    };
+    assert_eq!(value.as_deref(), Some(&b"wallet's own value"[..]));
+}
+
+#[test]
+fn all_satisfies_a_storage_read() {
+    let platform = stub_platform();
+    cache_manifest(&platform, "wallet.dot", r#"{"unknown":["all"]}"#, 0);
+    let host = ProductRuntimeHost::new_compat(platform, test_spawner());
+    assert!(read_storage(&host, Some("wallet.dot"), "k").is_ok());
+}
+
+#[test]
+fn a_grant_to_another_product_does_not_admit_this_caller() {
+    let platform = stub_platform();
+    cache_manifest(&platform, "wallet.dot", r#"{"stash":["storage"]}"#, 0);
+    let host = ProductRuntimeHost::new_compat(platform, test_spawner());
+    assert!(read_storage(&host, Some("wallet.dot"), "k").is_err());
+}
+
+#[test]
+fn a_context_grant_does_not_open_storage() {
+    // Scopes are independent: `context` must leave storage refusing.
+    let platform = stub_platform();
+    cache_manifest(&platform, "wallet.dot", r#"{"unknown":["context"]}"#, 0);
+    let host = ProductRuntimeHost::new_compat(platform, test_spawner());
+    assert!(read_storage(&host, Some("wallet.dot"), "k").is_err());
+}
+
+#[test]
+fn a_cached_grant_stops_being_honoured_once_it_expires() {
+    // The lifetime is the revocation bound. Past it the entry is ignored,
+    // and with no Asset Hub to re-read from the grant is gone.
+    let platform = stub_platform();
+    cache_manifest(
+        &platform,
+        "wallet.dot",
+        r#"{"unknown":["storage"]}"#,
+        MANIFEST_TTL_SECS + 1,
+    );
+    let host = ProductRuntimeHost::new_compat(platform, test_spawner());
+    assert!(read_storage(&host, Some("wallet.dot"), "k").is_err());
+}
+
+#[test]
+fn a_cached_context_grant_lets_a_foreign_proof_through() {
+    // Reaches the session check rather than the cross-product refusal,
+    // which is how a granted proof differs from an ungranted one here.
+    let platform = stub_platform();
+    cache_manifest(&platform, "wallet.dot", r#"{"unknown":["context"]}"#, 0);
+    let host = ProductRuntimeHost::new_compat(platform, test_spawner());
+    assert_eq!(
+        proof_refusal(&host, "wallet.dot"),
+        Some(CallError::Domain(HostAccountCreateProofError::V1(
+            v01::HostAccountCreateProofError::Rejected
+        )))
     );
 }
 
@@ -297,9 +398,9 @@ fn a_proof_naming_the_caller_in_another_spelling_is_still_its_own() {
 }
 
 #[test]
-fn a_proof_against_a_foreign_key_is_refused_without_a_manifest_reader() {
-    // A foreign key needs the owning product's `context` grant. No manifest
-    // reader exists, so no grant can be established and the call is refused
+fn a_proof_against_a_foreign_key_is_refused_when_no_grant_can_be_established() {
+    // A foreign key needs the owning product's `context` grant. With no
+    // Asset Hub configured no manifest resolves, so the call is refused
     // before a session is ever consulted.
     let host = ProductRuntimeHost::new_compat(stub_platform(), test_spawner());
     assert_eq!(

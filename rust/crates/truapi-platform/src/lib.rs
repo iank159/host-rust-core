@@ -1311,6 +1311,16 @@ pub enum CoreStorageKey {
         /// Pairing peer's X25519 public key.
         peer_encryption_public_key: [u8; 32],
     },
+    /// Cached root manifest of one product, as published to dotNS.
+    ///
+    /// The value carries the manifest JSON alongside the time it was read. The
+    /// core honours it for a bounded lifetime, which is what makes a revoked
+    /// trust grant eventually take effect.
+    #[codec(index = 12)]
+    ProductManifest {
+        /// Product whose manifest was cached, normalized.
+        product_id: String,
+    },
 }
 
 /// Stable metadata describing one strictly decoded [`CoreStorageKey`].
@@ -1363,6 +1373,7 @@ pub fn describe_core_storage_key(
         CoreStorageKey::StatementRenewalTargets => ("StatementRenewalTargets", None),
         CoreStorageKey::DeviceEncryptionKey => ("DeviceEncryptionKey", None),
         CoreStorageKey::SsoResponderRequestLedger { .. } => ("SsoResponderRequestLedger", None),
+        CoreStorageKey::ProductManifest { product_id } => ("ProductManifest", Some(product_id)),
     };
     Ok(CoreStorageKeyDescription { kind, product_id })
 }

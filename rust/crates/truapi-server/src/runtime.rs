@@ -15,9 +15,11 @@ mod authority;
 pub(crate) mod bulletin_rpc;
 mod capabilities;
 mod chat;
+mod dotns_lookup;
 mod identity;
 pub(crate) mod login_failure;
 mod pairing_host;
+mod product_manifest;
 mod product_subtree;
 mod ring_vrf_registry;
 /// Role-neutral runtime services shared by product-facing runtimes.
@@ -47,6 +49,7 @@ use futures::{FutureExt, StreamExt, pin_mut};
 #[cfg(test)]
 use pairing_host::PairingHost;
 pub(crate) use pairing_host::PairingHost as PairingHostRole;
+use parity_scale_codec::{Decode, Encode};
 pub(crate) use services::RuntimeServices;
 #[cfg(not(target_arch = "wasm32"))]
 pub use signing_host::StatementRenewalTarget;
@@ -67,10 +70,11 @@ use truapi::versioned::chat::{
 use truapi::versioned::preimage::RemotePreimageSubmitError;
 use truapi::{CallContext, CallError, CancellationReason, Subscription, v01};
 use truapi_platform::{
-    AccountAccessReview, ChatFieldError, IdentityDisclosureReview, PermissionAuthorizationRequest,
-    PermissionAuthorizationStatus, Platform, ProductContext, ProductStorageKey, SessionUiInfo,
-    UserConfirmationReview, normalize_chat_identifier, normalize_product_identifier,
-    validate_chat_icon, validate_chat_message_content, validate_chat_name,
+    AccountAccessReview, ChatFieldError, CoreStorageKey, IdentityDisclosureReview,
+    PermissionAuthorizationRequest, PermissionAuthorizationStatus, Platform, ProductContext,
+    ProductStorageKey, SessionUiInfo, UserConfirmationReview, normalize_chat_identifier,
+    normalize_product_identifier, validate_chat_icon, validate_chat_message_content,
+    validate_chat_name,
 };
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
@@ -81,6 +85,7 @@ use crate::host_logic::permissions::PermissionsService;
 use crate::host_logic::product_account::{
     derivation_index_bytes, derive_product_public_key, public_key_from_address,
 };
+use crate::host_logic::product_manifest::{Granted, RootManifest, bare_product_label};
 use crate::host_logic::session::SessionInfo;
 #[cfg(test)]
 use crate::host_logic::session::SessionState;
@@ -224,6 +229,38 @@ where
 
 fn authority_cancellation_error(cx: &CallContext, reason: CancellationReason) -> AuthorityError {
     AuthorityError::Cancelled(AuthorityCancelError::new(cx.request_id(), reason))
+}
+
+/// How long a cached root manifest is honoured.
+///
+/// This is a revocation bound, not a performance knob: dotNS attaches no signal
+/// to a record edit, so a grant a publisher withdraws stays in force until the
+/// manifest is read again.
+const MANIFEST_TTL_SECS: u64 = 24 * 60 * 60;
+
+/// A cached root manifest and when it was read.
+///
+/// The document is stored verbatim rather than reduced to the grants this core
+/// reads today, so a later consumer needs no cache migration.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+struct CachedManifest {
+    /// Seconds since the Unix epoch at which the manifest was read.
+    fetched_at_secs: u64,
+    /// The manifest JSON exactly as published.
+    json: String,
+}
+
+/// Seconds since the Unix epoch, or `None` on a clock before it.
+fn unix_time_secs() -> Option<u64> {
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::time::{SystemTime, UNIX_EPOCH};
+    #[cfg(target_arch = "wasm32")]
+    use web_time::{SystemTime, UNIX_EPOCH};
+
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|since| since.as_secs())
 }
 
 /// A scope a publisher pre-approves for another product in the manifest's
@@ -464,15 +501,74 @@ impl ProductRuntimeHost {
 
     /// Scopes `target`'s published manifest grants the calling product.
     ///
-    /// Resolving a manifest is not implemented, so a product other than the
-    /// caller grants nothing and every cross-product access is refused.
-    ///
     /// A grant that cannot be established answers `false` whatever the reason —
     /// the product does not resolve, it published no manifest, the fetch failed,
     /// or the manifest names this caller with a narrower scope. Callers turn
     /// that into one refusal, so the outcome never reveals which of those it was.
-    async fn manifest_grants_scope(&self, _target: &str, _scope: GrantedScope) -> bool {
-        false
+    /// Failing closed also means an unreachable chain withdraws grants rather
+    /// than assuming them.
+    ///
+    /// A user's own denial is not consulted here because nothing prompts for
+    /// cross-product access yet; the check belongs with the prompt that creates
+    /// one.
+    async fn manifest_grants_scope(&self, target: &str, scope: GrantedScope) -> bool {
+        let Some(json) = self.root_manifest(target).await else {
+            return false;
+        };
+        let Ok(manifest) = RootManifest::parse(&json) else {
+            return false;
+        };
+        manifest.grants(
+            bare_product_label(&self.product_id()),
+            match scope {
+                GrantedScope::Storage => Granted::Storage,
+                GrantedScope::Context => Granted::Context,
+            },
+        )
+    }
+
+    /// `target`'s root manifest JSON, from cache when it is younger than
+    /// [`MANIFEST_TTL_SECS`] and from dotNS otherwise.
+    ///
+    /// A freshly read manifest is cached even though the caller may not be
+    /// granted anything by it: the document describes the product, not the
+    /// asker.
+    async fn root_manifest(&self, target: &str) -> Option<String> {
+        let key = CoreStorageKey::ProductManifest {
+            product_id: target.to_string(),
+        };
+        let now = unix_time_secs()?;
+        if let Ok(Some(bytes)) = self.platform.read_core_storage(key.clone()).await
+            && let Ok(cached) = CachedManifest::decode(&mut bytes.as_slice())
+            && now.saturating_sub(cached.fetched_at_secs) < MANIFEST_TTL_SECS
+        {
+            return Some(cached.json);
+        }
+
+        let genesis_hash = self.services.asset_hub_chain_genesis_hash()?;
+        let json =
+            match product_manifest::fetch_root_manifest(&self.services.chain, genesis_hash, target)
+                .await
+            {
+                Ok(Some(json)) => json,
+                Ok(None) => return None,
+                Err(reason) => {
+                    warn!(%target, %reason, "root manifest lookup failed");
+                    return None;
+                }
+            };
+        let _ = self
+            .platform
+            .write_core_storage(
+                key,
+                CachedManifest {
+                    fetched_at_secs: now,
+                    json: json.clone(),
+                }
+                .encode(),
+            )
+            .await;
+        Some(json)
     }
 
     fn normalize_product_account_id(
