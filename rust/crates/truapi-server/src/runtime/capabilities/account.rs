@@ -30,7 +30,7 @@ use crate::runtime::authority::{
     RegisterRingVrfKeyAuthorityRequest, RingVrfSignAuthorityRequest,
 };
 use crate::runtime::{
-    GrantedScope, ProductRuntimeHost, account_access_authorization, account_get_authority_error,
+    ProductRuntimeHost, account_access_authorization, account_get_authority_error,
     remote_authority_call, remote_authority_context, ring_vrf_alias_error, ring_vrf_list_error,
     ring_vrf_proof_error, ring_vrf_register_error, ring_vrf_sign_error, validate_vrf_transcript,
     vrf_call_error,
@@ -183,14 +183,7 @@ impl Account for ProductRuntimeHost {
                 },
             ))
         })?;
-        // Proving against another product's key uses that product's account and
-        // the identity derived from it, so it needs that product's `context`
-        // grant. One refusal covers every reason it is not held.
-        if self
-            .cross_product_scope_target(&key_handle.dot_ns_identifier, GrantedScope::Context)
-            .await
-            .is_none()
-        {
+        if key_handle.dot_ns_identifier != self.product_id() {
             return Err(CallError::Domain(HostAccountCreateProofError::V1(
                 v01::HostAccountCreateProofError::NotAllowlisted,
             )));
@@ -330,14 +323,7 @@ impl Account for ProductRuntimeHost {
                 v01::HostAccountRingVrfSignError::NotConnected,
             )));
         };
-        if self
-            .cross_product_scope_target(
-                &request.key_handle.dot_ns_identifier,
-                GrantedScope::Context,
-            )
-            .await
-            .is_none()
-        {
+        if request.key_handle.dot_ns_identifier != self.product_id() {
             return Err(CallError::Domain(HostAccountRingVrfSignError::V1(
                 v01::HostAccountRingVrfSignError::NotAllowlisted,
             )));

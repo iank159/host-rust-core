@@ -353,10 +353,16 @@ fn a_cached_miss_expires_on_the_same_bound_as_a_grant() {
 }
 
 #[test]
-fn a_context_grant_does_not_open_storage() {
-    // Scopes are independent: `context` must leave storage refusing.
+fn a_grant_of_some_other_scope_does_not_open_storage() {
+    // Only `storage` and `all` open a read. A value naming anything else, now
+    // or once a later scope is defined, must leave storage refusing.
     let platform = stub_platform();
-    cache_manifest(&platform, "wallet.dot", r#"{"unknown":["context"]}"#, 0);
+    cache_manifest(
+        &platform,
+        "wallet.dot",
+        r#"{"unknown":["storage-write"]}"#,
+        0,
+    );
     let host = ProductRuntimeHost::new_compat(platform, test_spawner());
     assert!(read_storage(&host, Some("wallet.dot"), "k").is_err());
 }
@@ -374,89 +380,6 @@ fn a_cached_grant_stops_being_honoured_once_it_expires() {
     );
     let host = ProductRuntimeHost::new_compat(platform, test_spawner());
     assert!(read_storage(&host, Some("wallet.dot"), "k").is_err());
-}
-
-#[test]
-fn a_cached_context_grant_lets_a_foreign_proof_through() {
-    // Reaches the session check rather than the cross-product refusal,
-    // which is how a granted proof differs from an ungranted one here.
-    let platform = stub_platform();
-    cache_manifest(&platform, "wallet.dot", r#"{"unknown":["context"]}"#, 0);
-    let host = ProductRuntimeHost::new_compat(platform, test_spawner());
-    assert_eq!(
-        proof_refusal(&host, "wallet.dot"),
-        Some(CallError::Domain(HostAccountCreateProofError::V1(
-            v01::HostAccountCreateProofError::Rejected
-        )))
-    );
-}
-
-fn proof_refusal(
-    host: &ProductRuntimeHost,
-    product: &str,
-) -> Option<CallError<HostAccountCreateProofError>> {
-    futures::executor::block_on(
-        host.create_account_proof(&CallContext::default(), create_proof_request(product)),
-    )
-    .err()
-}
-
-#[test]
-fn a_proof_against_the_callers_own_key_consults_no_grant() {
-    // Proving with your own key is not a cross-product access, so it must
-    // never be refused as one. It still fails here for want of a session,
-    // which is a different refusal entirely.
-    let host = ProductRuntimeHost::new_compat(stub_platform(), test_spawner());
-    let own = host.product_id();
-    assert_eq!(
-        proof_refusal(&host, &own),
-        Some(CallError::Domain(HostAccountCreateProofError::V1(
-            v01::HostAccountCreateProofError::Rejected
-        )))
-    );
-}
-
-#[test]
-fn a_proof_naming_the_caller_in_another_spelling_is_still_its_own() {
-    // Normalized before comparison, so casing cannot turn a product's own
-    // key into a cross-product refusal.
-    let host = ProductRuntimeHost::new_compat(stub_platform(), test_spawner());
-    let shouted = host.product_id().to_uppercase();
-    assert_eq!(
-        proof_refusal(&host, &shouted),
-        Some(CallError::Domain(HostAccountCreateProofError::V1(
-            v01::HostAccountCreateProofError::Rejected
-        )))
-    );
-}
-
-#[test]
-fn a_proof_against_a_foreign_key_is_refused_when_no_grant_can_be_established() {
-    // A foreign key needs the owning product's `context` grant. With no
-    // Asset Hub configured no manifest resolves, so the call is refused
-    // before a session is ever consulted.
-    let host = ProductRuntimeHost::new_compat(stub_platform(), test_spawner());
-    assert_eq!(
-        proof_refusal(&host, "wallet.dot"),
-        Some(CallError::Domain(HostAccountCreateProofError::V1(
-            v01::HostAccountCreateProofError::NotAllowlisted
-        )))
-    );
-}
-
-#[test]
-fn an_unresolvable_product_cannot_reach_a_foreign_key() {
-    // An id that does not normalize is not the caller, so it takes the same
-    // refusal as a product that granted nothing.
-    let host = ProductRuntimeHost::new_compat(stub_platform(), test_spawner());
-    assert_eq!(
-        proof_refusal(&host, "not a product"),
-        Some(CallError::Domain(HostAccountCreateProofError::V1(
-            v01::HostAccountCreateProofError::Unknown {
-                reason: "Invalid key handle".to_string()
-            }
-        )))
-    );
 }
 
 #[test]

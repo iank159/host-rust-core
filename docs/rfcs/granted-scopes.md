@@ -8,12 +8,12 @@ owner: "@filippovecchiato"
 |                 |                                                                                    |
 | --------------- | ---------------------------------------------------------------------------------- |
 | **Start Date**  | 2026-08-19                                                                         |
-| **Description** | Widen `Granted` from the single `all` wildcard to `all`, `storage`, and `context`. |
+| **Description** | Widen `Granted` from the single `all` wildcard to `all` and `storage`.             |
 | **Authors**     | Filippo Vecchiato                                                                  |
 
 ## Summary
 
-`Granted` gains two narrow values alongside `all`, so a publisher pre-approves a scope list per product instead of choosing between everything and nothing.
+`Granted` gains a narrow value alongside `all`, so a publisher pre-approves a scope list per product instead of choosing between everything and nothing.
 
 ## Motivation
 
@@ -21,33 +21,30 @@ owner: "@filippovecchiato"
 
 ## Detailed Design
 
-[RFC — Product Manifest Format][manifest] gains two `Granted` values:
+[RFC — Product Manifest Format][manifest] gains one `Granted` value:
 
 ```typescript
-type Granted = 'all' | 'storage' | 'context';
+type Granted = 'all' | 'storage';
 ```
 
 | Value     | Pre-approves                                                                                            |
 | --------- | ------------------------------------------------------------------------------------------------------- |
 | `all`     | Every cross-product interaction the Host mediates on the granting product's behalf, present and future. |
 | `storage` | Reading the granting product's host-local storage. Read-only.                                           |
-| `context` | Acting as the granting product's account: reading it and the identity that follows from it, and producing proofs and signatures under its keys. |
 
 `trustedProducts` keeps its `Record<string, Granted[]>` shape, so this needs no new field and no `$v` bump.
 
-- **`all` is a superset, not a peer.** `["all"]` implies `storage` and `context`, so `["all", "storage"]` is `["all"]`. A Host MUST NOT read a narrower value as a restriction on `all`. Enumerating the narrow values covers the same interactions today but does not widen when a further value is defined — that difference is the point of enumerating.
+- **`all` is a superset, not a peer.** `["all"]` implies `storage`, so `["all", "storage"]` is `["all"]`. A Host MUST NOT read a narrower value as a restriction on `all`. Enumerating the narrow values covers the same interactions today but does not widen when a further value is defined — that difference is the point of enumerating.
 - **Values are a set.** Order is not significant, duplicates collapse.
-- **Scopes are independent.** `["storage"]` leaves account interactions prompting as usual, and vice versa.
+- **Scopes are independent.** `["storage"]` leaves every other interaction prompting as usual, and a scope defined later grants nothing retroactively.
 - **Existing rules are unchanged.** Hosts MUST ignore unrecognised values and MUST NOT fail validation over them, so a Host implementing only `all` reads `["storage"]` as an empty grant and prompts. Publishers MUST NOT emit a value outside `Granted`. A grant never overrides a denial the user already gave.
 - **A key names a product, and a product is all its executables.** The key is the segment above the TLD, so `dim2.dot`, `app.dim2.dot` and `worker.dim2.dot` are one grantee: granting `dim2` grants every executable published beneath it. A subname of another domain is that domain — `dim2.attacker.dot` reads as `attacker` and collects nothing published for `dim2`.
 
 Which calls each scope gates remains a Host runtime contract, as it already is for `all`. A grant is a standing answer, so a call it does not cover refuses rather than prompts wherever prompting would itself disclose something — a cross-product storage read answers one refusal for every reason, and a prompt naming the target would say the target exists.
 
-`context` gates proofs and signatures today; the account and identity reads it also names still take the user prompt, tracked in #655.
-
 ## Drawbacks
 
-Writes stay on the wildcard: `storage` is read-only, so "read and write, nothing else" is still inexpressible. `context` bundles reading an account with signing under it, so "see who I am, sign nothing" is not expressible either — splitting them costs a third value and neither half has a use without the other yet. And `all` still widens silently, so staying narrow means revisiting the manifest as scopes are added.
+Storage is the only interaction a publisher can name. Reading another product's account and signing under its keys still have no scope of their own, so a publisher who wants to pre-approve either is back to `all` — #655 covers giving them one. Writes stay on the wildcard too: `storage` is read-only, so "read and write, nothing else" is inexpressible. And `all` widens silently, so staying narrow means revisiting the manifest as scopes are added.
 
 ## Alternatives
 
@@ -55,7 +52,6 @@ A separate field per scope (a foreign-storage record beside `trustedProducts`) s
 
 ## Unresolved Questions
 
-1. Is `context` the right name? `account` says it more directly, and `context` sits awkwardly beside the `context` parameter [RFC 0020][0020] removed from `create_transaction`.
+1. Should `storage` gain a write counterpart rather than leaving writes reachable only through `all`? A cross-product write is a larger step than a read, and no consumer has asked for one yet, but leaving it on the wildcard means a publisher who wants to allow it must also pre-approve everything else.
 
 [manifest]: product-manifest.md
-[0020]: 0020-create-transaction.md

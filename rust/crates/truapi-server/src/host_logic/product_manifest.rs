@@ -23,8 +23,6 @@ pub enum Granted {
     All,
     /// Reading the granting product's host-local storage.
     Storage,
-    /// Using the granting product's account and the identity behind it.
-    Context,
     /// A grant value defined after this core was built.
     Unrecognised,
 }
@@ -34,7 +32,6 @@ impl<'de> Deserialize<'de> for Granted {
         Ok(match String::deserialize(deserializer)?.as_str() {
             "all" => Self::All,
             "storage" => Self::Storage,
-            "context" => Self::Context,
             _ => Self::Unrecognised,
         })
     }
@@ -127,17 +124,9 @@ mod tests {
     }
 
     #[test]
-    fn scopes_are_independent() {
-        // `storage` must leave account interactions prompting as usual.
-        let m = manifest(r#"{"dim2":["storage"]}"#);
-        assert!(!m.grants("dim2", Granted::Context));
-    }
-
-    #[test]
-    fn all_satisfies_every_narrower_scope() {
+    fn all_satisfies_a_narrower_scope() {
         let m = manifest(r#"{"dim2":["all"]}"#);
         assert!(m.grants("dim2", Granted::Storage));
-        assert!(m.grants("dim2", Granted::Context));
     }
 
     #[test]
@@ -146,14 +135,12 @@ mod tests {
         // core was built.
         let m = manifest(r#"{"dim2":["storage-write","storage"]}"#);
         assert!(m.grants("dim2", Granted::Storage));
-        assert!(!m.grants("dim2", Granted::Context));
     }
 
     #[test]
     fn an_entry_of_only_unrecognised_grants_grants_nothing() {
         let m = manifest(r#"{"dim2":["storage-write"]}"#);
         assert!(!m.grants("dim2", Granted::Storage));
-        assert!(!m.grants("dim2", Granted::Context));
     }
 
     #[test]

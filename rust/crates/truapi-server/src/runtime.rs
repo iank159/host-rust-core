@@ -280,8 +280,7 @@ fn unix_time_secs() -> Option<u64> {
 /// A free function rather than a runtime method so that the authority holding
 /// the keys can adjudicate the same grant for itself: on a paired host the
 /// request arrives over the wire, so a decision relayed from the caller is a
-/// decision the caller could forge. The authority does not consult it yet, which
-/// is what leaves the `context` scope inert.
+/// decision the caller could forge.
 pub(crate) async fn manifest_grants_scope(
     services: &RuntimeServices,
     platform: &dyn Platform,
@@ -289,15 +288,6 @@ pub(crate) async fn manifest_grants_scope(
     target: &str,
     scope: GrantedScope,
 ) -> bool {
-    // A publisher's grant waives the publisher's own prompt. It does not reach
-    // a refusal the user already gave, so the stored decision is consulted
-    // first — read-only, because raising the prompt here would turn a grant
-    // into a way to ask again.
-    if scope == GrantedScope::Context
-        && user_denied_account_access(platform, caller_id, target).await
-    {
-        return false;
-    }
     let Some(json) = root_manifest(services, platform, target).await else {
         return false;
     };
@@ -308,28 +298,7 @@ pub(crate) async fn manifest_grants_scope(
         bare_product_label(caller_id),
         match scope {
             GrantedScope::Storage => Granted::Storage,
-            GrantedScope::Context => Granted::Context,
         },
-    )
-}
-
-/// Whether the user has already refused `caller_id` access to `target`'s account.
-///
-/// Reads the stored decision without raising a prompt: `NotDetermined` is not a
-/// refusal, and the prompt that would settle it belongs to the call the user
-/// actually made, not to a grant lookup.
-async fn user_denied_account_access(
-    platform: &dyn Platform,
-    caller_id: &str,
-    target: &str,
-) -> bool {
-    let request = PermissionAuthorizationRequest::AccountAccess {
-        target_product_id: target.to_string(),
-    };
-    let service = PermissionsService::new(platform, platform, caller_id);
-    matches!(
-        service.authorization_status(&request).await,
-        Ok(PermissionAuthorizationStatus::Denied)
     )
 }
 
@@ -392,8 +361,6 @@ async fn root_manifest(
 pub(crate) enum GrantedScope {
     /// Reading the granting product's host-local storage. Read-only.
     Storage,
-    /// Using the granting product's account and the identity derived from it.
-    Context,
 }
 
 /// Product-scoped adapter that exposes a long-lived host runtime through the
