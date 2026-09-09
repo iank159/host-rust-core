@@ -15,7 +15,7 @@ mod host_logic {
                 ) -> Option<Response<Self::Response>>;
             }
 
-            pub trait SsoError {
+            pub trait SsoError: core::fmt::Display {
                 fn not_connected() -> Self;
             }
 

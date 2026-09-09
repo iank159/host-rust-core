@@ -7,7 +7,7 @@ mod runtime {
 
     pub mod sso_service {
         use crate::host_logic::sso::messages::{Response, v1};
-        use crate::host_logic::sso::wire::{ResponseOutcome, SsoError};
+        use crate::host_logic::sso::wire::ResponseOutcome;
 
         pub struct SsoRequestContext;
 
@@ -46,7 +46,7 @@ mod runtime {
             }
         }
 
-        impl<T, E: SsoError> SsoReply<Result<T, E>> {
+        impl<T, E: core::fmt::Display> SsoReply<Result<T, E>> {
             pub fn finish(
                 self,
                 id: &str,

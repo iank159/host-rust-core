@@ -18,7 +18,7 @@ impl Service {
 
 #[truapi_macros::sso_service]
 impl Service {
-    async fn foo(&self, _: &SsoRequestContext, request: Request<u32>) -> FooResponse {
+    async fn r#foo(&self, _: &SsoRequestContext, request: Request<u32>) -> FooResponse {
         let value = self.value(request).await?;
         if value == 0 {
             return Err("zero".into());

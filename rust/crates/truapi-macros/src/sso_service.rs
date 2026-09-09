@@ -2,6 +2,7 @@
 
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
+use syn::ext::IdentExt;
 use syn::{FnArg, ImplItem, ItemImpl, Pat, Signature, Type, parse_macro_input};
 
 use crate::sso_common::{enum_path, wire_path};
@@ -72,7 +73,7 @@ fn expand_sso_service(mut item: ItemImpl) -> syn::Result<TokenStream> {
         });
         let response_variant = last_segment(&response_ty)?;
         let name = &method.sig.ident;
-        let method_name = name.to_string();
+        let method_name = name.unraw().to_string();
         let stem: String = method_name
             .split('_')
             .map(|word| {
