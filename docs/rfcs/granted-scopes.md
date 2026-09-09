@@ -39,6 +39,7 @@ type Granted = 'all' | 'storage' | 'context';
 - **Values are a set.** Order is not significant, duplicates collapse.
 - **Scopes are independent.** `["storage"]` leaves account interactions prompting as usual, and vice versa.
 - **Existing rules are unchanged.** Hosts MUST ignore unrecognised values and MUST NOT fail validation over them, so a Host implementing only `all` reads `["storage"]` as an empty grant and prompts. Publishers MUST NOT emit a value outside `Granted`. A grant never overrides a denial the user already gave.
+- **A key names a product, and a product is all its executables.** The key is the segment above the TLD, so `dim2.dot`, `app.dim2.dot` and `worker.dim2.dot` are one grantee: granting `dim2` grants every executable published beneath it. A subname of another domain is that domain — `dim2.attacker.dot` reads as `attacker` and collects nothing published for `dim2`.
 
 Which calls each scope gates remains a Host runtime contract, as it already is for `all`.
 

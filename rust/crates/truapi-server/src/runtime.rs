@@ -263,6 +263,114 @@ fn unix_time_secs() -> Option<u64> {
         .map(|since| since.as_secs())
 }
 
+/// Scopes `target`'s published manifest grants `caller_id`.
+///
+/// A grant that cannot be established answers `false` whatever the reason — the
+/// product does not resolve, it published no manifest, the fetch failed, or the
+/// manifest names this caller with a narrower scope. Callers turn that into one
+/// refusal, so the outcome never reveals which of those it was. Failing closed
+/// also means an unreachable chain withdraws grants rather than assuming them.
+///
+/// A free function rather than a runtime method so that the authority holding
+/// the keys can adjudicate the same grant for itself: on a paired host the
+/// request arrives over the wire, so a decision relayed from the caller is a
+/// decision the caller could forge. The authority does not consult it yet, which
+/// is what leaves the `context` scope inert.
+pub(crate) async fn manifest_grants_scope(
+    services: &RuntimeServices,
+    platform: &dyn Platform,
+    caller_id: &str,
+    target: &str,
+    scope: GrantedScope,
+) -> bool {
+    // A publisher's grant waives the publisher's own prompt. It does not reach
+    // a refusal the user already gave, so the stored decision is consulted
+    // first — read-only, because raising the prompt here would turn a grant
+    // into a way to ask again.
+    if scope == GrantedScope::Context
+        && user_denied_account_access(platform, caller_id, target).await
+    {
+        return false;
+    }
+    let Some(json) = root_manifest(services, platform, target).await else {
+        return false;
+    };
+    let Ok(manifest) = RootManifest::parse(&json) else {
+        return false;
+    };
+    manifest.grants(
+        bare_product_label(caller_id),
+        match scope {
+            GrantedScope::Storage => Granted::Storage,
+            GrantedScope::Context => Granted::Context,
+        },
+    )
+}
+
+/// Whether the user has already refused `caller_id` access to `target`'s account.
+///
+/// Reads the stored decision without raising a prompt: `NotDetermined` is not a
+/// refusal, and the prompt that would settle it belongs to the call the user
+/// actually made, not to a grant lookup.
+async fn user_denied_account_access(
+    platform: &dyn Platform,
+    caller_id: &str,
+    target: &str,
+) -> bool {
+    let request = PermissionAuthorizationRequest::AccountAccess {
+        target_product_id: target.to_string(),
+    };
+    let service = PermissionsService::new(platform, platform, caller_id);
+    matches!(
+        service.authorization_status(&request).await,
+        Ok(PermissionAuthorizationStatus::Denied)
+    )
+}
+
+/// `target`'s root manifest JSON, from cache when it is younger than
+/// [`MANIFEST_TTL_SECS`] and from dotNS otherwise.
+///
+/// A freshly read manifest is cached even though the caller may not be granted
+/// anything by it: the document describes the product, not the asker.
+async fn root_manifest(
+    services: &RuntimeServices,
+    platform: &dyn Platform,
+    target: &str,
+) -> Option<String> {
+    let key = CoreStorageKey::ProductManifest {
+        product_id: target.to_string(),
+    };
+    let now = unix_time_secs()?;
+    if let Ok(Some(bytes)) = platform.read_core_storage(key.clone()).await
+        && let Ok(cached) = CachedManifest::decode(&mut bytes.as_slice())
+        && now.saturating_sub(cached.fetched_at_secs) < MANIFEST_TTL_SECS
+    {
+        return Some(cached.json);
+    }
+
+    let genesis_hash = services.asset_hub_chain_genesis_hash()?;
+    let json =
+        match product_manifest::fetch_root_manifest(&services.chain, genesis_hash, target).await {
+            Ok(Some(json)) => json,
+            Ok(None) => return None,
+            Err(reason) => {
+                warn!(%target, %reason, "root manifest lookup failed");
+                return None;
+            }
+        };
+    let _ = platform
+        .write_core_storage(
+            key,
+            CachedManifest {
+                fetched_at_secs: now,
+                json: json.clone(),
+            }
+            .encode(),
+        )
+        .await;
+    Some(json)
+}
+
 /// A scope a publisher pre-approves for another product in the manifest's
 /// `trustedProducts`.
 ///
@@ -494,81 +602,15 @@ impl ProductRuntimeHost {
         if normalized == self.product_id() {
             return Some(normalized);
         }
-        self.manifest_grants_scope(&normalized, scope)
-            .await
-            .then_some(normalized)
-    }
-
-    /// Scopes `target`'s published manifest grants the calling product.
-    ///
-    /// A grant that cannot be established answers `false` whatever the reason —
-    /// the product does not resolve, it published no manifest, the fetch failed,
-    /// or the manifest names this caller with a narrower scope. Callers turn
-    /// that into one refusal, so the outcome never reveals which of those it was.
-    /// Failing closed also means an unreachable chain withdraws grants rather
-    /// than assuming them.
-    ///
-    /// A user's own denial is not consulted here because nothing prompts for
-    /// cross-product access yet; the check belongs with the prompt that creates
-    /// one.
-    async fn manifest_grants_scope(&self, target: &str, scope: GrantedScope) -> bool {
-        let Some(json) = self.root_manifest(target).await else {
-            return false;
-        };
-        let Ok(manifest) = RootManifest::parse(&json) else {
-            return false;
-        };
-        manifest.grants(
-            bare_product_label(&self.product_id()),
-            match scope {
-                GrantedScope::Storage => Granted::Storage,
-                GrantedScope::Context => Granted::Context,
-            },
+        manifest_grants_scope(
+            &self.services,
+            &*self.platform,
+            &self.product_id(),
+            &normalized,
+            scope,
         )
-    }
-
-    /// `target`'s root manifest JSON, from cache when it is younger than
-    /// [`MANIFEST_TTL_SECS`] and from dotNS otherwise.
-    ///
-    /// A freshly read manifest is cached even though the caller may not be
-    /// granted anything by it: the document describes the product, not the
-    /// asker.
-    async fn root_manifest(&self, target: &str) -> Option<String> {
-        let key = CoreStorageKey::ProductManifest {
-            product_id: target.to_string(),
-        };
-        let now = unix_time_secs()?;
-        if let Ok(Some(bytes)) = self.platform.read_core_storage(key.clone()).await
-            && let Ok(cached) = CachedManifest::decode(&mut bytes.as_slice())
-            && now.saturating_sub(cached.fetched_at_secs) < MANIFEST_TTL_SECS
-        {
-            return Some(cached.json);
-        }
-
-        let genesis_hash = self.services.asset_hub_chain_genesis_hash()?;
-        let json =
-            match product_manifest::fetch_root_manifest(&self.services.chain, genesis_hash, target)
-                .await
-            {
-                Ok(Some(json)) => json,
-                Ok(None) => return None,
-                Err(reason) => {
-                    warn!(%target, %reason, "root manifest lookup failed");
-                    return None;
-                }
-            };
-        let _ = self
-            .platform
-            .write_core_storage(
-                key,
-                CachedManifest {
-                    fetched_at_secs: now,
-                    json: json.clone(),
-                }
-                .encode(),
-            )
-            .await;
-        Some(json)
+        .await
+        .then_some(normalized)
     }
 
     fn normalize_product_account_id(
