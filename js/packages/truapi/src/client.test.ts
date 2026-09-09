@@ -66,6 +66,26 @@ function providerFixture() {
     };
 }
 
+/**
+ * Encode one wire frame: `[requestId][trait][method][messageType][payload]`.
+ * `ids` takes a generated `W.*` constant directly, or a literal pair for an
+ * address this build does not know.
+ */
+function wireFrame(
+    requestId: string,
+    ids: { trait: number; method: number },
+    messageType: number,
+    value: Uint8Array = new Uint8Array(),
+): Uint8Array {
+    return unwrap(
+        encodeWireMessage({
+            requestId,
+            payload: { traitId: ids.trait, methodId: ids.method, messageType, value },
+        }),
+        `encode (${ids.trait}, ${ids.method}) messageType ${messageType}`,
+    );
+}
+
 /** Codec for `system_handshake`'s `Response`-leg payload. */
 const HANDSHAKE_RESPONSE_CODEC = S.Result(
     T.VersionedHostHandshakeResponse,
@@ -107,38 +127,26 @@ function rendererStart(
     requestId: string,
     request: T.ProductChatCustomMessageRenderRequest,
 ): Uint8Array {
-    return unwrap(
-        encodeWireMessage({
-            requestId,
-            payload: {
-                traitId: W.CHAT_CUSTOM_MESSAGE_RENDER.trait,
-                methodId: W.CHAT_CUSTOM_MESSAGE_RENDER.method,
-                messageType: MESSAGE_TYPE_START,
-                value: T.VersionedProductChatCustomMessageRenderRequest.enc({
-                    tag: "V1",
-                    value: request,
-                }),
-            },
+    return wireFrame(
+        requestId,
+        W.CHAT_CUSTOM_MESSAGE_RENDER,
+        MESSAGE_TYPE_START,
+        T.VersionedProductChatCustomMessageRenderRequest.enc({
+            tag: "V1",
+            value: request,
         }),
-        "encode renderer start",
     );
 }
 
 function rendererReceive(requestId: string, node: T.CustomRendererNode): Uint8Array {
-    return unwrap(
-        encodeWireMessage({
-            requestId,
-            payload: {
-                traitId: W.CHAT_CUSTOM_MESSAGE_RENDER.trait,
-                methodId: W.CHAT_CUSTOM_MESSAGE_RENDER.method,
-                messageType: MESSAGE_TYPE_RECEIVE,
-                value: T.VersionedProductChatCustomMessageRenderItem.enc({
-                    tag: "V1",
-                    value: node,
-                }),
-            },
+    return wireFrame(
+        requestId,
+        W.CHAT_CUSTOM_MESSAGE_RENDER,
+        MESSAGE_TYPE_RECEIVE,
+        T.VersionedProductChatCustomMessageRenderItem.enc({
+            tag: "V1",
+            value: node,
         }),
-        "encode renderer receive",
     );
 }
 
@@ -149,49 +157,26 @@ function rendererReceive(requestId: string, node: T.CustomRendererNode): Uint8Ar
  * domain error type, so one constant frame covers every method.
  */
 function rendererInterrupt(requestId: string): Uint8Array {
-    return unwrap(
-        encodeWireMessage({
-            requestId,
-            payload: {
-                traitId: W.CHAT_CUSTOM_MESSAGE_RENDER.trait,
-                methodId: W.CHAT_CUSTOM_MESSAGE_RENDER.method,
-                messageType: MESSAGE_TYPE_INTERRUPT,
-                value: new Uint8Array([
-                    1, 4, 44, 117, 110, 97, 118, 97, 105, 108, 97, 98, 108, 101,
-                ]),
-            },
-        }),
-        "encode renderer interrupt",
+    return wireFrame(
+        requestId,
+        W.CHAT_CUSTOM_MESSAGE_RENDER,
+        MESSAGE_TYPE_INTERRUPT,
+        new Uint8Array([
+            1, 4, 44, 117, 110, 97, 118, 97, 105, 108, 97, 98, 108, 101,
+        ]),
     );
 }
 
 function rendererStop(requestId: string): Uint8Array {
-    return unwrap(
-        encodeWireMessage({
-            requestId,
-            payload: {
-                traitId: W.CHAT_CUSTOM_MESSAGE_RENDER.trait,
-                methodId: W.CHAT_CUSTOM_MESSAGE_RENDER.method,
-                messageType: MESSAGE_TYPE_STOP,
-                value: new Uint8Array(),
-            },
-        }),
-        "encode renderer stop",
-    );
+    return wireFrame(requestId, W.CHAT_CUSTOM_MESSAGE_RENDER, MESSAGE_TYPE_STOP);
 }
 
 function protocolError(requestId: string, payload: Uint8Array): Uint8Array {
-    return unwrap(
-        encodeWireMessage({
-            requestId,
-            payload: {
-                traitId: PROTOCOL_ERROR_TRAIT_ID,
-                methodId: PROTOCOL_ERROR_METHOD_ID,
-                messageType: MESSAGE_TYPE_RESPONSE,
-                value: payload,
-            },
-        }),
-        "encode protocol error",
+    return wireFrame(
+        requestId,
+        { trait: PROTOCOL_ERROR_TRAIT_ID, method: PROTOCOL_ERROR_METHOD_ID },
+        MESSAGE_TYPE_RESPONSE,
+        payload,
     );
 }
 
@@ -266,17 +251,11 @@ describe("generated client transport", () => {
         const client = createClient(transport);
 
         const response = client.system.handshake();
-        const frame = unwrap(
-            encodeWireMessage({
-                requestId: "p:1",
-                payload: {
-                    traitId: W.SYSTEM_HANDSHAKE.trait,
-                    methodId: W.SYSTEM_HANDSHAKE.method,
-                    messageType: MESSAGE_TYPE_RESPONSE,
-                    value: handshakeResponsePayload({ success: true, value: undefined }),
-                },
-            }),
-            "encode handshake_response",
+        const frame = wireFrame(
+            "p:1",
+            W.SYSTEM_HANDSHAKE,
+            MESSAGE_TYPE_RESPONSE,
+            handshakeResponsePayload({ success: true, value: undefined }),
         );
         fixture.receive(frame);
 
@@ -289,26 +268,20 @@ describe("generated client transport", () => {
         const client = createClient(createTransport(fixture.provider));
 
         const response = client.system.getProductContext();
-        const frame = unwrap(
-            encodeWireMessage({
-                requestId: "p:1",
-                payload: {
-                    traitId: W.SYSTEM_GET_PRODUCT_CONTEXT.trait,
-                    methodId: W.SYSTEM_GET_PRODUCT_CONTEXT.method,
-                    messageType: MESSAGE_TYPE_RESPONSE,
-                    value: S.Result(
-                        T.VersionedHostGetProductContextResponse,
-                        S.CallError(T.VersionedHostGetProductContextError),
-                    ).enc({
-                        success: true,
-                        value: {
-                            tag: "V1",
-                            value: { productId: "truapi-playground.paseo" },
-                        },
-                    }),
+        const frame = wireFrame(
+            "p:1",
+            W.SYSTEM_GET_PRODUCT_CONTEXT,
+            MESSAGE_TYPE_RESPONSE,
+            S.Result(
+                T.VersionedHostGetProductContextResponse,
+                S.CallError(T.VersionedHostGetProductContextError),
+            ).enc({
+                success: true,
+                value: {
+                    tag: "V1",
+                    value: { productId: "truapi-playground.paseo" },
                 },
             }),
-            "encode getProductContext response",
         );
         fixture.receive(frame);
 
@@ -329,20 +302,14 @@ describe("generated client transport", () => {
             },
         });
         const reason = { tag: "V1", value: { tag: "NotConnected", value: undefined } } as const;
-        const frame = unwrap(
-            encodeWireMessage({
-                requestId: "p:1",
-                payload: {
-                    traitId: W.ACCOUNT_GET_ACCOUNT.trait,
-                    methodId: W.ACCOUNT_GET_ACCOUNT.method,
-                    messageType: MESSAGE_TYPE_RESPONSE,
-                    value: accountGetResponsePayload({
-                        success: false,
-                        value: { tag: "Domain", value: reason },
-                    }),
-                },
+        const frame = wireFrame(
+            "p:1",
+            W.ACCOUNT_GET_ACCOUNT,
+            MESSAGE_TYPE_RESPONSE,
+            accountGetResponsePayload({
+                success: false,
+                value: { tag: "Domain", value: reason },
             }),
-            "encode account_get error response",
         );
         fixture.receive(frame);
 
@@ -370,20 +337,7 @@ describe("generated client transport", () => {
             payload: new Uint8Array(),
             decodeResponse: () => ({ success: true, value: "still connected" }),
         });
-        fixture.receive(
-            unwrap(
-                encodeWireMessage({
-                    requestId: "p:2",
-                    payload: {
-                        traitId: W.LOCAL_STORAGE_READ.trait,
-                        methodId: W.LOCAL_STORAGE_READ.method,
-                        messageType: MESSAGE_TYPE_RESPONSE,
-                        value: new Uint8Array(),
-                    },
-                }),
-                "encode follow-up response",
-            ),
-        );
+        fixture.receive(wireFrame("p:2", W.LOCAL_STORAGE_READ, MESSAGE_TYPE_RESPONSE));
 
         expect((await followup)._unsafeUnwrap()).toBe("still connected");
         expect(fixture.sent).toHaveLength(2);
@@ -408,20 +362,7 @@ describe("generated client transport", () => {
         ] as const) {
             fixture.receive(unsupportedMessage(requestId, traitId, methodId));
         }
-        fixture.receive(
-            unwrap(
-                encodeWireMessage({
-                    requestId: "p:1",
-                    payload: {
-                        traitId: 200,
-                        methodId: 194,
-                        messageType: MESSAGE_TYPE_RESPONSE,
-                        value: new Uint8Array(),
-                    },
-                }),
-                "encode supported response",
-            ),
-        );
+        fixture.receive(wireFrame("p:1", { trait: 200, method: 194 }, MESSAGE_TYPE_RESPONSE));
 
         expect((await response)._unsafeUnwrap()).toBe("supported");
         expect(fixture.sent).toHaveLength(1);
@@ -501,7 +442,7 @@ describe("generated client transport", () => {
         // An unknown version or variant index is deliberately absent: that is
         // a newer peer rather than corruption, and it must NOT close the
         // transport. See "settles one call without closing the transport on an
-        // unrecognised protocol error".
+        // unknown protocol error".
         const malformedPayloads = [
             [new Uint8Array([]), "empty"],
             [new Uint8Array([0, 0]), "expected 4 bytes, received 2"],
@@ -527,7 +468,7 @@ describe("generated client transport", () => {
         }
     });
 
-    it("settles one call without closing the transport on an unrecognised protocol error", async () => {
+    it("settles one call without closing the transport on an unknown protocol error", async () => {
         // `(255, 255)` is the one address every peer answers on, so rejecting a
         // payload this build cannot read would mean a newer peer could never
         // report anything new without killing the connection, freezing the
@@ -539,7 +480,6 @@ describe("generated client transport", () => {
         const first = transport.request<undefined, CallErrorValue<never>>({
             ids: { trait: 200, method: 194, kind: "request" },
             payload: new Uint8Array(),
-            version: 1,
             decodeResponse: () => ({ success: true, value: undefined }),
         });
         // Variant 7 with a payload whose length this build cannot know.
@@ -551,43 +491,17 @@ describe("generated client transport", () => {
         const second = transport.request<undefined, CallErrorValue<never>>({
             ids: W.LOCAL_STORAGE_READ,
             payload: new Uint8Array(),
-            version: 1,
             decodeResponse: () => ({ success: true, value: undefined }),
         });
         expect(fixture.sent).toHaveLength(2);
-        fixture.receive(
-            unwrap(
-                encodeWireMessage({
-                    requestId: "p:2",
-                    payload: {
-                        traitId: W.LOCAL_STORAGE_READ.trait,
-                        methodId: W.LOCAL_STORAGE_READ.method,
-                        version: 1,
-                        messageType: MESSAGE_TYPE_RESPONSE,
-                        value: new Uint8Array(),
-                    },
-                }),
-                "encode second response",
-            ),
-        );
+        fixture.receive(wireFrame("p:2", W.LOCAL_STORAGE_READ, MESSAGE_TYPE_RESPONSE));
         expect((await second)._unsafeUnwrap()).toBeUndefined();
     });
 
     it("rejects an unknown host-initiated message without starting an error loop", () => {
         const fixture = providerFixture();
         createTransport(fixture.provider);
-        const incoming = unwrap(
-            encodeWireMessage({
-                requestId: "h:future",
-                payload: {
-                    traitId: 200,
-                    methodId: 194,
-                    messageType: MESSAGE_TYPE_REQUEST,
-                    value: new Uint8Array(),
-                },
-            }),
-            "encode unknown host request",
-        );
+        const incoming = wireFrame("h:future", { trait: 200, method: 194 }, MESSAGE_TYPE_REQUEST);
 
         fixture.receive(incoming);
 
@@ -601,21 +515,9 @@ describe("generated client transport", () => {
         const fixture = providerFixture();
         createTransport(fixture.provider);
         fixture.receive(
-            unwrap(
-                encodeWireMessage({
-                    requestId: "h:known",
-                    payload: {
-                        traitId: W.CHAT_CUSTOM_MESSAGE_RENDER.trait,
-                        methodId: W.CHAT_CUSTOM_MESSAGE_RENDER.method,
-                        messageType: MESSAGE_TYPE_START,
-                        // No handler is ever registered in this test (no
-                        // client is created), so this never reaches a typed
-                        // decode of the rest.
-                        value: new Uint8Array(),
-                    },
-                }),
-                "encode known unhandled host start",
-            ),
+            // No handler is ever registered in this test (no client is created),
+            // so this never reaches a typed decode of the rest.
+            wireFrame("h:known", W.CHAT_CUSTOM_MESSAGE_RENDER, MESSAGE_TYPE_START),
         );
 
         expect(fixture.sent.map(toHex)).toEqual([
@@ -637,40 +539,14 @@ describe("generated client transport", () => {
             payload: new Uint8Array(),
             decodeResponse: () => ({ success: true, value: "supported" }),
         });
-        fixture.receive(
-            unwrap(
-                encodeWireMessage({
-                    requestId: "p:1",
-                    payload: {
-                        traitId: 200,
-                        methodId: 194,
-                        messageType: MESSAGE_TYPE_REQUEST,
-                        value: new Uint8Array(),
-                    },
-                }),
-                "encode unknown correlated message",
-            ),
-        );
+        fixture.receive(wireFrame("p:1", { trait: 200, method: 194 }, MESSAGE_TYPE_REQUEST));
 
         expect(fixture.sent.map(toHex)).toEqual([
             toHex(fixture.sent[0]),
             toHex(unsupportedMessage("p:1", 200, 194)),
         ]);
 
-        fixture.receive(
-            unwrap(
-                encodeWireMessage({
-                    requestId: "p:1",
-                    payload: {
-                        traitId: W.LOCAL_STORAGE_READ.trait,
-                        methodId: W.LOCAL_STORAGE_READ.method,
-                        messageType: MESSAGE_TYPE_RESPONSE,
-                        value: new Uint8Array(),
-                    },
-                }),
-                "encode request response",
-            ),
-        );
+        fixture.receive(wireFrame("p:1", W.LOCAL_STORAGE_READ, MESSAGE_TYPE_RESPONSE));
         expect((await response)._unsafeUnwrap()).toBe("supported");
     });
 
@@ -682,18 +558,7 @@ describe("generated client transport", () => {
             payload: new Uint8Array(),
             decodeResponse: () => ({ success: true, value: "done" }),
         });
-        const responseFrame = unwrap(
-            encodeWireMessage({
-                requestId: "p:1",
-                payload: {
-                    traitId: W.LOCAL_STORAGE_READ.trait,
-                    methodId: W.LOCAL_STORAGE_READ.method,
-                    messageType: MESSAGE_TYPE_RESPONSE,
-                    value: new Uint8Array(),
-                },
-            }),
-            "encode response",
-        );
+        const responseFrame = wireFrame("p:1", W.LOCAL_STORAGE_READ, MESSAGE_TYPE_RESPONSE);
         requestFixture.receive(responseFrame);
         expect((await response)._unsafeUnwrap()).toBe("done");
         requestFixture.receive(responseFrame);
@@ -713,17 +578,10 @@ describe("generated client transport", () => {
         // subscription is already gone, `value` is never decoded at all.
         for (const messageType of [MESSAGE_TYPE_RECEIVE, MESSAGE_TYPE_INTERRUPT]) {
             subscriptionFixture.receive(
-                unwrap(
-                    encodeWireMessage({
-                        requestId: subscription.subscriptionId,
-                        payload: {
-                            traitId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.trait,
-                            methodId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.method,
-                            messageType,
-                            value: new Uint8Array(),
-                        },
-                    }),
-                    "encode stale subscription frame",
+                wireFrame(
+                    subscription.subscriptionId,
+                    W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE,
+                    messageType,
                 ),
             );
         }
@@ -741,20 +599,7 @@ describe("generated client transport", () => {
             warnings.push(args);
         };
         try {
-            fixture.receive(
-                unwrap(
-                    encodeWireMessage({
-                        requestId: "unrelated:1",
-                        payload: {
-                            traitId: W.LOCAL_STORAGE_READ.trait,
-                            methodId: W.LOCAL_STORAGE_READ.method,
-                            messageType: 99,
-                            value: new Uint8Array(),
-                        },
-                    }),
-                    "encode malformed-messageType frame",
-                ),
-            );
+            fixture.receive(wireFrame("unrelated:1", W.LOCAL_STORAGE_READ, 99));
         } finally {
             console.warn = originalWarn;
         }
@@ -775,31 +620,19 @@ describe("generated client transport", () => {
             tag: "V1",
             value: { codecVersion: 2 },
         });
-        const requestFrame = unwrap(
-            encodeWireMessage({
-                requestId: "h:1",
-                payload: {
-                    traitId: W.SYSTEM_HANDSHAKE.trait,
-                    methodId: W.SYSTEM_HANDSHAKE.method,
-                    messageType: MESSAGE_TYPE_REQUEST,
-                    value: requestPayload,
-                },
-            }),
-            "encode inbound handshake_request",
+        const requestFrame = wireFrame(
+            "h:1",
+            W.SYSTEM_HANDSHAKE,
+            MESSAGE_TYPE_REQUEST,
+            requestPayload,
         );
         fixture.receive(requestFrame);
 
-        const expectedFrame = unwrap(
-            encodeWireMessage({
-                requestId: "h:1",
-                payload: {
-                    traitId: W.SYSTEM_HANDSHAKE.trait,
-                    methodId: W.SYSTEM_HANDSHAKE.method,
-                    messageType: MESSAGE_TYPE_RESPONSE,
-                    value: handshakeResponsePayload({ success: true, value: undefined }),
-                },
-            }),
-            "encode expected handshake_response",
+        const expectedFrame = wireFrame(
+            "h:1",
+            W.SYSTEM_HANDSHAKE,
+            MESSAGE_TYPE_RESPONSE,
+            handshakeResponsePayload({ success: true, value: undefined }),
         );
         expect(toHex(fixture.sent[0])).toBe(toHex(expectedFrame));
     });
@@ -829,7 +662,12 @@ describe("generated client transport", () => {
 
         // The transport must survive: a ping it cannot parse is a peer
         // problem, not grounds for tearing down every pending call.
-        void client.account.getAccount({ productAccountId: { dotNsIdentifier: "foo", derivationIndex: { tag: "Index", value: 0 } } });
+        void client.account.getAccount({
+            productAccountId: {
+                dotNsIdentifier: "foo",
+                derivationIndex: { tag: "Index", value: 0 },
+            },
+        });
         expect(fixture.sent.length).toBe(2);
     });
 
@@ -838,27 +676,26 @@ describe("generated client transport", () => {
         const transport = createTransport(fixture.provider);
         const client = createClient(transport);
 
-        const response = client.account.getAccount({ productAccountId: { dotNsIdentifier: "foo", derivationIndex: { tag: "Index", value: 0 } } });
+        const response = client.account.getAccount({
+            productAccountId: {
+                dotNsIdentifier: "foo",
+                derivationIndex: { tag: "Index", value: 0 },
+            },
+        });
 
         // Right request id, right method id, neighbouring trait: what a whole
         // trait of discriminant skew looks like from the product side.
-        const skewed = unwrap(
-            encodeWireMessage({
-                requestId: "p:1",
-                payload: {
-                    traitId: W.ACCOUNT_GET_ACCOUNT.trait + 1,
-                    methodId: W.ACCOUNT_GET_ACCOUNT.method,
-                    messageType: MESSAGE_TYPE_RESPONSE,
-                    value: accountGetResponsePayload({
-                        success: false,
-                        value: {
-                            tag: "Domain",
-                            value: { tag: "V1", value: { tag: "NotConnected", value: undefined } },
-                        },
-                    }),
+        const skewed = wireFrame(
+            "p:1",
+            { trait: W.ACCOUNT_GET_ACCOUNT.trait + 1, method: W.ACCOUNT_GET_ACCOUNT.method },
+            MESSAGE_TYPE_RESPONSE,
+            accountGetResponsePayload({
+                success: false,
+                value: {
+                    tag: "Domain",
+                    value: { tag: "V1", value: { tag: "NotConnected", value: undefined } },
                 },
             }),
-            "encode skewed account_get response",
         );
         fixture.receive(skewed);
 
@@ -880,20 +717,14 @@ describe("generated client transport", () => {
             .connectionStatusSubscribe()
             .subscribe({ next: (value) => events.push(value) });
 
-        const frame = unwrap(
-            encodeWireMessage({
-                requestId: sub.subscriptionId,
-                payload: {
-                    traitId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.trait,
-                    methodId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.method,
-                    messageType: MESSAGE_TYPE_RECEIVE,
-                    value: T.VersionedHostAccountConnectionStatusSubscribeItem.enc({
-                        tag: "V1",
-                        value: "Connected",
-                    }),
-                },
+        const frame = wireFrame(
+            sub.subscriptionId,
+            W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE,
+            MESSAGE_TYPE_RECEIVE,
+            T.VersionedHostAccountConnectionStatusSubscribeItem.enc({
+                tag: "V1",
+                value: "Connected",
             }),
-            "encode receive",
         );
         fixture.receive(frame);
 
@@ -1069,24 +900,18 @@ describe("generated client transport", () => {
             .connectionStatusSubscribe()
             .subscribe({ complete: (...args) => completions.push(args) });
 
-        const frame = unwrap(
-            encodeWireMessage({
-                requestId: sub.subscriptionId,
-                payload: {
-                    traitId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.trait,
-                    methodId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.method,
-                    messageType: MESSAGE_TYPE_INTERRUPT,
-                    value: S.Option(S.CallError(T.GenericError)).enc(undefined),
-                },
-            }),
-            "encode interrupt",
+        const frame = wireFrame(
+            sub.subscriptionId,
+            W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE,
+            MESSAGE_TYPE_INTERRUPT,
+            S.Option(S.CallError(T.GenericError)).enc(undefined),
         );
         fixture.receive(frame);
 
         expect(completions).toEqual([[]]);
     });
 
-    it("surfaces a framework-level interrupt as an observable error on a plain subscription", () => {
+    it("surfaces a framework interrupt as an observable error on a plain subscription", () => {
         // `chat.listSubscribe` has no domain error of its own (unlike
         // `payment.balanceSubscribe` below): its Interrupt carries a bare
         // `CallErrorValue<GenericError>`. A worker-only subscription like this
@@ -1105,17 +930,11 @@ describe("generated client transport", () => {
         });
 
         const callError: CallErrorValue<never> = { tag: "Denied" };
-        const frame = unwrap(
-            encodeWireMessage({
-                requestId: sub.subscriptionId,
-                payload: {
-                    traitId: W.CHAT_LIST_SUBSCRIBE.trait,
-                    methodId: W.CHAT_LIST_SUBSCRIBE.method,
-                    messageType: MESSAGE_TYPE_INTERRUPT,
-                    value: S.Option(S.CallError(T.GenericError)).enc(callError),
-                },
-            }),
-            "encode denied interrupt",
+        const frame = wireFrame(
+            sub.subscriptionId,
+            W.CHAT_LIST_SUBSCRIBE,
+            MESSAGE_TYPE_INTERRUPT,
+            S.Option(S.CallError(T.GenericError)).enc(callError),
         );
         fixture.receive(frame);
 
@@ -1142,19 +961,13 @@ describe("generated client transport", () => {
             tag: "Domain",
             value: { tag: "V1", value: reason },
         } as const;
-        const frame = unwrap(
-            encodeWireMessage({
-                requestId: sub.subscriptionId,
-                payload: {
-                    traitId: W.PAYMENT_BALANCE_SUBSCRIBE.trait,
-                    methodId: W.PAYMENT_BALANCE_SUBSCRIBE.method,
-                    messageType: MESSAGE_TYPE_INTERRUPT,
-                    value: S.Option(
-                        S.CallError(T.VersionedHostPaymentBalanceSubscribeError),
-                    ).enc(callError),
-                },
-            }),
-            "encode typed payment interrupt",
+        const frame = wireFrame(
+            sub.subscriptionId,
+            W.PAYMENT_BALANCE_SUBSCRIBE,
+            MESSAGE_TYPE_INTERRUPT,
+            S.Option(
+                S.CallError(T.VersionedHostPaymentBalanceSubscribeError),
+            ).enc(callError),
         );
         fixture.receive(frame);
 
@@ -1180,19 +993,13 @@ describe("generated client transport", () => {
             tag: "Domain",
             value: { tag: "V1", value: reason },
         } as const;
-        const frame = unwrap(
-            encodeWireMessage({
-                requestId: sub.subscriptionId,
-                payload: {
-                    traitId: W.COIN_PAYMENT_REBALANCE_PURSE.trait,
-                    methodId: W.COIN_PAYMENT_REBALANCE_PURSE.method,
-                    messageType: MESSAGE_TYPE_INTERRUPT,
-                    value: S.Option(
-                        S.CallError(T.VersionedHostCoinPaymentRebalancePurseError),
-                    ).enc(callError),
-                },
-            }),
-            "encode typed coin payment interrupt",
+        const frame = wireFrame(
+            sub.subscriptionId,
+            W.COIN_PAYMENT_REBALANCE_PURSE,
+            MESSAGE_TYPE_INTERRUPT,
+            S.Option(
+                S.CallError(T.VersionedHostCoinPaymentRebalancePurseError),
+            ).enc(callError),
         );
         fixture.receive(frame);
 
@@ -1215,19 +1022,12 @@ describe("generated client transport", () => {
             error: (error) => errors.push(error),
         });
 
-        const malformedFrame = unwrap(
-            encodeWireMessage({
-                requestId: sub.subscriptionId,
-                payload: {
-                    traitId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.trait,
-                    methodId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.method,
-                    messageType: MESSAGE_TYPE_RECEIVE,
-                    // An out-of-range item wrapper discriminant, so decoding
-                    // fails immediately.
-                    value: new Uint8Array([0xff]),
-                },
-            }),
-            "encode malformed receive",
+        // An out-of-range item wrapper discriminant, so decoding fails immediately.
+        const malformedFrame = wireFrame(
+            sub.subscriptionId,
+            W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE,
+            MESSAGE_TYPE_RECEIVE,
+            new Uint8Array([0xff]),
         );
         fixture.receive(malformedFrame);
 
@@ -1237,34 +1037,21 @@ describe("generated client transport", () => {
         expect((errors[0] as SubscriptionError).reason).toBeUndefined();
         expect(fixture.sent).toHaveLength(2);
 
-        const expectedStop = unwrap(
-            encodeWireMessage({
-                requestId: sub.subscriptionId,
-                payload: {
-                    traitId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.trait,
-                    methodId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.method,
-                    messageType: MESSAGE_TYPE_STOP,
-                    value: new Uint8Array(),
-                },
-            }),
-            "encode stop after malformed receive",
+        const expectedStop = wireFrame(
+            sub.subscriptionId,
+            W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE,
+            MESSAGE_TYPE_STOP,
         );
         expect(toHex(fixture.sent[1])).toBe(toHex(expectedStop));
 
-        const validFrame = unwrap(
-            encodeWireMessage({
-                requestId: sub.subscriptionId,
-                payload: {
-                    traitId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.trait,
-                    methodId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.method,
-                    messageType: MESSAGE_TYPE_RECEIVE,
-                    value: T.VersionedHostAccountConnectionStatusSubscribeItem.enc({
-                        tag: "V1",
-                        value: "Connected",
-                    }),
-                },
+        const validFrame = wireFrame(
+            sub.subscriptionId,
+            W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE,
+            MESSAGE_TYPE_RECEIVE,
+            T.VersionedHostAccountConnectionStatusSubscribeItem.enc({
+                tag: "V1",
+                value: "Connected",
             }),
-            "encode receive after malformed receive",
         );
         fixture.receive(validFrame);
 
@@ -1284,17 +1071,10 @@ describe("generated client transport", () => {
         });
         sub.unsubscribe();
 
-        const expectedStop = unwrap(
-            encodeWireMessage({
-                requestId: sub.subscriptionId,
-                payload: {
-                    traitId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.trait,
-                    methodId: W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE.method,
-                    messageType: MESSAGE_TYPE_STOP,
-                    value: new Uint8Array(),
-                },
-            }),
-            "encode explicit unsubscribe stop",
+        const expectedStop = wireFrame(
+            sub.subscriptionId,
+            W.ACCOUNT_CONNECTION_STATUS_SUBSCRIBE,
+            MESSAGE_TYPE_STOP,
         );
         expect(toHex(fixture.sent[1])).toBe(toHex(expectedStop));
         expect(completions).toEqual([]);
