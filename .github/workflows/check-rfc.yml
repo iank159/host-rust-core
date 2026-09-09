@@ -73,9 +73,25 @@ jobs:
             fi
           done
 
+          # What a file is judged on. A new RFC is judged whole, for the same
+          # reason it is held to the template at all. An edit is judged on the
+          # lines it adds: the RFCs written before the template carry
+          # placeholders and open TBDs, and a change that touches one for an
+          # unrelated reason is not the change that introduced them.
+          subject() {
+            if printf '%s\n' $ADDED | grep -qxF -- "$1"; then
+              cat -- "$1"
+            else
+              git diff -U0 "$MERGE_BASE" HEAD -- "$1" \
+                | grep '^+' | grep -v '^+++' | cut -c2- || true
+            fi
+          }
+
           for file in $CHANGED; do
+            text=$(subject "$file")
+
             while IFS= read -r placeholder; do
-              if grep -qF "$placeholder" "$file"; then
+              if printf '%s\n' "$text" | grep -qF -- "$placeholder"; then
                 fail "$file" "unedited text from docs/rfcs/0001-template.md: '$placeholder'"
               fi
             done <<'PLACEHOLDERS'
@@ -86,7 +102,7 @@ jobs:
           What this costs, and what was considered and dropped.
           PLACEHOLDERS
 
-            if grep -qE '\b(TODO|TBD|FIXME)\b' "$file"; then
+            if printf '%s\n' "$text" | grep -qE '\b(TODO|TBD|FIXME)\b'; then
               fail "$file" "unresolved TODO, TBD or FIXME"
             fi
           done
