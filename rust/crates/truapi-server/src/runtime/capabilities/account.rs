@@ -419,20 +419,24 @@ impl Account for ProductRuntimeHost {
             }
             v01::HostProductDeviceChatRequest::Seal {
                 peer_chat_public_key,
+                cipher_suite,
                 plaintext,
                 ..
             } => ProductDeviceChatAuthorityRequest::Seal {
                 calling_product_id: self.product_id(),
                 peer_chat_public_key,
+                cipher_suite,
                 plaintext,
             },
             v01::HostProductDeviceChatRequest::Open {
                 peer_chat_public_key,
+                cipher_suite,
                 combined_ciphertext,
                 ..
             } => ProductDeviceChatAuthorityRequest::Open {
                 calling_product_id: self.product_id(),
                 peer_chat_public_key,
+                cipher_suite,
                 combined_ciphertext,
             },
         };

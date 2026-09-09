@@ -991,18 +991,22 @@ async fn product_device_chat_response(
         }
         messages::SsoProductDeviceChatOperation::Seal {
             peer_chat_public_key,
+            cipher_suite,
             plaintext,
         } => ProductDeviceChatAuthorityRequest::Seal {
             calling_product_id,
             peer_chat_public_key,
+            cipher_suite,
             plaintext,
         },
         messages::SsoProductDeviceChatOperation::Open {
             peer_chat_public_key,
+            cipher_suite,
             combined_ciphertext,
         } => ProductDeviceChatAuthorityRequest::Open {
             calling_product_id,
             peer_chat_public_key,
+            cipher_suite,
             combined_ciphertext,
         },
     };

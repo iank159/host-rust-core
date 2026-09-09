@@ -656,6 +656,8 @@ pub enum SsoProductDeviceChatOperation {
     Seal {
         /// Peer's X25519 Chat identity public key.
         peer_chat_public_key: [u8; 32],
+        /// Explicit legacy or context-bound cipher suite.
+        cipher_suite: v01::HostProductDeviceChatCipherSuite,
         /// Identity-route plaintext.
         plaintext: Vec<u8>,
     },
@@ -663,6 +665,8 @@ pub enum SsoProductDeviceChatOperation {
     Open {
         /// Peer's X25519 Chat identity public key.
         peer_chat_public_key: [u8; 32],
+        /// Explicit legacy or context-bound cipher suite.
+        cipher_suite: v01::HostProductDeviceChatCipherSuite,
         /// Nonce-prefixed ChaCha20-Poly1305 ciphertext and tag.
         combined_ciphertext: Vec<u8>,
     },

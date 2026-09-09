@@ -660,22 +660,26 @@ impl PairingHost {
             ProductDeviceChatAuthorityRequest::Seal {
                 calling_product_id,
                 peer_chat_public_key,
+                cipher_suite,
                 plaintext,
             } => (
                 calling_product_id,
                 SsoProductDeviceChatOperation::Seal {
                     peer_chat_public_key,
+                    cipher_suite,
                     plaintext,
                 },
             ),
             ProductDeviceChatAuthorityRequest::Open {
                 calling_product_id,
                 peer_chat_public_key,
+                cipher_suite,
                 combined_ciphertext,
             } => (
                 calling_product_id,
                 SsoProductDeviceChatOperation::Open {
                     peer_chat_public_key,
+                    cipher_suite,
                     combined_ciphertext,
                 },
             ),

@@ -15,7 +15,10 @@ use truapi::latest::{
     HostSignRawRequest, HostSignRawWithLegacyAccountRequest, LegacyAccountTxPayload,
     ProductAccountId, ProductAccountTxPayload, ProductProofContext, RingLocation,
 };
-use truapi::v01::{HostAccountSignVrfRequest, HostProductDeviceChatResponse, VrfSignature};
+use truapi::v01::{
+    HostAccountSignVrfRequest, HostProductDeviceChatCipherSuite, HostProductDeviceChatResponse,
+    VrfSignature,
+};
 use truapi::versioned::account::{HostRequestLoginError, HostRequestLoginResponse};
 use truapi::{CallContext, CallError, CancellationReason};
 use truapi_platform::ProductContext;
@@ -298,11 +301,13 @@ pub(crate) enum ProductDeviceChatAuthorityRequest {
     Seal {
         calling_product_id: String,
         peer_chat_public_key: [u8; 32],
+        cipher_suite: HostProductDeviceChatCipherSuite,
         plaintext: Vec<u8>,
     },
     Open {
         calling_product_id: String,
         peer_chat_public_key: [u8; 32],
+        cipher_suite: HostProductDeviceChatCipherSuite,
         combined_ciphertext: Vec<u8>,
     },
 }
@@ -566,7 +571,7 @@ pub(super) fn execute_product_device_chat(
     identity_account_id: [u8; 32],
     request: ProductDeviceChatAuthorityRequest,
 ) -> Result<HostProductDeviceChatResponse, ProductDeviceChatAuthorityError> {
-    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::aead::{Aead, KeyInit, Payload};
     use chacha20poly1305::{ChaCha20Poly1305, Nonce};
     use hkdf::Hkdf;
     use sha2::Sha256;
@@ -646,8 +651,20 @@ pub(super) fn execute_product_device_chat(
                 wallet_incoming_channel_id,
             })
         }
-        ProductDeviceChatAuthorityRequest::Seal { plaintext, .. } => {
-            let key = Zeroizing::new(product_device_chat_aead_key(&shared_secret)?);
+        ProductDeviceChatAuthorityRequest::Seal {
+            calling_product_id,
+            cipher_suite,
+            plaintext,
+            ..
+        } => {
+            let (key, aad) = product_device_chat_aead_material(
+                &shared_secret,
+                &calling_product_id,
+                &identity_account_id,
+                &cipher_suite,
+                true,
+            )?;
+            let key = Zeroizing::new(key);
             let mut nonce = [0; 12];
             getrandom::getrandom(&mut nonce).map_err(|error| {
                 ProductDeviceChatAuthorityError::Unavailable(format!(
@@ -655,7 +672,13 @@ pub(super) fn execute_product_device_chat(
                 ))
             })?;
             let encrypted = ChaCha20Poly1305::new((&*key).into())
-                .encrypt(Nonce::from_slice(&nonce), plaintext.as_ref())
+                .encrypt(
+                    Nonce::from_slice(&nonce),
+                    Payload {
+                        msg: &plaintext,
+                        aad: &aad,
+                    },
+                )
                 .map_err(|_| {
                     ProductDeviceChatAuthorityError::Unavailable(
                         "Chat identity-route encryption failed".to_string(),
@@ -669,35 +692,85 @@ pub(super) fn execute_product_device_chat(
             })
         }
         ProductDeviceChatAuthorityRequest::Open {
+            calling_product_id,
+            cipher_suite,
             combined_ciphertext,
             ..
         } => {
             if combined_ciphertext.len() < 28 {
                 return Err(ProductDeviceChatAuthorityError::InvalidCiphertext);
             }
-            let key = Zeroizing::new(product_device_chat_aead_key(&shared_secret)?);
+            let (key, aad) = product_device_chat_aead_material(
+                &shared_secret,
+                &calling_product_id,
+                &identity_account_id,
+                &cipher_suite,
+                false,
+            )?;
+            let key = Zeroizing::new(key);
             let plaintext = ChaCha20Poly1305::new((&*key).into())
                 .decrypt(
                     Nonce::from_slice(&combined_ciphertext[..12]),
-                    &combined_ciphertext[12..],
+                    Payload {
+                        msg: &combined_ciphertext[12..],
+                        aad: &aad,
+                    },
                 )
                 .map_err(|_| ProductDeviceChatAuthorityError::InvalidCiphertext)?;
             Ok(HostProductDeviceChatResponse::Opened { plaintext })
         }
     };
 
-    fn product_device_chat_aead_key(
+    fn product_device_chat_aead_material(
         shared_secret: &[u8; 32],
-    ) -> Result<[u8; 32], ProductDeviceChatAuthorityError> {
+        calling_product_id: &str,
+        identity_account_id: &[u8; 32],
+        cipher_suite: &HostProductDeviceChatCipherSuite,
+        sealing: bool,
+    ) -> Result<([u8; 32], Vec<u8>), ProductDeviceChatAuthorityError> {
         let mut key = [0; 32];
-        Hkdf::<Sha256>::new(Some(&[]), shared_secret)
-            .expand(&[], &mut key)
+        let HostProductDeviceChatCipherSuite::ContextBoundV1 {
+            peer_account_id,
+            channel_id,
+        } = cipher_suite
+        else {
+            Hkdf::<Sha256>::new(Some(&[]), shared_secret)
+                .expand(&[], &mut key)
+                .map_err(|_| {
+                    ProductDeviceChatAuthorityError::Unavailable(
+                        "Chat identity-route HKDF failed".to_string(),
+                    )
+                })?;
+            return Ok((key, Vec::new()));
+        };
+        let product_id_len = u32::try_from(calling_product_id.len()).map_err(|_| {
+            ProductDeviceChatAuthorityError::Unavailable(
+                "Chat product identifier is too long".to_string(),
+            )
+        })?;
+        let (sender_account_id, recipient_account_id) = if sealing {
+            (identity_account_id, peer_account_id)
+        } else {
+            (peer_account_id, identity_account_id)
+        };
+        let domain = b"dotli-chat/context-bound/v1";
+        let mut aad = Vec::with_capacity(
+            domain.len() + 4 + calling_product_id.len() + 32 + 32 + channel_id.len(),
+        );
+        aad.extend_from_slice(domain);
+        aad.extend_from_slice(&product_id_len.to_le_bytes());
+        aad.extend_from_slice(calling_product_id.as_bytes());
+        aad.extend_from_slice(sender_account_id);
+        aad.extend_from_slice(recipient_account_id);
+        aad.extend_from_slice(channel_id);
+        Hkdf::<Sha256>::new(Some(domain), shared_secret)
+            .expand(&aad, &mut key)
             .map_err(|_| {
                 ProductDeviceChatAuthorityError::Unavailable(
-                    "Chat identity-route HKDF failed".to_string(),
+                    "context-bound Chat identity-route HKDF failed".to_string(),
                 )
             })?;
-        Ok(key)
+        Ok((key, aad))
     }
 
     fn is_canonical_x25519_public_key(key: &[u8; 32]) -> bool {
@@ -873,6 +946,7 @@ mod tests {
             ProductDeviceChatAuthorityRequest::Seal {
                 calling_product_id: "egui-chat.paseo".to_string(),
                 peer_chat_public_key,
+                cipher_suite: HostProductDeviceChatCipherSuite::LegacyV2,
                 plaintext: plaintext.clone(),
             },
         )
@@ -890,6 +964,7 @@ mod tests {
             ProductDeviceChatAuthorityRequest::Open {
                 calling_product_id: "egui-chat.paseo".to_string(),
                 peer_chat_public_key,
+                cipher_suite: HostProductDeviceChatCipherSuite::LegacyV2,
                 combined_ciphertext: combined_ciphertext.clone(),
             },
         )
@@ -905,7 +980,96 @@ mod tests {
                 ProductDeviceChatAuthorityRequest::Open {
                     calling_product_id: "egui-chat.paseo".to_string(),
                     peer_chat_public_key,
+                    cipher_suite: HostProductDeviceChatCipherSuite::LegacyV2,
                     combined_ciphertext,
+                },
+            ),
+            Err(ProductDeviceChatAuthorityError::InvalidCiphertext)
+        );
+    }
+
+    #[test]
+    fn context_bound_product_device_chat_rejects_downgrade_and_wrong_context() {
+        let sender_private_key = [0x11; 32];
+        let recipient_private_key = [0x22; 32];
+        let sender_public_key =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(sender_private_key))
+                .to_bytes();
+        let recipient_public_key =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from(recipient_private_key))
+                .to_bytes();
+        let sender_account_id = [0x33; 32];
+        let recipient_account_id = [0x44; 32];
+        let channel_id = [0x55; 32];
+        let plaintext = b"context-bound identity payload".to_vec();
+        let sealed = execute_product_device_chat(
+            &sender_private_key,
+            sender_account_id,
+            ProductDeviceChatAuthorityRequest::Seal {
+                calling_product_id: "egui-chat.paseo".to_string(),
+                peer_chat_public_key: recipient_public_key,
+                cipher_suite: HostProductDeviceChatCipherSuite::ContextBoundV1 {
+                    peer_account_id: recipient_account_id,
+                    channel_id,
+                },
+                plaintext: plaintext.clone(),
+            },
+        )
+        .unwrap();
+        let HostProductDeviceChatResponse::Sealed {
+            combined_ciphertext,
+        } = sealed
+        else {
+            panic!("Seal must return ciphertext");
+        };
+
+        let open = |calling_product_id: &str, cipher_suite: HostProductDeviceChatCipherSuite| {
+            execute_product_device_chat(
+                &recipient_private_key,
+                recipient_account_id,
+                ProductDeviceChatAuthorityRequest::Open {
+                    calling_product_id: calling_product_id.to_string(),
+                    peer_chat_public_key: sender_public_key,
+                    cipher_suite,
+                    combined_ciphertext: combined_ciphertext.clone(),
+                },
+            )
+        };
+        assert_eq!(
+            open(
+                "egui-chat.paseo",
+                HostProductDeviceChatCipherSuite::ContextBoundV1 {
+                    peer_account_id: sender_account_id,
+                    channel_id,
+                },
+            ),
+            Ok(HostProductDeviceChatResponse::Opened {
+                plaintext: plaintext.clone(),
+            })
+        );
+        assert_eq!(
+            open(
+                "egui-chat.paseo",
+                HostProductDeviceChatCipherSuite::LegacyV2
+            ),
+            Err(ProductDeviceChatAuthorityError::InvalidCiphertext)
+        );
+        assert_eq!(
+            open(
+                "egui-chat.paseo",
+                HostProductDeviceChatCipherSuite::ContextBoundV1 {
+                    peer_account_id: sender_account_id,
+                    channel_id: [0x56; 32],
+                },
+            ),
+            Err(ProductDeviceChatAuthorityError::InvalidCiphertext)
+        );
+        assert_eq!(
+            open(
+                "egui-chat.westend",
+                HostProductDeviceChatCipherSuite::ContextBoundV1 {
+                    peer_account_id: sender_account_id,
+                    channel_id,
                 },
             ),
             Err(ProductDeviceChatAuthorityError::InvalidCiphertext)
@@ -921,6 +1085,7 @@ mod tests {
                 ProductDeviceChatAuthorityRequest::Seal {
                     calling_product_id: "egui-chat.paseo".to_string(),
                     peer_chat_public_key: [0; 32],
+                    cipher_suite: HostProductDeviceChatCipherSuite::LegacyV2,
                     plaintext: Vec::new(),
                 },
             ),
@@ -937,6 +1102,7 @@ mod tests {
                 ProductDeviceChatAuthorityRequest::Seal {
                     calling_product_id: "egui-chat.paseo".to_string(),
                     peer_chat_public_key: noncanonical_peer_key,
+                    cipher_suite: HostProductDeviceChatCipherSuite::LegacyV2,
                     plaintext: Vec::new(),
                 },
             ),
