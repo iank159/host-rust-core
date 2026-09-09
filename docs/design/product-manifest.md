@@ -170,21 +170,12 @@ trustedProducts: {
 }
 ```
 
-`all` is a superset, not a peer, so `["all", "storage"]` is just `["all"]` — never treat a narrow
-value as carving something out of the wildcard. The list is a set: ignore order, collapse
-duplicates. A scope you do not implement is an unrecognised value: it grants nothing, and the
-call falls back to whatever it does without a grant. That is a prompt for most calls, but a
-refusal where prompting would disclose something — a cross-product storage read answers one
-refusal for every reason it failed, and a prompt naming the target would say the target exists.
+Implement the rest from [RFC — Scoped grants in `trustedProducts`](../rfcs/granted-scopes.md),
+which is normative for what each value covers, how a key matches a caller, what an unrecognised
+value does, and what a grant may never override. Restating those here is how the two drift.
 
-Keys carry no TLD: `wallet`, not `wallet.dot`. Append the TLD of the network you resolve against
-before matching. Missing field, empty record, empty array all mean "prompt as usual".
-
-Two rules the host owes the user:
-
-- A grant waives the *publisher's* prompt, never a denial the user already gave.
-- Revocation is a text-record edit with no signal, so cached grants must expire (see
-  [Caching](#caching)).
+Missing field, empty record, and empty array all mean "prompt as usual". Revocation is a
+text-record edit with no signal, so cached grants must expire — see [Caching](#caching).
 
 ## Error Handling
 
