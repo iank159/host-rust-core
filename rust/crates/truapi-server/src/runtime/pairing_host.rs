@@ -22,7 +22,8 @@ use super::auth_state::AuthStateMachine;
 use super::authority::{
     AccountAliasAuthorityRequest, AuthorityError, AuthoritySession, AutoSigningKey,
     BulletinAllowanceKey, CreateProofAuthorityRequest, CreateTransactionAuthorityRequest,
-    ListRingVrfKeysAuthorityRequest, ProductAuthority, RegisterRingVrfKeyAuthorityRequest,
+    ListRingVrfKeysAuthorityRequest, ProductAuthority, ProductDeviceChatAuthorityError,
+    ProductDeviceChatAuthorityRequest, RegisterRingVrfKeyAuthorityRequest,
     RingVrfSignAuthorityRequest, SignPayloadAuthorityRequest, SignRawAuthorityRequest,
     StatementStoreAllowanceKey, authority_session, require_current_session,
 };
@@ -2309,6 +2310,19 @@ impl PairingHost {
             .await
     }
 
+    async fn product_device_chat(
+        &self,
+        cx: &CallContext,
+        session: &AuthoritySession,
+        request: ProductDeviceChatAuthorityRequest,
+    ) -> Result<v01::HostProductDeviceChatResponse, ProductDeviceChatAuthorityError> {
+        let private_session = self
+            .current_private_session(session)
+            .map_err(|_| ProductDeviceChatAuthorityError::Disconnected)?;
+        self.remote_product_device_chat(cx, &private_session, request)
+            .await
+    }
+
     async fn allocate_resources(
         &self,
         cx: &CallContext,
@@ -2555,6 +2569,15 @@ impl ProductAuthority for PairingHost {
         request: RingVrfSignAuthorityRequest,
     ) -> Result<Vec<u8>, RingVrfError> {
         PairingHost::ring_vrf_sign(self, cx, session, request).await
+    }
+
+    async fn product_device_chat(
+        &self,
+        cx: &CallContext,
+        session: &AuthoritySession,
+        request: ProductDeviceChatAuthorityRequest,
+    ) -> Result<v01::HostProductDeviceChatResponse, ProductDeviceChatAuthorityError> {
+        PairingHost::product_device_chat(self, cx, session, request).await
     }
 
     async fn allocate_resources(

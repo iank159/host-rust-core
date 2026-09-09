@@ -7,7 +7,7 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use truapi::latest::{
-    AccountId, HostAccountCreateProofResponse, HostAccountGetAliasResponse,
+    AccountId, DerivationIndex, HostAccountCreateProofResponse, HostAccountGetAliasResponse,
     HostAccountListRingVrfKeysResponse, HostAccountRegisterRingVrfKeyResponse,
     HostAccountRingVrfSignResponse, HostCreateTransactionResponse,
     HostRequestResourceAllocationRequest, HostRequestResourceAllocationResponse,
@@ -15,7 +15,7 @@ use truapi::latest::{
     HostSignRawRequest, HostSignRawWithLegacyAccountRequest, LegacyAccountTxPayload,
     ProductAccountId, ProductAccountTxPayload, ProductProofContext, RingLocation,
 };
-use truapi::v01::{HostAccountSignVrfRequest, VrfSignature};
+use truapi::v01::{HostAccountSignVrfRequest, HostProductDeviceChatResponse, VrfSignature};
 use truapi::versioned::account::{HostRequestLoginError, HostRequestLoginResponse};
 use truapi::{CallContext, CallError, CancellationReason};
 use truapi_platform::ProductContext;
@@ -285,10 +285,52 @@ pub(crate) struct RingVrfSignAuthorityRequest {
     pub message: Vec<u8>,
 }
 
+/// Host-private Chat identity operation after product authorization.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProductDeviceChatAuthorityRequest {
+    Bind {
+        calling_product_id: String,
+        device_account_id: [u8; 32],
+        derivation_index: DerivationIndex,
+        peer_identity_account_id: [u8; 32],
+        peer_chat_public_key: [u8; 32],
+    },
+    Seal {
+        calling_product_id: String,
+        peer_chat_public_key: [u8; 32],
+        plaintext: Vec<u8>,
+    },
+    Open {
+        calling_product_id: String,
+        peer_chat_public_key: [u8; 32],
+        combined_ciphertext: Vec<u8>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProductDeviceChatAuthorityError {
+    Disconnected,
+    Rejected,
+    InvalidPeerKey,
+    InvalidCiphertext,
+    Unavailable(String),
+}
+
+impl From<AuthorityError> for ProductDeviceChatAuthorityError {
+    fn from(error: AuthorityError) -> Self {
+        match error {
+            AuthorityError::Disconnected => Self::Disconnected,
+            AuthorityError::Rejected => Self::Rejected,
+            other => Self::Unavailable(other.to_string()),
+        }
+    }
+}
+
 /// Statement-store allowance signing material held by the authority layer.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, zeroize::Zeroize, zeroize::ZeroizeOnDrop, derive_more::Debug)]
 pub(crate) struct StatementStoreAllowanceKey {
     /// sr25519 secret used to sign allowance statements.
+    #[debug("\"<redacted>\"")]
     pub(crate) secret: [u8; 64],
     /// Public key derived from `secret`.
     pub(crate) public_key: [u8; 32],
@@ -456,6 +498,14 @@ pub(crate) trait ProductAuthority: Send + Sync {
         request: RingVrfSignAuthorityRequest,
     ) -> Result<HostAccountRingVrfSignResponse, RingVrfError>;
 
+    /// Bind/seal/open using the active wallet's host-private Chat identity key.
+    async fn product_device_chat(
+        &self,
+        cx: &CallContext,
+        session: &AuthoritySession,
+        request: ProductDeviceChatAuthorityRequest,
+    ) -> Result<HostProductDeviceChatResponse, ProductDeviceChatAuthorityError>;
+
     /// Ask the account authority to allocate product-scoped resources.
     async fn allocate_resources(
         &self,
@@ -511,6 +561,204 @@ pub(crate) trait ProductAuthority: Send + Sync {
     ) -> Result<[u8; 32], AuthorityError>;
 }
 
+pub(super) fn execute_product_device_chat(
+    identity_chat_private_key: &[u8; 32],
+    identity_account_id: [u8; 32],
+    request: ProductDeviceChatAuthorityRequest,
+) -> Result<HostProductDeviceChatResponse, ProductDeviceChatAuthorityError> {
+    use chacha20poly1305::aead::{Aead, KeyInit};
+    use chacha20poly1305::{ChaCha20Poly1305, Nonce};
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+    use x25519_dalek::{PublicKey, StaticSecret};
+    use zeroize::Zeroizing;
+
+    let peer_public_key = match &request {
+        ProductDeviceChatAuthorityRequest::Bind {
+            peer_chat_public_key,
+            ..
+        }
+        | ProductDeviceChatAuthorityRequest::Seal {
+            peer_chat_public_key,
+            ..
+        }
+        | ProductDeviceChatAuthorityRequest::Open {
+            peer_chat_public_key,
+            ..
+        } => *peer_chat_public_key,
+    };
+    if !is_canonical_x25519_public_key(&peer_public_key) {
+        return Err(ProductDeviceChatAuthorityError::InvalidPeerKey);
+    }
+    let shared_secret = Zeroizing::new(
+        StaticSecret::from(*identity_chat_private_key)
+            .diffie_hellman(&PublicKey::from(peer_public_key))
+            .to_bytes(),
+    );
+    if *shared_secret == [0; 32] {
+        return Err(ProductDeviceChatAuthorityError::InvalidPeerKey);
+    }
+
+    return match request {
+        ProductDeviceChatAuthorityRequest::Bind {
+            device_account_id,
+            peer_identity_account_id,
+            ..
+        } => {
+            let context = b"mds-chat-request";
+            let mut payload = Vec::with_capacity(65 + context.len());
+            payload.extend_from_slice(&identity_account_id);
+            payload.extend_from_slice(&device_account_id);
+            payload.push((context.len() as u8) << 2);
+            payload.extend_from_slice(context);
+            let proof = blake2b_simd::Params::new()
+                .hash_length(32)
+                .key(shared_secret.as_ref())
+                .hash(&payload);
+            let mut proof_bytes = [0; 32];
+            proof_bytes.copy_from_slice(proof.as_bytes());
+            let wallet_own_session_id = chat_identity_session_id(
+                &shared_secret,
+                &identity_account_id,
+                &peer_identity_account_id,
+            );
+            let peer_own_session_id = chat_identity_session_id(
+                &shared_secret,
+                &peer_identity_account_id,
+                &identity_account_id,
+            );
+            let wallet_outgoing_channel_id = chat_request_channel_id(
+                &shared_secret,
+                &identity_account_id,
+                &peer_identity_account_id,
+            );
+            let wallet_incoming_channel_id = chat_request_channel_id(
+                &shared_secret,
+                &peer_identity_account_id,
+                &identity_account_id,
+            );
+            Ok(HostProductDeviceChatResponse::IdentityBinding {
+                identity_account_id,
+                proof: proof_bytes,
+                wallet_own_session_id,
+                peer_own_session_id,
+                wallet_outgoing_channel_id,
+                wallet_incoming_channel_id,
+            })
+        }
+        ProductDeviceChatAuthorityRequest::Seal { plaintext, .. } => {
+            let key = Zeroizing::new(product_device_chat_aead_key(&shared_secret)?);
+            let mut nonce = [0; 12];
+            getrandom::getrandom(&mut nonce).map_err(|error| {
+                ProductDeviceChatAuthorityError::Unavailable(format!(
+                    "failed to generate Chat identity-route nonce: {error}"
+                ))
+            })?;
+            let encrypted = ChaCha20Poly1305::new((&*key).into())
+                .encrypt(Nonce::from_slice(&nonce), plaintext.as_ref())
+                .map_err(|_| {
+                    ProductDeviceChatAuthorityError::Unavailable(
+                        "Chat identity-route encryption failed".to_string(),
+                    )
+                })?;
+            let mut combined_ciphertext = Vec::with_capacity(12 + encrypted.len());
+            combined_ciphertext.extend_from_slice(&nonce);
+            combined_ciphertext.extend_from_slice(&encrypted);
+            Ok(HostProductDeviceChatResponse::Sealed {
+                combined_ciphertext,
+            })
+        }
+        ProductDeviceChatAuthorityRequest::Open {
+            combined_ciphertext,
+            ..
+        } => {
+            if combined_ciphertext.len() < 28 {
+                return Err(ProductDeviceChatAuthorityError::InvalidCiphertext);
+            }
+            let key = Zeroizing::new(product_device_chat_aead_key(&shared_secret)?);
+            let plaintext = ChaCha20Poly1305::new((&*key).into())
+                .decrypt(
+                    Nonce::from_slice(&combined_ciphertext[..12]),
+                    &combined_ciphertext[12..],
+                )
+                .map_err(|_| ProductDeviceChatAuthorityError::InvalidCiphertext)?;
+            Ok(HostProductDeviceChatResponse::Opened { plaintext })
+        }
+    };
+
+    fn product_device_chat_aead_key(
+        shared_secret: &[u8; 32],
+    ) -> Result<[u8; 32], ProductDeviceChatAuthorityError> {
+        let mut key = [0; 32];
+        Hkdf::<Sha256>::new(Some(&[]), shared_secret)
+            .expand(&[], &mut key)
+            .map_err(|_| {
+                ProductDeviceChatAuthorityError::Unavailable(
+                    "Chat identity-route HKDF failed".to_string(),
+                )
+            })?;
+        Ok(key)
+    }
+
+    fn is_canonical_x25519_public_key(key: &[u8; 32]) -> bool {
+        const FIELD_MODULUS: [u8; 32] = [
+            0xed, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0x7f,
+        ];
+        if key[31] & 0x80 != 0 {
+            return false;
+        }
+        for index in (0..32).rev() {
+            if key[index] < FIELD_MODULUS[index] {
+                return true;
+            }
+            if key[index] > FIELD_MODULUS[index] {
+                return false;
+            }
+        }
+        false
+    }
+
+    fn chat_identity_session_id(
+        shared_secret: &[u8; 32],
+        first_account_id: &[u8; 32],
+        second_account_id: &[u8; 32],
+    ) -> [u8; 32] {
+        let mut input = Vec::with_capacity(7 + 32 + 32 + 2);
+        input.extend_from_slice(b"session");
+        input.extend_from_slice(first_account_id);
+        input.extend_from_slice(second_account_id);
+        input.extend_from_slice(b"//");
+        let hash = blake2b_simd::Params::new()
+            .hash_length(32)
+            .key(shared_secret)
+            .hash(&input);
+        let mut output = [0; 32];
+        output.copy_from_slice(hash.as_bytes());
+        output
+    }
+
+    fn chat_request_channel_id(
+        shared_secret: &[u8; 32],
+        requester_account_id: &[u8; 32],
+        acceptor_account_id: &[u8; 32],
+    ) -> [u8; 32] {
+        let mut input = Vec::with_capacity(12 + 32 + 32 + 2);
+        input.extend_from_slice(b"chat-request");
+        input.extend_from_slice(requester_account_id);
+        input.extend_from_slice(acceptor_account_id);
+        input.extend_from_slice(b"//");
+        let hash = blake2b_simd::Params::new()
+            .hash_length(32)
+            .key(shared_secret)
+            .hash(&input);
+        let mut output = [0; 32];
+        output.copy_from_slice(hash.as_bytes());
+        output
+    }
+}
+
 /// Build the neutral authority-session snapshot for `session`.
 pub(super) fn authority_session(session: &SessionInfo) -> AuthoritySession {
     AuthoritySession::from_session_info(session, authority_session_validation_id(session))
@@ -548,4 +796,151 @@ pub(super) fn authority_session_validation_id(session: &SessionInfo) -> Vec<u8> 
         id.extend_from_slice(&session.public_key);
     }
     id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hex32(value: &str) -> [u8; 32] {
+        hex::decode(value).unwrap().try_into().unwrap()
+    }
+
+    #[test]
+    fn product_device_bind_matches_ios_chat_v2_derivations() {
+        let peer_public_key =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([0x22; 32])).to_bytes();
+        assert_eq!(
+            peer_public_key,
+            hex32("0faa684ed28867b97f4a6a2dee5df8ce974e76b7018e3f22a1c4cf2678570f20")
+        );
+
+        let response = execute_product_device_chat(
+            &[0x11; 32],
+            [0x33; 32],
+            ProductDeviceChatAuthorityRequest::Bind {
+                calling_product_id: "egui-chat.paseo".to_string(),
+                device_account_id: [0x44; 32],
+                derivation_index: DerivationIndex::Index(0),
+                peer_identity_account_id: [0x55; 32],
+                peer_chat_public_key: peer_public_key,
+            },
+        )
+        .unwrap();
+        let HostProductDeviceChatResponse::IdentityBinding {
+            identity_account_id,
+            proof,
+            wallet_own_session_id,
+            peer_own_session_id,
+            wallet_outgoing_channel_id,
+            wallet_incoming_channel_id,
+        } = response
+        else {
+            panic!("Bind must return an identity binding");
+        };
+        assert_eq!(identity_account_id, [0x33; 32]);
+        assert_eq!(
+            proof,
+            hex32("0263d1995da865e34e06de38b4f4c0c88524e2e591b1ae6714578219bffad333")
+        );
+        assert_eq!(
+            wallet_own_session_id,
+            hex32("460db8611d842e65414f9eea4aa74d3fe1ac2e31468d4fbebededd914be28422")
+        );
+        assert_eq!(
+            peer_own_session_id,
+            hex32("bfb5eb8c0b959f95b3ab09bd0f8001ab80f100cf5bb617640534372ab777c5c3")
+        );
+        assert_eq!(
+            wallet_outgoing_channel_id,
+            hex32("576f71aa7f51aa340f411c20779c35f476361d8008247db367a8ce4d7e087d70")
+        );
+        assert_eq!(
+            wallet_incoming_channel_id,
+            hex32("19de8cf16554a8463d0f8af7ad23717f4106463af331ee33f297b7367c8fe9fa")
+        );
+    }
+
+    #[test]
+    fn product_device_seal_open_round_trip_and_authenticate() {
+        let identity_chat_private_key = [0x11; 32];
+        let peer_chat_public_key =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([0x22; 32])).to_bytes();
+        let plaintext = b"private first-contact payload".to_vec();
+        let sealed = execute_product_device_chat(
+            &identity_chat_private_key,
+            [0x33; 32],
+            ProductDeviceChatAuthorityRequest::Seal {
+                calling_product_id: "egui-chat.paseo".to_string(),
+                peer_chat_public_key,
+                plaintext: plaintext.clone(),
+            },
+        )
+        .unwrap();
+        let HostProductDeviceChatResponse::Sealed {
+            mut combined_ciphertext,
+        } = sealed
+        else {
+            panic!("Seal must return ciphertext");
+        };
+
+        let opened = execute_product_device_chat(
+            &identity_chat_private_key,
+            [0x33; 32],
+            ProductDeviceChatAuthorityRequest::Open {
+                calling_product_id: "egui-chat.paseo".to_string(),
+                peer_chat_public_key,
+                combined_ciphertext: combined_ciphertext.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(opened, HostProductDeviceChatResponse::Opened { plaintext });
+
+        let last = combined_ciphertext.len() - 1;
+        combined_ciphertext[last] ^= 1;
+        assert_eq!(
+            execute_product_device_chat(
+                &identity_chat_private_key,
+                [0x33; 32],
+                ProductDeviceChatAuthorityRequest::Open {
+                    calling_product_id: "egui-chat.paseo".to_string(),
+                    peer_chat_public_key,
+                    combined_ciphertext,
+                },
+            ),
+            Err(ProductDeviceChatAuthorityError::InvalidCiphertext)
+        );
+    }
+
+    #[test]
+    fn product_device_rejects_invalid_peer_keys() {
+        assert_eq!(
+            execute_product_device_chat(
+                &[0x11; 32],
+                [0x33; 32],
+                ProductDeviceChatAuthorityRequest::Seal {
+                    calling_product_id: "egui-chat.paseo".to_string(),
+                    peer_chat_public_key: [0; 32],
+                    plaintext: Vec::new(),
+                },
+            ),
+            Err(ProductDeviceChatAuthorityError::InvalidPeerKey)
+        );
+
+        let mut noncanonical_peer_key =
+            x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::from([0x22; 32])).to_bytes();
+        noncanonical_peer_key[31] |= 0x80;
+        assert_eq!(
+            execute_product_device_chat(
+                &[0x11; 32],
+                [0x33; 32],
+                ProductDeviceChatAuthorityRequest::Seal {
+                    calling_product_id: "egui-chat.paseo".to_string(),
+                    peer_chat_public_key: noncanonical_peer_key,
+                    plaintext: Vec::new(),
+                },
+            ),
+            Err(ProductDeviceChatAuthorityError::InvalidPeerKey)
+        );
+    }
 }
