@@ -3,27 +3,18 @@
 mod host_logic {
     pub mod sso {
         pub mod wire {
-            use super::messages::v1::RemoteMessage;
+            use super::messages::{Response, v1::RemoteMessage};
 
             pub trait SsoRequest: Sized {
                 const NAME: &'static str;
-                type Response: SsoResponse;
+                type Response;
                 fn into_message(self) -> RemoteMessage;
                 fn from_message(message: RemoteMessage) -> Option<Self>;
+                fn response_into_message(response: Response<Self::Response>) -> RemoteMessage;
+                fn response_from_message(
+                    message: RemoteMessage,
+                ) -> Option<Response<Self::Response>>;
             }
-
-            pub trait SsoResponse: Sized {
-                type Ok;
-                type Err: SsoError;
-                fn new(responding_to: String, payload: ResponsePayload<Self>) -> Self;
-                fn responding_to(&self) -> &str;
-                fn into_payload(self) -> ResponsePayload<Self>;
-                fn into_message(self) -> RemoteMessage;
-                fn from_message(message: RemoteMessage) -> Option<Self>;
-                fn outcome(&self) -> ResponseOutcome;
-            }
-
-            pub type ResponsePayload<R> = Result<<R as SsoResponse>::Ok, <R as SsoResponse>::Err>;
 
             pub trait SsoError {
                 fn not_connected() -> Self;
@@ -51,17 +42,13 @@ mod host_logic {
             #[derive(Debug, Clone, PartialEq, Eq)]
             pub struct BarRequest;
 
-            #[derive(truapi_macros::SsoResponse)]
-            pub struct FooResponse {
+            pub struct Response<P> {
                 pub responding_to: String,
-                pub payload: Result<u32, String>,
+                pub payload: P,
             }
 
-            #[derive(truapi_macros::SsoResponse)]
-            pub struct BarResponse {
-                pub responding_to: String,
-                pub payload: Result<u32, String>,
-            }
+            pub type FooResponse = Result<u32, String>;
+            pub type BarResponse = Result<u32, String>;
 
             pub struct RemoteMessage {
                 pub message_id: String,
@@ -79,9 +66,9 @@ mod host_logic {
                 pub enum RemoteMessage {
                     Disconnected,
                     FooRequest(Box<FooRequest>),
-                    FooResponse(FooResponse),
+                    FooResponse(Response<FooResponse>),
                     BarRequest(BarRequest),
-                    BarResponse(BarResponse),
+                    BarResponse(Response<BarResponse>),
                 }
             }
         }

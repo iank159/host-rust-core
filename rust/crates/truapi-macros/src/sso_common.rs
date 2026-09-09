@@ -3,7 +3,7 @@
 use proc_macro2::TokenStream;
 use quote::quote;
 
-/// Server traits implemented by the SSO derives.
+/// Request contract implemented by the service macro.
 pub(super) fn wire_path() -> TokenStream {
     quote!(crate::host_logic::sso::wire)
 }

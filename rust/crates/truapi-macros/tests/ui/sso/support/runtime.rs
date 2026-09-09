@@ -6,7 +6,8 @@ mod runtime {
     }
 
     pub mod sso_service {
-        use crate::host_logic::sso::wire::{ResponseOutcome, ResponsePayload, SsoResponse};
+        use crate::host_logic::sso::messages::{Response, v1};
+        use crate::host_logic::sso::wire::{ResponseOutcome, SsoError};
 
         pub struct SsoRequestContext;
 
@@ -24,13 +25,13 @@ mod runtime {
 
         pub struct Answer;
 
-        pub struct SsoReply<R: SsoResponse> {
-            payload: ResponsePayload<R>,
+        pub struct SsoReply<P> {
+            payload: P,
             outcome: Option<ResponseOutcome>,
         }
 
-        impl<R: SsoResponse> From<ResponsePayload<R>> for SsoReply<R> {
-            fn from(payload: ResponsePayload<R>) -> Self {
+        impl<P> From<P> for SsoReply<P> {
+            fn from(payload: P) -> Self {
                 Self {
                     payload,
                     outcome: None,
@@ -38,16 +39,26 @@ mod runtime {
             }
         }
 
-        impl<R: SsoResponse> SsoReply<R> {
+        impl<P> SsoReply<P> {
             pub fn with_outcome(mut self, outcome: ResponseOutcome) -> Self {
                 self.outcome = Some(outcome);
                 self
             }
+        }
 
-            pub fn finish(self, id: &str) -> Answer {
-                let response = R::new(id.to_string(), self.payload);
-                let _outcome = self.outcome.unwrap_or_else(|| response.outcome());
-                let _message = response.into_message();
+        impl<T, E: SsoError> SsoReply<Result<T, E>> {
+            pub fn finish(
+                self,
+                id: &str,
+                wrap: impl FnOnce(Response<Result<T, E>>) -> v1::RemoteMessage,
+            ) -> Answer {
+                let _outcome = self
+                    .outcome
+                    .unwrap_or_else(|| ResponseOutcome::from_payload(&self.payload));
+                let _message = wrap(Response {
+                    responding_to: id.to_string(),
+                    payload: self.payload,
+                });
                 Answer
             }
         }

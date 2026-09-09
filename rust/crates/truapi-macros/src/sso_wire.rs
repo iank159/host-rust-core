@@ -6,7 +6,7 @@ use syn::{
     Data, DeriveInput, Fields, GenericArgument, PathArguments, Type, Variant, parse_macro_input,
 };
 
-use crate::sso_common::{snake_case, wire_path};
+use crate::sso_common::snake_case;
 
 const DISCONNECT_VARIANT: &str = "Disconnected";
 
@@ -44,7 +44,8 @@ fn derive_sso_wire(input: DeriveInput) -> syn::Result<TokenStream> {
         } else if name.ends_with("Request") {
             requests.push(RequestVariant::parse(variant)?);
         } else if name.ends_with("Response") {
-            responses.push(ResponseVariant::parse(variant)?);
+            single_payload(variant)?;
+            responses.push(variant.ident.clone());
         } else {
             return Err(syn::Error::new_spanned(
                 &variant.ident,
@@ -59,7 +60,6 @@ fn derive_sso_wire(input: DeriveInput) -> syn::Result<TokenStream> {
         ));
     }
 
-    let wire = wire_path();
     let disconnect = format_ident!("{DISCONNECT_VARIANT}");
     let mut any_variants = Vec::new();
     let mut classify_arms = Vec::new();
@@ -93,22 +93,18 @@ fn derive_sso_wire(input: DeriveInput) -> syn::Result<TokenStream> {
         let name = snake_case(stem);
         name_arms.push(quote! { #enum_ident::#variant(_) => #name });
     }
-    for response in &responses {
-        let variant = &response.variant;
-        let payload = &response.payload;
+    for variant in &responses {
         let name = variant.to_string();
         classify_arms.push(quote! { #enum_ident::#variant(_) => Incoming::Response(#name) });
         name_arms.push(quote! { #enum_ident::#variant(_) => #name });
         responding_to_arms.push(quote! {
-            #enum_ident::#variant(response) => Some(#wire::SsoResponse::responding_to(response))
+            #enum_ident::#variant(response) => Some(&response.responding_to)
         });
         retarget_arms.push(quote! {
-            #enum_ident::#variant(response) => #enum_ident::#variant(
-                <#payload as #wire::SsoResponse>::new(
-                    responding_to,
-                    #wire::SsoResponse::into_payload(response),
-                ),
-            )
+            #enum_ident::#variant(mut response) => {
+                response.responding_to = responding_to;
+                #enum_ident::#variant(response)
+            }
         });
     }
     Ok(quote! {
@@ -191,20 +187,6 @@ impl RequestVariant {
             variant: variant.ident.clone(),
             payload,
             boxed,
-        })
-    }
-}
-
-struct ResponseVariant {
-    variant: Ident,
-    payload: Type,
-}
-
-impl ResponseVariant {
-    fn parse(variant: &Variant) -> syn::Result<Self> {
-        Ok(Self {
-            variant: variant.ident.clone(),
-            payload: single_payload(variant)?.clone(),
         })
     }
 }

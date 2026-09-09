@@ -5,7 +5,6 @@
 
 mod service;
 mod sso_common;
-mod sso_response;
 mod sso_service;
 mod sso_wire;
 mod versioned_type;
@@ -85,21 +84,13 @@ pub fn derive_sso_wire(item: TokenStream) -> TokenStream {
     sso_wire::expand(item)
 }
 
-/// Implement `SsoResponse` for a response struct made of `responding_to` and
-/// one `Result<Ok, Err>` payload field. `#[sso(outcome = path)]` swaps the
-/// transcript classification for a bespoke function. Only valid inside
-/// `truapi-server`.
-#[proc_macro_derive(SsoResponse, attributes(sso))]
-pub fn derive_sso_response(item: TokenStream) -> TokenStream {
-    sso_response::expand(item)
-}
-
 /// Define SSO handlers in a dedicated inherent implementation.
 ///
 /// Every method must be `async fn name(&self, cx: &SsoRequestContext, request:
-/// <Request>) -> <Response>`. Each signature supplies `SsoRequest` pairing;
+/// <Request>) -> <Response>`, where the named response aliases its `Result`
+/// payload and selects the wire variant. Each signature supplies `SsoRequest` pairing;
 /// the macro generates an exhaustive `dispatch` method on the service type.
-/// Handler return types expand to `SsoReply<Response>`, and bodies return
+/// Handler return types expand to `SsoReply<Payload>`, and bodies return
 /// ordinary `Result` payloads or explicit replies with a transcript outcome.
 /// An inner async block preserves `return` and `?` semantics. Constructors and
 /// other helpers belong in a separate, unannotated implementation.

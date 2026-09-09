@@ -12,15 +12,16 @@ the thin public entry points, which Rust requires at the proc-macro crate root.
 | [`wire`](src/wire.rs) | TrUAPI method | Wire IDs and flags for codegen |
 | [`versioned_type!`](src/versioned_type.rs) | Versioned envelope declarations | SCALE enums and version conversion traits |
 | [`SsoWire`](src/sso_wire.rs) | Hand-written `v1::RemoteMessage` enum | Request classification and wrapping, message names, and correlation helpers |
-| [`SsoResponse`](src/sso_response.rs) | Response struct with `responding_to: String` followed by one `Result<Ok, Err>` field | Payload types and accessors, response construction, wire wrapping, and transcript outcome |
-| [`sso_service`](src/sso_service.rs) | Dedicated inherent impl of SSO handlers | Request/response pairing, exhaustive dispatch, and handler reply conversion |
+| [`sso_service`](src/sso_service.rs) | Dedicated inherent impl of SSO handlers | Request/response variant conversion, exhaustive dispatch, and handler reply conversion |
 
 ## Handler contract
 
 Every method in the annotated impl is an endpoint. Its parameter names a wire
-request type and its return type names the corresponding wire response:
+request type and its return type names the response's `Result` payload:
 
 ```rust
+pub type GetAccountAliasResponse = Result<HostAccountGetAliasResponse, RingVrfError>;
+
 #[truapi_macros::sso_service]
 impl SigningHostSsoService {
     async fn get_account_alias(
@@ -36,19 +37,22 @@ impl SigningHostSsoService {
 ```
 
 The method name is the request type's snake-case stem: `GetAccountAliasRequest`
-requires `get_account_alias`. The named response defines the pairing, including
-when two handlers share one response type. Constructors and internal helpers
-belong in a separate, unannotated impl.
+requires `get_account_alias`. The return type's name selects the wire response
+variant, including when two handlers share one variant. Distinct variants may
+carry identical result types; conversion belongs to the request, so those
+responses remain distinguishable. Constructors and helpers belong in a separate impl.
 
-Handler signatures expand to native async methods returning `SsoReply<Response>`.
-Bodies return the response's ordinary `Result` payload or an explicit `SsoReply`
-with a local transcript outcome. An inner async block preserves `?` and early
-returns; `.into()` performs the reply conversion.
+Handler signatures expand to native async methods returning `SsoReply<Payload>`.
+Bodies return the named `Result` or an explicit reply with a local transcript
+outcome. Shared Rust code adds `Response<P> { responding_to, payload }`;
+the generated request contract selects its wire variant. An inner async block
+preserves `?` and early returns.
 
 The generated `dispatch(&self, session, message)` method classifies the message,
 creates context from the supplied signing session, and exhaustively selects a
 handler. Without a session it returns the response's typed disconnected error.
-Shared reply finishing supplies correlation and the transcript outcome. Missing
+Shared reply finishing supplies correlation and defaults the transcript outcome
+to success or error; handlers classify operation-specific outcomes. Missing
 handlers, undeclared wire variants, and incompatible payloads fail compilation.
 
 ## Server integration

@@ -20,4 +20,10 @@ impl Service {
 fn main() {
     fn check<R: SsoRequest<Response = BarResponse>>() {}
     check::<FooRequest>();
+    let response = FooRequest::response_into_message(Response {
+        responding_to: "m-1".into(),
+        payload: Ok(7),
+    });
+    assert!(matches!(response, v1::RemoteMessage::BarResponse(_)));
+    assert!(BarRequest::response_from_message(response).is_none());
 }

@@ -71,6 +71,7 @@ fn expand_sso_service(mut item: ItemImpl) -> syn::Result<TokenStream> {
             (async move #body).await.into()
         });
         let variant = last_segment(&request_ty)?;
+        let response_variant = last_segment(&response_ty)?;
         let name = &method.sig.ident;
         let variant_name = variant.to_string();
         let stem = variant_name.strip_suffix("Request").ok_or_else(|| {
@@ -87,6 +88,21 @@ fn expand_sso_service(mut item: ItemImpl) -> syn::Result<TokenStream> {
             impl #wire::SsoRequest for #request_ty {
                 const NAME: &'static str = #expected_name;
                 type Response = #response_ty;
+
+                fn response_into_message(
+                    response: crate::host_logic::sso::messages::Response<Self::Response>,
+                ) -> #message {
+                    #message::#response_variant(response)
+                }
+
+                fn response_from_message(
+                    message: #message,
+                ) -> Option<crate::host_logic::sso::messages::Response<Self::Response>> {
+                    match message {
+                        #message::#response_variant(response) => Some(response),
+                        _ => None,
+                    }
+                }
 
                 fn into_message(self) -> #message {
                     use crate::host_logic::sso::messages::v1::AnyRequest;
@@ -108,7 +124,7 @@ fn expand_sso_service(mut item: ItemImpl) -> syn::Result<TokenStream> {
                     Some(cx) => self.#name(cx, request).await,
                     None => Err(#wire::SsoError::not_connected()).into(),
                 };
-                reply.finish(&message_id)
+                reply.finish(&message_id, <#request_ty as #wire::SsoRequest>::response_into_message)
             }
         });
     }

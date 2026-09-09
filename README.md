@@ -92,7 +92,7 @@ scripts/codegen.sh         Regenerate the TS client from the Rust source
 scripts/battery.sh         Run the generated battery against both headless CLI host roles
 ```
 
-See the [proc-macro guide](rust/crates/truapi-macros/README.md) for the SSO handler and wire contracts and their per-macro implementation modules.
+See the [proc-macro guide](rust/crates/truapi-macros/README.md) for typed SSO handlers, their shared response envelope, and the macro implementation modules.
 
 The Swift host adapter (the `TrUAPIHost` SPM package over the truapi-server
 UniFFI core) lives under [`ios/truapi-host/`](ios/truapi-host), with its SPM
