@@ -8,19 +8,6 @@ import {
   compatibility,
   pocketCompatibility,
 } from "../data/compatibility";
-
-/**
- * Execution kinds that serve the Chat modality. `Chat` is the name protocol
- * versions up to 0.9.0 declared; `Worker` is the name that replaced it.
- */
-const CHAT_EXECUTIONS: ReadonlySet<string> = new Set(["Chat", "Worker"]);
-
-/**
- * Execution kinds that serve Pocket. Only `Worker`: Pocket arrived after the
- * `Chat` kind name was retired, so no archived version records it under that
- * name.
- */
-const POCKET_EXECUTIONS: ReadonlySet<string> = new Set(["Worker"]);
 import type {
   CompatibilityMatrix,
   CompatStatus,
@@ -108,7 +95,7 @@ export default function CompatibilityPage() {
         <CompatibilitySection
           title="App compatibility"
           description="API coverage measured from a visible App or Widget execution."
-          executions={null}
+          serviceName={null}
           matrix={compatibility}
           version={version}
           expandedId={expandedId}
@@ -117,7 +104,7 @@ export default function CompatibilityPage() {
         <CompatibilitySection
           title="Chat compatibility"
           description="Chat API coverage measured from the product's Worker execution."
-          executions={CHAT_EXECUTIONS}
+          serviceName="Chat"
           matrix={chatCompatibility}
           version={version}
           expandedId={expandedId}
@@ -126,7 +113,7 @@ export default function CompatibilityPage() {
         <CompatibilitySection
           title="Pocket compatibility"
           description="Pocket API coverage measured from the product's Worker execution."
-          executions={POCKET_EXECUTIONS}
+          serviceName="Pocket"
           matrix={pocketCompatibility}
           version={version}
           expandedId={expandedId}
@@ -140,7 +127,7 @@ export default function CompatibilityPage() {
 function CompatibilitySection({
   title,
   description,
-  executions,
+  serviceName,
   matrix,
   version,
   expandedId,
@@ -149,11 +136,11 @@ function CompatibilitySection({
   title: string;
   description: string;
   /**
-   * Kinds whose gated services belong in this section, or `null` for the
-   * ungated ones. A set rather than one name because each archived version
-   * records the kind name that version declared.
+   * Name of the gated service this section measures, or `null` for the
+   * ungated ones. Chat and Pocket are both `Worker`-gated, so the execution
+   * kind cannot tell them apart.
    */
-  executions: ReadonlySet<string> | null;
+  serviceName: string | null;
   matrix: CompatibilityMatrix;
   version: VersionEntry;
   expandedId: string | null;
@@ -188,9 +175,8 @@ function CompatibilitySection({
           <tbody>
             {version.services
               .filter((service) =>
-                executions
-                  ? service.requiredExecution !== undefined &&
-                    executions.has(service.requiredExecution)
+                serviceName
+                  ? service.name === serviceName
                   : service.requiredExecution === undefined,
               )
               .map((service) => ({
