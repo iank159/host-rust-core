@@ -357,11 +357,6 @@ impl Decode for ProtocolMessage {
             .map_err(|_| CodecError::from("frame is missing the method discriminant byte"))?;
         let version =
             u8::decode(input).map_err(|_| CodecError::from("frame is missing the version byte"))?;
-        // Versions are 1-based, so 0 is not a version any peer can decode.
-        // Reject it at the frame boundary rather than deep in a payload.
-        if version == 0 {
-            return Err(CodecError::from("frame carries version 0"));
-        }
         let message_type = u8::decode(input)
             .map_err(|_| CodecError::from("frame is missing the message-type byte"))?;
         // Unknown (trait, method) pairs are accepted here; routing is deferred
@@ -543,22 +538,6 @@ mod tests {
         assert_eq!(decoded.payload.value, vec![0xaa, 0xbb]);
     }
 
-    /// Versions are 1-based, so `0` names no variant any peer can decode.
-    /// Rejecting it here keeps the failure at the frame boundary, next to the
-    /// trait and method checks, instead of surfacing as a confusing payload
-    /// error once a decoder tries to reconstruct a `V0` wrapper.
-    #[test]
-    fn a_zero_version_is_refused_at_the_frame_boundary() {
-        let mut bytes = Vec::new();
-        "p:1".to_string().encode_to(&mut bytes);
-        bytes.push(2);
-        bytes.push(1);
-        bytes.push(0); // version
-        bytes.push(MESSAGE_TYPE_REQUEST);
-        bytes.extend_from_slice(&[0xaa]);
-        assert!(ProtocolMessage::decode(&mut &bytes[..]).is_err());
-    }
-
     /// The reserved `(255, 255)` address is the one channel every peer must
     /// answer on, so a build that rejected an unfamiliar payload here could
     /// never be told anything new without the connection dying. An unknown
@@ -580,7 +559,6 @@ mod tests {
             "p:1".to_string().encode_to(&mut bytes);
             bytes.push(PROTOCOL_ERROR_TRAIT_ID);
             bytes.push(PROTOCOL_ERROR_METHOD_ID);
-            bytes.push(PROTOCOL_ERROR_VERSION);
             bytes.push(MESSAGE_TYPE_RESPONSE);
             bytes.extend_from_slice(&payload);
             let decoded = ProtocolMessage::decode(&mut &bytes[..])

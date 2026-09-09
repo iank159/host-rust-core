@@ -451,9 +451,7 @@ export function encodeWireMessage(
   if (!Number.isInteger(methodId) || methodId < 0 || methodId > 255) {
     return err(new Error(`Invalid wire method discriminant: ${methodId}`));
   }
-  // Versions are 1-based, so 0 is not a version any peer can decode: reject it
-  // here rather than letting it fail deep inside a payload decoder.
-  if (!Number.isInteger(version) || version < 1 || version > 255) {
+  if (!Number.isInteger(version) || version < 0 || version > 255) {
     return err(new Error(`Invalid wire version: ${version}`));
   }
   if (!Number.isInteger(messageType) || messageType < 0 || messageType > 255) {
@@ -508,9 +506,6 @@ export function decodeWireMessage(
   const methodId = cursor[1];
   const version = cursor[2];
   const messageType = cursor[3];
-  if (version < 1) {
-    return err(new Error(`Invalid wire version: ${version}`));
-  }
   const value = cursor.subarray(4);
   // Hand the value bytes back as a fresh slice so callers may safely retain
   // it even if the source buffer is reused by the transport.

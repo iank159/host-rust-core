@@ -373,20 +373,6 @@ fn validate_versioned_wrapper_shapes(api: &ApiDefinition) -> Result<()> {
     Ok(())
 }
 
-/// Whether an error leg's domain payload is a versioned wrapper — i.e. whether
-/// its `Interrupt` payload has a version tag to strip on the way out and
-/// restore on the way in. A plain subscription's `GenericError` has none, so
-/// splicing one into it shifts every byte that follows.
-fn error_domain_is_versioned(ty: &TypeRef, wrappers: &HashMap<String, VersionedWrapper>) -> bool {
-    if let TypeRef::Named { name, args } = ty
-        && name == "CallError"
-        && let Some(domain) = args.first()
-    {
-        return versioned_wrapper_for(domain, wrappers).is_some();
-    }
-    versioned_wrapper_for(ty, wrappers).is_some()
-}
-
 fn versioned_wrapper_for<'a>(
     ty: &'a TypeRef,
     wrappers: &'a HashMap<String, VersionedWrapper>,
@@ -1348,20 +1334,6 @@ fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) 
 /// own `messageType` byte (`Request`/`Start` = 0, `Response`/`Receive` = 1,
 /// `Interrupt` = 2, `Stop` = 3), so a debugger reads the wire's own leg
 /// marker instead of having to decode a payload to learn its shape.
-/// The debug table's `Interrupt` decoder. Shares
-/// [`error_domain_is_versioned`] with the client emitter so the two can never
-/// disagree about whether this leg has a version tag to restore — splicing one
-/// into a payload that has none shifts every byte after it.
-fn interrupt_decoder(error_codec: &str, error_is_versioned: bool) -> String {
-    if error_is_versioned {
-        format!(
-            "    2: (payload, version) => S.Option({error_codec}).dec(S.decodeInterruptWithVersion(version, payload)),"
-        )
-    } else {
-        format!("    2: (payload) => S.Option({error_codec}).dec(payload),")
-    }
-}
-
 fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<String> {
     let ctx = CodecContext::default();
     let wrappers = collect_versioned_wrappers(api);
@@ -1418,9 +1390,10 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
                     lines.push(format!(
                         "    1: (payload, version) => {item_codec}.dec(S.decodeWithVersion(version, payload)),"
                     ));
-                    lines.push(interrupt_decoder(
-                        &error_codec,
-                        error_domain_is_versioned(&call_error_generic, &wrappers),
+                    // A plain subscription's interrupt error is the unversioned
+                    // `GenericError`, so nothing inside it needs restoring.
+                    lines.push(format!(
+                        "    2: (payload) => S.Option({error_codec}).dec(payload),"
                     ));
                     lines.push("    3: () => undefined,".to_string());
                 }
@@ -1431,9 +1404,8 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
                     lines.push(format!(
                         "    1: (payload, version) => {item_codec}.dec(S.decodeWithVersion(version, payload)),"
                     ));
-                    lines.push(interrupt_decoder(
-                        &error_codec,
-                        error_domain_is_versioned(err, &wrappers),
+                    lines.push(format!(
+                        "    2: (payload, version) => S.Option({error_codec}).dec(S.decodeInterruptWithVersion(version, payload)),"
                     ));
                     lines.push("    3: () => undefined,".to_string());
                 }
@@ -1989,7 +1961,6 @@ fn emit_method(
                 item_is_wrapper,
                 error,
                 error_codec,
-                error_domain_is_versioned(&call_error_generic, wrappers),
                 version,
                 request_name,
             )?;
@@ -2010,7 +1981,6 @@ fn emit_method(
                 item_is_wrapper,
                 error,
                 error_codec,
-                error_domain_is_versioned(err, wrappers),
                 version,
                 request_name,
             )?;
@@ -2174,7 +2144,6 @@ fn emit_subscribe_method(
     item_is_wrapper: bool,
     err: ResponseEmission,
     error_codec: String,
-    error_is_versioned: bool,
     version: u32,
     request_name: Option<&str>,
 ) -> Result<()> {
@@ -2232,33 +2201,18 @@ fn emit_subscribe_method(
         )
         .unwrap();
     }
-    // Only a versioned domain error has a tag to restore. A plain
-    // subscription's `GenericError` carries none, and splicing one in would
-    // shift every byte after it - dropping the failure's `reason`.
-    if error_is_versioned {
-        writedoc!(
-            out,
-            "
-                  decodeInterrupt: (payload, interruptVersion) =>
-                    S.Option({error_codec}).dec(
-                      S.decodeInterruptWithVersion(interruptVersion, payload),
-                    ),
-                }});
-              }}
-            "
-        )
-        .unwrap();
-    } else {
-        writedoc!(
-            out,
-            "
-                  decodeInterrupt: (payload) => S.Option({error_codec}).dec(payload),
-                }});
-              }}
-            "
-        )
-        .unwrap();
-    }
+    writedoc!(
+        out,
+        "
+              decodeInterrupt: (payload, interruptVersion) =>
+                S.Option({error_codec}).dec(
+                  S.decodeInterruptWithVersion(interruptVersion, payload),
+                ),
+            }});
+          }}
+        "
+    )
+    .unwrap();
 
     Ok(())
 }
