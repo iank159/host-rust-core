@@ -36,10 +36,9 @@ pub(crate) use sso_responder::{
 use super::authority::{
     AccountAliasAuthorityRequest, AuthorityError, AuthoritySession, BulletinAllowanceKey,
     CreateProofAuthorityRequest, CreateTransactionAuthorityRequest,
-    ListRingVrfKeysAuthorityRequest, ProductAuthority, ProductDeviceChatAuthorityError,
-    ProductDeviceChatAuthorityRequest, RegisterRingVrfKeyAuthorityRequest,
+    ListRingVrfKeysAuthorityRequest, ProductAuthority, RegisterRingVrfKeyAuthorityRequest,
     RingVrfSignAuthorityRequest, SignPayloadAuthorityRequest, SignRawAuthorityRequest,
-    StatementStoreAllowanceKey, authority_session_validation_id, execute_product_device_chat,
+    StatementStoreAllowanceKey, authority_session_validation_id,
 };
 use super::ring_vrf_registry::RingVrfRegistryStore;
 use super::{RuntimeServices, connected_session_ui_info, validate_vrf_transcript};
@@ -992,28 +991,6 @@ impl ProductAuthority for SigningHost {
         sign_from_entropy(&entropy, &request.message)
     }
 
-    async fn product_device_chat(
-        &self,
-        _cx: &CallContext,
-        session: &AuthoritySession,
-        request: ProductDeviceChatAuthorityRequest,
-    ) -> Result<v01::HostProductDeviceChatResponse, ProductDeviceChatAuthorityError> {
-        self.require_current_session(session)
-            .map_err(|_| ProductDeviceChatAuthorityError::Disconnected)?;
-        let entropy = self
-            .root_entropy()
-            .map_err(|error| ProductDeviceChatAuthorityError::Unavailable(error.to_string()))?;
-        let (identity, identity_chat_private_key) =
-            sso_responder::derive_responder_identity(&entropy, self.network_suffix())
-                .map_err(|error| ProductDeviceChatAuthorityError::Unavailable(error.to_string()))?;
-        let identity_chat_private_key = Zeroizing::new(identity_chat_private_key);
-        execute_product_device_chat(
-            &identity_chat_private_key,
-            identity.statement_public_key,
-            request,
-        )
-    }
-
     async fn allocate_resources(
         &self,
         _cx: &CallContext,
@@ -1060,17 +1037,6 @@ impl ProductAuthority for SigningHost {
                     .grant_auto_signing(session, &product_id)
                     .map(|_| v01::AllocationOutcome::Allocated)
                     .map_err(sso_responder::AllowanceAllocationError::Authority),
-                v01::AllocatableResource::ProductStatementStoreAllowance(index) => {
-                    sso_responder::allocate_product_statement_store_allowance(
-                        &self.services,
-                        self,
-                        &product_id,
-                        &index,
-                        OnExistingAllowancePolicy::Increase,
-                    )
-                    .await
-                    .map(|()| v01::AllocationOutcome::Allocated)
-                }
             };
             match outcome {
                 Ok(outcome) => outcomes.push(outcome),

@@ -3,8 +3,7 @@
 use super::super::authority::{
     AccountAliasAuthorityRequest, AuthorityCancelError, AuthorityError, BulletinAllowanceKey,
     CreateProofAuthorityRequest, CreateTransactionAuthorityRequest,
-    ListRingVrfKeysAuthorityRequest, ProductDeviceChatAuthorityError,
-    ProductDeviceChatAuthorityRequest, RegisterRingVrfKeyAuthorityRequest,
+    ListRingVrfKeysAuthorityRequest, RegisterRingVrfKeyAuthorityRequest,
     RingVrfSignAuthorityRequest, SignPayloadAuthorityRequest, SignRawAuthorityRequest,
     StatementStoreAllowanceKey,
 };
@@ -19,13 +18,12 @@ use super::PairingHost;
 use crate::host_logic::session::{SessionInfo, SessionState, SsoSessionInfo};
 use crate::host_logic::sso::messages::{
     OnExistingAllowancePolicy, RemoteMessage, RemoteMessageData, RingVrfError,
-    SsoAllocatedResource, SsoAllocationOutcome, SsoProductDeviceChatOperation, SsoRemoteResponse,
-    SsoSessionStatement, alias_request_message, build_outgoing_request_statement,
-    create_transaction_legacy_message, create_transaction_message, decode_sso_session_statement,
-    list_ring_vrf_keys_message, product_device_chat_message, product_subtree_request_message,
-    proof_request_message, register_ring_vrf_key_message, resource_allocation_message,
-    ring_vrf_sign_message, sign_payload_message, sign_raw_legacy_message, sign_raw_message,
-    sign_vrf_message, v1,
+    SsoAllocatedResource, SsoAllocationOutcome, SsoRemoteResponse, SsoSessionStatement,
+    alias_request_message, build_outgoing_request_statement, create_transaction_legacy_message,
+    create_transaction_message, decode_sso_session_statement, list_ring_vrf_keys_message,
+    product_subtree_request_message, proof_request_message, register_ring_vrf_key_message,
+    resource_allocation_message, ring_vrf_sign_message, sign_payload_message,
+    sign_raw_legacy_message, sign_raw_message, sign_vrf_message, v1,
 };
 use crate::host_logic::statement_store::parse_new_statements_result;
 
@@ -69,8 +67,6 @@ enum RemoteAction {
     ResourceAllocation,
     #[display("product-subtree")]
     ProductSubtree,
-    #[display("product-device-chat")]
-    ProductDeviceChat,
 }
 
 /// Active peer-disconnect watcher for one SSO session; aborts on drop.
@@ -635,87 +631,6 @@ impl PairingHost {
         response.payload
     }
 
-    /// Forward a product-device Chat v2 operation without exposing wallet key material.
-    pub(super) async fn remote_product_device_chat(
-        &self,
-        cx: &CallContext,
-        session: &SessionInfo,
-        request: ProductDeviceChatAuthorityRequest,
-    ) -> Result<v01::HostProductDeviceChatResponse, ProductDeviceChatAuthorityError> {
-        let (calling_product_id, operation) = match request {
-            ProductDeviceChatAuthorityRequest::Bind {
-                calling_product_id,
-                derivation_index,
-                peer_identity_account_id,
-                peer_chat_public_key,
-                ..
-            } => (
-                calling_product_id,
-                SsoProductDeviceChatOperation::Bind {
-                    derivation_index,
-                    peer_identity_account_id,
-                    peer_chat_public_key,
-                },
-            ),
-            ProductDeviceChatAuthorityRequest::Seal {
-                calling_product_id,
-                peer_chat_public_key,
-                plaintext,
-            } => (
-                calling_product_id,
-                SsoProductDeviceChatOperation::Seal {
-                    peer_chat_public_key,
-                    plaintext,
-                },
-            ),
-            ProductDeviceChatAuthorityRequest::Open {
-                calling_product_id,
-                peer_chat_public_key,
-                combined_ciphertext,
-            } => (
-                calling_product_id,
-                SsoProductDeviceChatOperation::Open {
-                    peer_chat_public_key,
-                    combined_ciphertext,
-                },
-            ),
-        };
-        let message_id = sso_message_id();
-        let message = product_device_chat_message(message_id, calling_product_id, operation);
-        let response = self
-            .submit_remote_message(cx, session, RemoteAction::ProductDeviceChat, message)
-            .await
-            .map_err(|error| {
-                ProductDeviceChatAuthorityError::Unavailable(
-                    remote_authority_error(error).to_string(),
-                )
-            })?;
-        let response_kind = response.kind();
-        let SsoRemoteResponse::ProductDeviceChat(response) = response else {
-            return Err(ProductDeviceChatAuthorityError::Unavailable(
-                unexpected_response_reason(
-                    "Unexpected SSO response for product-device Chat request",
-                    response_kind,
-                ),
-            ));
-        };
-        response.payload.map_err(|error| match error {
-            v01::HostProductDeviceChatError::NotConnected => {
-                ProductDeviceChatAuthorityError::Disconnected
-            }
-            v01::HostProductDeviceChatError::Rejected => ProductDeviceChatAuthorityError::Rejected,
-            v01::HostProductDeviceChatError::InvalidPeerKey => {
-                ProductDeviceChatAuthorityError::InvalidPeerKey
-            }
-            v01::HostProductDeviceChatError::InvalidCiphertext => {
-                ProductDeviceChatAuthorityError::InvalidCiphertext
-            }
-            v01::HostProductDeviceChatError::Unknown { reason } => {
-                ProductDeviceChatAuthorityError::Unavailable(reason)
-            }
-        })
-    }
-
     /// Ask the paired signing host to allocate product resources, caching any
     /// returned allowance keys.
     pub(super) async fn remote_allocate_resources(
@@ -987,7 +902,6 @@ impl PairingHost {
                         .await?;
                     }
                     SsoAllocatedResource::SmartContractAllowance => {}
-                    SsoAllocatedResource::ProductStatementStoreAllowance => {}
                     SsoAllocatedResource::AutoSigning {
                         product_root_private_key,
                         ring_vrf_domain_entropy,

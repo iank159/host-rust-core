@@ -29,7 +29,7 @@ use truapi::latest::{
     HostAccountGetAliasResponse, LegacyAccountTxPayload, ProductAccountId, ProductAccountTxPayload,
     ProductProofContext, RawPayload, RingLocation,
 };
-use truapi::v01::{self, HostAccountSignVrfError, HostAccountSignVrfRequest, VrfSignature};
+use truapi::v01::{HostAccountSignVrfError, HostAccountSignVrfRequest, VrfSignature};
 
 use crate::host_logic::session::SsoSessionInfo;
 use crate::host_logic::sso::pairing::{
@@ -497,8 +497,6 @@ pub enum SsoAllocatableResource {
     SmartContractAllowance(DerivationIndex),
     /// Transfer of the product subtree key so the host can sign locally.
     AutoSigning,
-    /// Current UTC-day Statement Store allowance targeting the selected product account.
-    ProductStatementStoreAllowance(DerivationIndex),
 }
 
 impl From<AllocatableResource> for SsoAllocatableResource {
@@ -510,9 +508,6 @@ impl From<AllocatableResource> for SsoAllocatableResource {
                 Self::SmartContractAllowance(index)
             }
             AllocatableResource::AutoSigning => Self::AutoSigning,
-            AllocatableResource::ProductStatementStoreAllowance(index) => {
-                Self::ProductStatementStoreAllowance(index)
-            }
         }
     }
 }
@@ -568,8 +563,6 @@ pub enum SsoAllocatedResource {
         /// Entropy of the product's ring-VRF domain.
         ring_vrf_domain_entropy: [u8; 32],
     },
-    /// Product account was registered as the current Statement Store slot target.
-    ProductStatementStoreAllowance,
 }
 
 impl SsoAllocatedResource {
@@ -580,7 +573,6 @@ impl SsoAllocatedResource {
             Self::BulletinAllowance { .. } => "bulletin-allowance",
             Self::SmartContractAllowance => "smart-contract-allowance",
             Self::AutoSigning { .. } => "auto-signing",
-            Self::ProductStatementStoreAllowance => "product-statement-store-allowance",
         }
     }
 }
@@ -628,53 +620,6 @@ pub enum CreateTransactionPayload {
 pub struct CreateTransactionLegacyRequest {
     /// Transaction payload to build.
     pub payload: CreateTransactionLegacyPayload,
-}
-
-/// Product-device Chat v2 request forwarded to the Account Holder.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub struct ProductDeviceChatRequest {
-    /// Product originating the operation.
-    pub calling_product_id: String,
-    /// Resolved authority operation; no wallet private material is included.
-    pub operation: SsoProductDeviceChatOperation,
-}
-
-/// Product-device Chat v2 operation carried over encrypted SSO.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub enum SsoProductDeviceChatOperation {
-    /// Bind the product device to the wallet identity and derive peer routes.
-    Bind {
-        /// Product account index; the Account Holder re-derives the device
-        /// account instead of trusting a pairing-host supplied public key.
-        derivation_index: v01::DerivationIndex,
-        /// Peer wallet identity account used for directional routing.
-        peer_identity_account_id: [u8; 32],
-        /// Peer's X25519 Chat identity public key.
-        peer_chat_public_key: [u8; 32],
-    },
-    /// Seal an identity-route payload for the peer.
-    Seal {
-        /// Peer's X25519 Chat identity public key.
-        peer_chat_public_key: [u8; 32],
-        /// Identity-route plaintext.
-        plaintext: Vec<u8>,
-    },
-    /// Open an authenticated identity-route payload from the peer.
-    Open {
-        /// Peer's X25519 Chat identity public key.
-        peer_chat_public_key: [u8; 32],
-        /// Nonce-prefixed ChaCha20-Poly1305 ciphertext and tag.
-        combined_ciphertext: Vec<u8>,
-    },
-}
-
-/// Product-device Chat v2 response returned by the Account Holder.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
-pub struct ProductDeviceChatResponse {
-    /// Remote request identifier this response answers.
-    pub responding_to: String,
-    /// Authority operation result.
-    pub payload: Result<v01::HostProductDeviceChatResponse, v01::HostProductDeviceChatError>,
 }
 
 /// Versioned legacy transaction-creation payload.
@@ -731,8 +676,6 @@ pub enum SsoRemoteResponse {
     ListRingVrfKeys(ListRingVrfKeysResponse),
     /// Direct ring-VRF signing response.
     RingVrfSign(RingVrfSignResponse),
-    /// Product-device Chat v2 response.
-    ProductDeviceChat(Box<ProductDeviceChatResponse>),
 }
 
 impl SsoRemoteResponse {
@@ -750,7 +693,6 @@ impl SsoRemoteResponse {
             Self::RegisterRingVrfKey(_) => "register-ring-vrf-key",
             Self::ListRingVrfKeys(_) => "list-ring-vrf-keys",
             Self::RingVrfSign(_) => "ring-vrf-sign",
-            Self::ProductDeviceChat(_) => "product-device-chat",
         }
     }
 }
@@ -888,29 +830,7 @@ fn remote_response_for_message(
         {
             Some(SsoRemoteResponse::RingVrfSign(response))
         }
-        v1::RemoteMessage::ProductDeviceChatResponse(response)
-            if response.responding_to == expected_remote_message_id =>
-        {
-            Some(SsoRemoteResponse::ProductDeviceChat(Box::new(response)))
-        }
         _ => None,
-    }
-}
-
-/// Build a product-device Chat v2 request for the Account Holder.
-pub fn product_device_chat_message(
-    message_id: String,
-    calling_product_id: String,
-    operation: SsoProductDeviceChatOperation,
-) -> RemoteMessage {
-    RemoteMessage {
-        message_id,
-        data: RemoteMessageData::V1(v1::RemoteMessage::ProductDeviceChatRequest(
-            ProductDeviceChatRequest {
-                calling_product_id,
-                operation,
-            },
-        )),
     }
 }
 
@@ -1640,46 +1560,6 @@ mod tests {
                 responding_to: "request".to_string(),
                 product_public_key: Ok([0xAB; 32]),
             }))
-        );
-    }
-
-    #[test]
-    fn product_device_chat_messages_pin_mobile_wire_indices() {
-        let request = product_device_chat_message(
-            "request".to_string(),
-            "egui-chat.paseo".to_string(),
-            SsoProductDeviceChatOperation::Bind {
-                derivation_index: DerivationIndex::Index(0),
-                peer_identity_account_id: [0x55; 32],
-                peer_chat_public_key: [0x66; 32],
-            },
-        );
-        let encoded_request = request.encode();
-        assert_eq!(encoded_request[9], 24);
-        assert_eq!(
-            RemoteMessage::decode(&mut encoded_request.as_slice()).unwrap(),
-            request
-        );
-
-        let product_response = ProductDeviceChatResponse {
-            responding_to: "request".to_string(),
-            payload: Ok(v01::HostProductDeviceChatResponse::Sealed {
-                combined_ciphertext: vec![0x77; 28],
-            }),
-        };
-        let response = RemoteMessage {
-            message_id: "response".to_string(),
-            data: RemoteMessageData::V1(v1::RemoteMessage::ProductDeviceChatResponse(
-                product_response.clone(),
-            )),
-        };
-        let encoded_response = response.encode();
-        assert_eq!(encoded_response[10], 25);
-        assert_eq!(
-            remote_response_for_message(response, "request"),
-            Some(SsoRemoteResponse::ProductDeviceChat(Box::new(
-                product_response
-            )))
         );
     }
 

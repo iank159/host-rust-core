@@ -19,18 +19,15 @@ use parity_scale_codec::Encode;
 use tracing::{debug, instrument, warn};
 use truapi::{CallContext, latest as api, v01};
 use truapi_platform::{
-    CreateTransactionReview, PermissionAuthorizationStatus, ResourceAllocationReview,
-    SignPayloadReview, SignRawReview, UserConfirmationReview, normalize_product_identifier,
+    CreateTransactionReview, ResourceAllocationReview, SignPayloadReview, SignRawReview,
+    UserConfirmationReview,
 };
 
 use super::SigningHost;
-#[cfg(not(target_arch = "wasm32"))]
-use super::allowance_renewal::StatementRenewalTarget;
 use super::sso_replay::{ReplayExecution, SsoReplayScope, execute_once};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::chain_runtime::RuntimeFailure;
 use crate::host_logic::entropy::root_entropy_source;
-use crate::host_logic::permissions::PermissionsService;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::host_logic::product_account::derive_sr25519_hard_path;
 use crate::host_logic::product_account::{
@@ -58,7 +55,6 @@ use crate::host_logic::statement_store::{
 use crate::runtime::authority::{
     AccountAliasAuthorityRequest, AuthorityError, CreateProofAuthorityRequest,
     CreateTransactionAuthorityRequest, ListRingVrfKeysAuthorityRequest, ProductAuthority,
-    ProductDeviceChatAuthorityError, ProductDeviceChatAuthorityRequest,
     RegisterRingVrfKeyAuthorityRequest, RingVrfSignAuthorityRequest, SignPayloadAuthorityRequest,
     SignRawAuthorityRequest,
 };
@@ -80,7 +76,7 @@ const BULLETIN_AUTHORIZATION_WAIT: std::time::Duration = std::time::Duration::fr
 /// Upper bound on undecodable request ids acknowledged within one serve loop.
 const MAX_DECODE_FAILURE_REQUEST_IDS: usize = 1024;
 
-pub(super) fn derive_responder_identity(
+fn derive_responder_identity(
     entropy: &[u8],
     network_suffix: &str,
 ) -> Result<(ResponderIdentity, [u8; 32]), ProductAccountError> {
@@ -842,14 +838,6 @@ pub(crate) async fn answer_remote_message(
                 payload: answer.payload,
             })
         }
-        v1::RemoteMessage::ProductDeviceChatRequest(request) => {
-            let cx = CallContext::with_request_id(message_id.clone());
-            let payload = product_device_chat_response(services, signing_host, &cx, request).await;
-            v1::RemoteMessage::ProductDeviceChatResponse(messages::ProductDeviceChatResponse {
-                responding_to: message_id,
-                payload,
-            })
-        }
         v1::RemoteMessage::CreateTransactionRequest(request) => {
             let CreateTransactionPayload::V1(payload) = request.payload;
             let signed_transaction = create_transaction_response(
@@ -920,8 +908,7 @@ pub(crate) async fn answer_remote_message(
         | v1::RemoteMessage::CreateTransactionResponse(_)
         | v1::RemoteMessage::SignRawLegacyResponse(_)
         | v1::RemoteMessage::ProductSubtreeResponse(_)
-        | v1::RemoteMessage::SignVrfResponse(_)
-        | v1::RemoteMessage::ProductDeviceChatResponse(_) => return None,
+        | v1::RemoteMessage::SignVrfResponse(_) => return None,
     };
     Some(AnsweredRemoteMessage {
         response: RemoteMessage {
@@ -930,103 +917,6 @@ pub(crate) async fn answer_remote_message(
         },
         response_result,
     })
-}
-async fn authorize_identity_disclosure(
-    services: &Arc<RuntimeServices>,
-    product_id: &str,
-) -> Result<bool, v01::HostProductDeviceChatError> {
-    let service = PermissionsService::new(
-        services.platform.as_ref(),
-        services.platform.as_ref(),
-        product_id,
-    );
-    let status = service
-        .check_or_prompt_identity_disclosure()
-        .await
-        .map_err(|error| v01::HostProductDeviceChatError::Unknown {
-            reason: error.reason,
-        })?;
-    Ok(status == PermissionAuthorizationStatus::Authorized)
-}
-
-async fn product_device_chat_response(
-    services: &Arc<RuntimeServices>,
-    signing_host: &Arc<SigningHost>,
-    cx: &CallContext,
-    request: messages::ProductDeviceChatRequest,
-) -> Result<v01::HostProductDeviceChatResponse, v01::HostProductDeviceChatError> {
-    let calling_product_id =
-        normalize_product_identifier(&request.calling_product_id).map_err(|_| {
-            v01::HostProductDeviceChatError::Unknown {
-                reason: "invalid calling product identifier".to_string(),
-            }
-        })?;
-    if !authorize_identity_disclosure(services, &calling_product_id).await? {
-        return Err(v01::HostProductDeviceChatError::Rejected);
-    }
-    let authority_request = match request.operation {
-        messages::SsoProductDeviceChatOperation::Bind {
-            derivation_index,
-            peer_identity_account_id,
-            peer_chat_public_key,
-        } => {
-            let product_account = v01::ProductAccountId {
-                dot_ns_identifier: calling_product_id.clone(),
-                derivation_index: derivation_index.clone(),
-            };
-            let device_account_id = signing_host
-                .product_keypair(&product_account)
-                .map_err(|error| v01::HostProductDeviceChatError::Unknown {
-                    reason: error.to_string(),
-                })?
-                .public
-                .to_bytes();
-            ProductDeviceChatAuthorityRequest::Bind {
-                calling_product_id,
-                device_account_id,
-                derivation_index,
-                peer_identity_account_id,
-                peer_chat_public_key,
-            }
-        }
-        messages::SsoProductDeviceChatOperation::Seal {
-            peer_chat_public_key,
-            plaintext,
-        } => ProductDeviceChatAuthorityRequest::Seal {
-            calling_product_id,
-            peer_chat_public_key,
-            plaintext,
-        },
-        messages::SsoProductDeviceChatOperation::Open {
-            peer_chat_public_key,
-            combined_ciphertext,
-        } => ProductDeviceChatAuthorityRequest::Open {
-            calling_product_id,
-            peer_chat_public_key,
-            combined_ciphertext,
-        },
-    };
-    let session = signing_host
-        .current_session()
-        .ok_or(v01::HostProductDeviceChatError::NotConnected)?;
-    signing_host
-        .product_device_chat(cx, &session, authority_request)
-        .await
-        .map_err(|error| match error {
-            ProductDeviceChatAuthorityError::Disconnected => {
-                v01::HostProductDeviceChatError::NotConnected
-            }
-            ProductDeviceChatAuthorityError::Rejected => v01::HostProductDeviceChatError::Rejected,
-            ProductDeviceChatAuthorityError::InvalidPeerKey => {
-                v01::HostProductDeviceChatError::InvalidPeerKey
-            }
-            ProductDeviceChatAuthorityError::InvalidCiphertext => {
-                v01::HostProductDeviceChatError::InvalidCiphertext
-            }
-            ProductDeviceChatAuthorityError::Unavailable(reason) => {
-                v01::HostProductDeviceChatError::Unknown { reason }
-            }
-        })
 }
 
 async fn resource_allocation_response(
@@ -1118,21 +1008,6 @@ async fn resource_allocation_response(
                     },
                 ))
             })(),
-            SsoAllocatableResource::ProductStatementStoreAllowance(index) => {
-                allocate_product_statement_store_allowance(
-                    services,
-                    signing_host,
-                    &request.calling_product_id,
-                    &index,
-                    request.on_existing,
-                )
-                .await
-                .map(|()| {
-                    SsoAllocationOutcome::Allocated(
-                        SsoAllocatedResource::ProductStatementStoreAllowance,
-                    )
-                })
-            }
         };
         match outcome {
             Ok(outcome) => outcomes.push(outcome),
@@ -1160,9 +1035,6 @@ fn public_allocatable_resource(resource: &SsoAllocatableResource) -> api::Alloca
             api::AllocatableResource::SmartContractAllowance(index.clone())
         }
         SsoAllocatableResource::AutoSigning => api::AllocatableResource::AutoSigning,
-        SsoAllocatableResource::ProductStatementStoreAllowance(index) => {
-            api::AllocatableResource::ProductStatementStoreAllowance(index.clone())
-        }
     }
 }
 
@@ -1173,67 +1045,16 @@ pub(super) async fn allocate_statement_store_allowance(
     product_id: &str,
     policy: OnExistingAllowancePolicy,
 ) -> Result<Vec<u8>, AllowanceAllocationError> {
-    let entropy = signing_host.root_entropy()?;
-    let allowance =
-        derive_sr25519_hard_path(&entropy, &["allowance", "statement-store", product_id])?;
-    register_statement_store_target(
-        services,
-        signing_host,
-        product_id,
-        allowance.public.to_bytes(),
-        policy,
-        StatementRenewalTarget::ProductStatementAllowance {
-            product_id: product_id.to_string(),
-        },
-    )
-    .await?;
-    Ok(allowance.secret.to_bytes().to_vec())
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub(super) async fn allocate_product_statement_store_allowance(
-    services: &Arc<RuntimeServices>,
-    signing_host: &SigningHost,
-    product_id: &str,
-    derivation_index: &v01::DerivationIndex,
-    policy: OnExistingAllowancePolicy,
-) -> Result<(), AllowanceAllocationError> {
-    let target = signing_host
-        .product_keypair(&v01::ProductAccountId {
-            dot_ns_identifier: product_id.to_string(),
-            derivation_index: derivation_index.clone(),
-        })?
-        .public
-        .to_bytes();
-    register_statement_store_target(
-        services,
-        signing_host,
-        product_id,
-        target,
-        policy,
-        StatementRenewalTarget::Account {
-            account_id: target,
-            label: format!("product-account:{product_id}"),
-        },
-    )
-    .await
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-async fn register_statement_store_target(
-    services: &Arc<RuntimeServices>,
-    signing_host: &SigningHost,
-    product_id: &str,
-    target: [u8; 32],
-    policy: OnExistingAllowancePolicy,
-    renewal_target: StatementRenewalTarget,
-) -> Result<(), AllowanceAllocationError> {
-    use super::allowance_renewal;
+    use super::allowance_renewal::{self, StatementRenewalTarget};
     use crate::runtime::statement_allowance::{
         self, PooledRegistrationParams, allocated_in, find_including_rings,
         register_statement_account_pooled, scan_collections,
     };
 
+    let entropy = signing_host.root_entropy()?;
+    let allowance =
+        derive_sr25519_hard_path(&entropy, &["allowance", "statement-store", product_id])?;
+    let target = allowance.public.to_bytes();
     let session = signing_host
         .current_session()
         .ok_or(AuthorityError::Disconnected)?;
@@ -1248,7 +1069,15 @@ async fn register_statement_store_target(
     let period = statement_allowance::slot::current_period(current_unix_secs()?);
     let reuse_existing = matches!(policy, OnExistingAllowancePolicy::Ignore);
 
+    // Held from the scan through the submission, not just around the submission:
+    // the scan is what picks the free slot, so a renewal pass scanning in the gap
+    // would choose the same one. Released on the early return below, which
+    // submits nothing.
     let _registration = signing_host.renewal.registration_lock().lock().await;
+
+    // One read of the period's slot tables, reused below rather than rescanned:
+    // when an allowance is already recorded on chain neither a proof nor a
+    // submission is needed, and a ring snapshot pages in every member key.
     let scans = scan_collections(
         rpc,
         &chain.metadata,
@@ -1267,59 +1096,72 @@ async fn register_statement_store_target(
             %collection,
             "statement-store allowance already allocated"
         );
-    } else {
-        let memberships = find_including_rings(rpc, &chain.metadata, &candidates, u32::MAX).await?;
-        if memberships.is_empty() {
-            return Err(AllowanceAllocationError::MissingPersonhoodMembership {
-                resource: "statement-store",
-            });
-        }
-        let outcome = register_statement_account_pooled(
-            rpc,
-            &chain.metadata,
-            &chain.state,
-            &scans,
-            &memberships,
-            PooledRegistrationParams {
-                target: &target,
-                period,
-                network_suffix: &network_suffix,
-                reuse_existing,
-                allow_eviction: false,
-                protected: &[],
-            },
-        )
-        .await?;
-        match outcome {
-            statement_allowance::RegistrationOutcome::Registered {
-                block_hash,
+        return Ok(allowance.secret.to_bytes().to_vec());
+    }
+
+    // Every ring back to index 0, because a membership that stopped being
+    // re-included still proves against the ring that holds it.
+    let memberships = find_including_rings(rpc, &chain.metadata, &candidates, u32::MAX).await?;
+    if memberships.is_empty() {
+        return Err(AllowanceAllocationError::MissingPersonhoodMembership {
+            resource: "statement-store",
+        });
+    }
+    let outcome = register_statement_account_pooled(
+        rpc,
+        &chain.metadata,
+        &chain.state,
+        &scans,
+        &memberships,
+        PooledRegistrationParams {
+            target: &target,
+            period,
+            network_suffix: &network_suffix,
+            reuse_existing,
+            // Connecting a product must not revoke another product's allowance.
+            // A full period is reported as exhaustion; reclaiming space is the
+            // renewal pass's job, which only ever replaces for its own ledger.
+            allow_eviction: false,
+            protected: &[],
+        },
+    )
+    .await?;
+    match outcome {
+        statement_allowance::RegistrationOutcome::Registered {
+            block_hash,
+            seq,
+            ring_index,
+            collection,
+        } => {
+            debug!(
+                %product_id,
+                %block_hash,
                 seq,
                 ring_index,
-                collection,
-            } => {
-                debug!(
-                    %product_id,
-                    %block_hash,
-                    seq,
-                    ring_index,
-                    %collection,
-                    "registered statement-store allowance"
-                );
-            }
-            statement_allowance::RegistrationOutcome::AlreadyAllocated { seq, collection } => {
-                debug!(
-                    %product_id,
-                    seq,
-                    %collection,
-                    "statement-store allowance already allocated"
-                );
-            }
+                %collection,
+                "registered statement-store allowance"
+            );
+        }
+        statement_allowance::RegistrationOutcome::AlreadyAllocated { seq, collection } => {
+            debug!(
+                %product_id,
+                seq,
+                %collection,
+                "statement-store allowance already allocated"
+            );
         }
     }
-    if let Err(reason) = allowance_renewal::track(signing_host, vec![renewal_target]).await {
+    if let Err(reason) = allowance_renewal::track(
+        signing_host,
+        vec![StatementRenewalTarget::ProductStatementAllowance {
+            product_id: product_id.to_string(),
+        }],
+    )
+    .await
+    {
         warn!(%product_id, %reason, "failed to record statement-store renewal target");
     }
-    Ok(())
+    Ok(allowance.secret.to_bytes().to_vec())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1437,19 +1279,6 @@ pub(super) async fn allocate_statement_store_allowance(
     _product_id: &str,
     _policy: OnExistingAllowancePolicy,
 ) -> Result<Vec<u8>, AllowanceAllocationError> {
-    Err(AllowanceAllocationError::NativeOnly {
-        resource: "statement-store",
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-pub(super) async fn allocate_product_statement_store_allowance(
-    _services: &Arc<RuntimeServices>,
-    _signing_host: &SigningHost,
-    _product_id: &str,
-    _derivation_index: &v01::DerivationIndex,
-    _policy: OnExistingAllowancePolicy,
-) -> Result<(), AllowanceAllocationError> {
     Err(AllowanceAllocationError::NativeOnly {
         resource: "statement-store",
     })
