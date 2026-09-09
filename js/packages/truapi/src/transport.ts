@@ -191,20 +191,12 @@ export interface RequestParams<Ok, Err> {
   payload: Uint8Array;
 
   /**
-   * Protocol version `payload` speaks; written to the frame's version byte.
-   **/
-  version: number;
-
-  /**
    * Decode a `Response`-leg frame's raw payload bytes into the typed Ok/Err
    * outcome. Implementations decode `Result<{Method}Response,
    * CallError<{Method}Error>>` directly. The transport unwraps the result
    * into `ResultAsync<Ok, Err | UnsupportedCallError>`.
    **/
-  decodeResponse: (
-    payload: Uint8Array,
-    version: number,
-  ) => ResultPayload<Ok, Err>;
+  decodeResponse: (payload: Uint8Array) => ResultPayload<Ok, Err>;
 }
 
 /**
@@ -224,20 +216,14 @@ export interface SubscribeRawParams {
   payload: Uint8Array;
 
   /**
-   * Protocol version `payload` speaks; written to the version byte of this
-   * subscription's `Start` and `Stop` frames.
-   **/
-  version: number;
-
-  /**
    * Called with a `Receive`-leg frame's raw payload bytes.
    **/
-  onReceive: (payload: Uint8Array, version: number) => void;
+  onReceive: (payload: Uint8Array) => void;
 
   /**
    * Called with an `Interrupt`-leg frame's raw payload bytes.
    **/
-  onInterrupt?: (payload: Uint8Array, version: number) => void;
+  onInterrupt?: (payload: Uint8Array) => void;
 
   /**
    * Called when a transport-level error or unsupported start frame terminates
@@ -266,15 +252,9 @@ export interface RegisterHostInitiatedSubscriptionParams<Request, Item> {
   /** Wire discriminants for the host-initiated subscription. **/
   ids: MethodIds;
   /**
-   * Protocol version this registration answers in; written to the version
-   * byte of the `Receive` and `Interrupt` frames it sends.
-   **/
-  version: number;
-
-  /**
    * Decode a `Start`-leg frame's raw payload bytes into the typed request.
    **/
-  decodeRequest(payload: Uint8Array, version: number): Request;
+  decodeRequest(payload: Uint8Array): Request;
   /**
    * Encode one product renderer emission as a `Receive`-leg frame's raw
    * payload bytes.
@@ -343,31 +323,18 @@ export interface Payload {
   methodId: number;
 
   /**
-   * Protocol version this frame's payload speaks, 1-based. Third byte of the
-   * wire frame, ahead of `messageType`, so a peer knows which shape a payload
-   * has before decoding it.
-   **/
-  version: number;
-
-  /**
    * Which leg of the method's exchange this frame carries: `Request`/`Start`
-   * = 0, `Response`/`Receive` = 1, `Interrupt` = 2, `Stop` = 3. Fourth byte of
+   * = 0, `Response`/`Receive` = 1, `Interrupt` = 2, `Stop` = 3. Third byte of
    * the wire frame — readable generically, without decoding `value`.
    **/
   messageType: number;
 
   /**
-   * SCALE-encoded payload body: that leg's own versioned wrapper.
+   * SCALE-encoded payload body: that leg's own versioned wrapper, with no
+   * further tag identifying direction or version beyond the wrapper's own.
    **/
   value: Uint8Array;
 }
-
-/**
- * Version carried by protocol-error frames: the sole variant of the versioned
- * protocol-error wrapper. A protocol error answers a frame whose own version
- * may be one this peer cannot decode, so it states its own.
- **/
-export const PROTOCOL_ERROR_VERSION = 1;
 
 /** See {@link Payload.messageType}. */
 export const MESSAGE_TYPE_REQUEST = 0;
@@ -444,15 +411,12 @@ export interface WebSocketWireProvider extends WireProvider {
 export function encodeWireMessage(
   message: ProtocolMessage,
 ): Result<Uint8Array, Error> {
-  const { traitId, methodId, version, messageType } = message.payload;
+  const { traitId, methodId, messageType } = message.payload;
   if (!Number.isInteger(traitId) || traitId < 0 || traitId > 255) {
     return err(new Error(`Invalid wire trait discriminant: ${traitId}`));
   }
   if (!Number.isInteger(methodId) || methodId < 0 || methodId > 255) {
     return err(new Error(`Invalid wire method discriminant: ${methodId}`));
-  }
-  if (!Number.isInteger(version) || version < 0 || version > 255) {
-    return err(new Error(`Invalid wire version: ${version}`));
   }
   if (!Number.isInteger(messageType) || messageType < 0 || messageType > 255) {
     return err(new Error(`Invalid wire message type: ${messageType}`));
@@ -462,7 +426,6 @@ export function encodeWireMessage(
       str.enc(message.requestId),
       u8.enc(traitId),
       u8.enc(methodId),
-      u8.enc(version),
       u8.enc(messageType),
       message.payload.value,
     ),
@@ -497,23 +460,19 @@ export function decodeWireMessage(
     );
   }
   if (cursor.length < 3) {
-    return err(new Error("Wire frame too short: missing version byte"));
-  }
-  if (cursor.length < 4) {
     return err(new Error("Wire frame too short: missing message-type byte"));
   }
   const traitId = cursor[0];
   const methodId = cursor[1];
-  const version = cursor[2];
-  const messageType = cursor[3];
-  const value = cursor.subarray(4);
+  const messageType = cursor[2];
+  const value = cursor.subarray(3);
   // Hand the value bytes back as a fresh slice so callers may safely retain
   // it even if the source buffer is reused by the transport.
   const valueCopy = new Uint8Array(value.length);
   valueCopy.set(value);
   return ok({
     requestId,
-    payload: { traitId, methodId, version, messageType, value: valueCopy },
+    payload: { traitId, methodId, messageType, value: valueCopy },
   });
 }
 

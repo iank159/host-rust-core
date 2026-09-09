@@ -3,7 +3,7 @@
 //! `tests/snapshots/golden-account-get.bin` holds the raw bytes of an
 //! `account_get_account_request` frame. The tests assert both halves of the
 //! envelope: the transport framing (`requestId`, the `(trait, method)`
-//! discriminant pair, `version`, and `messageType`) and the *typed decode of the
+//! discriminant pair, and `messageType`) and the *typed decode of the
 //! payload*.
 //!
 //! Both halves are needed. The payload is inlined as opaque bytes, so a
@@ -14,7 +14,6 @@
 //!
 //! The frame encodes:
 //!   requestId = "p:1"
-//!   version = 1
 //!   messageType = Request
 //!   payload   = account_get_account,
 //!               inner = HostAccountGetRequest::V1(ProductAccountId {
@@ -26,8 +25,8 @@
 //!   [0c 70 3a 31]                      requestId = compact-len(3) + "p:1"
 //!   [02]                               trait discriminant 2 = account
 //!   [01]                               method discriminant 1 = get_account
-//!   [01]                               version 1
 //!   [00]                               messageType: Request
+//!   [00]                               request wrapper version V1
 //!   [0c 66 6f 6f]                      compact-len(3) + "foo"
 //!   [00]                               DerivationIndex variant Index
 //!   [00 00 00 00]                      u32 = 0
@@ -45,12 +44,11 @@ use truapi_server::generated::wire_table;
 
 const GOLDEN: &[u8] = include_bytes!("snapshots/golden-account-get.bin");
 
-/// Payload byte count of the golden frame: a compact-length-prefixed 3-byte
-/// identifier, one `DerivationIndex` variant byte, and a `u32`. The request
-/// wrapper's own version tag is absent — the frame header carries it. Spelled
-/// out term by term rather than measured from the codec, so a layout change
-/// has to move this number by hand.
-const GOLDEN_PAYLOAD_LEN: usize = 1 + 3 + 1 + 4;
+/// Payload byte count of the golden frame: the request wrapper's own version
+/// tag, a compact-length-prefixed 3-byte identifier, one `DerivationIndex`
+/// variant byte, and a `u32`. Spelled out term by term rather than measured
+/// from the codec, so a layout change has to move this number by hand.
+const GOLDEN_PAYLOAD_LEN: usize = 1 + 1 + 3 + 1 + 4;
 
 fn expected_request() -> HostAccountGetRequest {
     HostAccountGetRequest::V1(v01::HostAccountGetRequest {
@@ -71,9 +69,8 @@ fn golden_account_get_frame_decodes_to_expected_message() {
         payload: Payload {
             trait_id: wire_table::ACCOUNT_GET_ACCOUNT.trait_id,
             method_id: wire_table::ACCOUNT_GET_ACCOUNT.method_id,
-            version: 1,
             message_type: MESSAGE_TYPE_REQUEST,
-            value: truapi_server::frame::encode_without_version(&expected_request()),
+            value: expected_request().encode(),
         },
     };
     assert_eq!(decoded, expected);
@@ -90,9 +87,8 @@ fn golden_account_get_payload_decodes_as_the_typed_request() {
          built against an older @parity/truapi now fails to decode"
     );
 
-    let request: HostAccountGetRequest =
-        truapi_server::frame::decode_with_version(decoded.payload.version, &decoded.payload.value)
-            .expect("golden payload must decode as the typed request wrapper");
+    let request = HostAccountGetRequest::decode(&mut &decoded.payload.value[..])
+        .expect("golden payload must decode as the typed request wrapper");
     assert_eq!(request, expected_request());
 }
 

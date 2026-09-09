@@ -15,7 +15,6 @@ function frame(frameId: number, bytes?: Uint8Array, messageType = 0): ObservedFr
     requestId: "p:1",
     frameId,
     messageType,
-    version: 1,
     role: "unknown",
     byteLength: bytes?.length ?? 0,
     timestamp: 0,

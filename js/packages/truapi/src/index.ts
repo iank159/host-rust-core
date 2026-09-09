@@ -23,7 +23,6 @@ export {
   MESSAGE_TYPE_STOP,
   PROTOCOL_ERROR_METHOD_ID,
   PROTOCOL_ERROR_TRAIT_ID,
-  PROTOCOL_ERROR_VERSION,
   SubscriptionError,
   UnsupportedMessageError,
   createIframeProvider,
@@ -35,18 +34,6 @@ export {
 export { createTransport } from "./client.js";
 export * as scale from "./scale.js";
 export type { Codec, HexString } from "./scale.js";
-// Part of the wire contract, not just an internal codec detail: a payload
-// carries no version tag, so anything that encodes or decodes one needs these.
-export {
-  decodeInterruptWithVersion,
-  decodeResponseWithVersion,
-  decodeUnitResponseWithVersion,
-  decodeWithVersion,
-  encodeInterruptWithoutVersion,
-  encodeResponseWithoutVersion,
-  encodeUnitResponseWithoutVersion,
-  encodeWithoutVersion,
-} from "./scale.js";
 export * from "./generated/index.js";
 export * from "./well-known-chains.js";
 export * from "./development.js";

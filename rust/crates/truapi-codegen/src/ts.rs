@@ -1351,11 +1351,9 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
             let trait_id = trait_wire_id(trait_def)?;
             let key = u32::from(trait_id) * 256 + u32::from(method_id);
 
-            // Every leg's payload arrives without its version tag, so each
-            // decoder restores it from the frame's own `version` byte.
             let request_decoder = match request_wrapper_name(method, &wrappers) {
                 Some(name) => format!(
-                    "(payload, version) => T.{}.dec(S.decodeWithVersion(version, payload))",
+                    "(payload) => T.{}.dec(payload)",
                     versioned_wrapper_ts_name(name)
                 ),
                 None => "() => undefined".to_string(),
@@ -1366,16 +1364,9 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
                 (MethodKind::Request, ReturnType::Result { ok, err }) => {
                     let response_codec = leg_codec_expr(ok, &wrappers)?;
                     let error_codec = leg_error_codec_expr(err, &wrappers, &ctx)?;
-                    // A unit-typed `Ok` holds no payload, so it has no version
-                    // tag to restore - only a `Domain` failure does.
-                    let response_restore = if versioned_wrapper_for(ok, &wrappers).is_some() {
-                        "S.decodeResponseWithVersion"
-                    } else {
-                        "S.decodeUnitResponseWithVersion"
-                    };
                     lines.push(format!("    0: {request_decoder},"));
                     lines.push(format!(
-                        "    1: (payload, version) => S.Result({response_codec}, {error_codec}).dec({response_restore}(version, payload)),"
+                        "    1: (payload) => S.Result({response_codec}, {error_codec}).dec(payload),"
                     ));
                 }
                 (MethodKind::Subscription, ReturnType::Subscription(ty)) => {
@@ -1387,11 +1378,7 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
                     };
                     let error_codec = leg_error_codec_expr(&call_error_generic, &wrappers, &ctx)?;
                     lines.push(format!("    0: {request_decoder},"));
-                    lines.push(format!(
-                        "    1: (payload, version) => {item_codec}.dec(S.decodeWithVersion(version, payload)),"
-                    ));
-                    // A plain subscription's interrupt error is the unversioned
-                    // `GenericError`, so nothing inside it needs restoring.
+                    lines.push(format!("    1: (payload) => {item_codec}.dec(payload),"));
                     lines.push(format!(
                         "    2: (payload) => S.Option({error_codec}).dec(payload),"
                     ));
@@ -1401,11 +1388,9 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
                     let item_codec = leg_codec_expr(item, &wrappers)?;
                     let error_codec = leg_error_codec_expr(err, &wrappers, &ctx)?;
                     lines.push(format!("    0: {request_decoder},"));
+                    lines.push(format!("    1: (payload) => {item_codec}.dec(payload),"));
                     lines.push(format!(
-                        "    1: (payload, version) => {item_codec}.dec(S.decodeWithVersion(version, payload)),"
-                    ));
-                    lines.push(format!(
-                        "    2: (payload, version) => S.Option({error_codec}).dec(S.decodeInterruptWithVersion(version, payload)),"
+                        "    2: (payload) => S.Option({error_codec}).dec(payload),"
                     ));
                     lines.push("    3: () => undefined,".to_string());
                 }
@@ -1447,7 +1432,7 @@ fn generate_decode_table(api: &ApiDefinition, target_version: u32) -> Result<Str
          *  addresses or message types are absent (caller falls back to bytes). */
         export const WIRE_DECODE_TABLE: Record<
           number,
-          Record<number, (payload: Uint8Array, version: number) => unknown>
+          Record<number, (payload: Uint8Array) => unknown>
         > = {{
         "#
     )
@@ -1480,21 +1465,16 @@ fn write_observable_helper(out: &mut String) {
           decodeItem,
           decodeInterrupt,
           onSubscribe,
-          version,
         }}: {{
           transport: TrUApiTransport;
           ids: MethodIds;
           payload: Uint8Array;
-          version: number;
-          decodeItem: (payload: Uint8Array, version: number) => Item;
+          decodeItem: (payload: Uint8Array) => Item;
           // `undefined` signals a clean, error-free completion (the wire
           // envelope's `Interrupt(None)`), distinct from not being able to
           // observe a typed reason at all (this method has no domain error,
           // and `decodeInterrupt` itself is omitted).
-          decodeInterrupt?: (
-            payload: Uint8Array,
-            version: number,
-          ) => Reason | undefined;
+          decodeInterrupt?: (payload: Uint8Array) => Reason | undefined;
           onSubscribe?: (subscription: Subscription) => {{ unsubscribe(): void }};
         }}): ObservableLike<Item, Reason> {{
           const observable: ObservableLike<Item, Reason> = {{
@@ -1523,21 +1503,20 @@ fn write_observable_helper(out: &mut String) {
               raw = transport.subscribeRaw({{
                 ids,
                 payload,
-                version,
-                onReceive: (payload, itemVersion) => {{
+                onReceive: (payload) => {{
                   if (closed) return;
                   try {{
-                    observer.next?.(decodeItem(payload, itemVersion));
+                    observer.next?.(decodeItem(payload));
                   }} catch (error) {{
                     fail(error);
                   }}
                 }},
-                onInterrupt: (payload, interruptVersion) => {{
+                onInterrupt: (payload) => {{
                   if (closed) return;
                   if (decodeInterrupt) {{
                     let reason: unknown;
                     try {{
-                      reason = decodeInterrupt(payload, interruptVersion);
+                      reason = decodeInterrupt(payload);
                     }} catch (error) {{
                       fail(error, false);
                       return;
@@ -1878,12 +1857,6 @@ fn emit_method(
             let response = emit_response(ok, wrappers, wire_version)?;
             let error = emit_error_response(err, wrappers, wire_version)?;
             let ok_is_wrapper = versioned_wrapper_for(ok, wrappers).is_some();
-            // A unit-typed `Ok` carries no version tag to restore.
-            let response_restore = if ok_is_wrapper {
-                "S.decodeResponseWithVersion"
-            } else {
-                "S.decodeUnitResponseWithVersion"
-            };
             let response_codec = leg_codec_expr(ok, wrappers)?;
             let error_codec = leg_error_codec_expr(err, wrappers, &ctx)?;
 
@@ -1904,12 +1877,9 @@ fn emit_method(
                   {ts_method_name}({arg_decl}): ResultAsync<{ok_type}, {err_type}> {{
                     return this.transport.request<{ok_type}, {err_type}>({{
                       ids: W.{wire_const},
-                      payload: S.encodeWithoutVersion({request_codec}.enc({{ tag: \"V{version}\", value: {request_expr} }})),
-                      version: {version},
-                      decodeResponse: (payload, responseVersion) => {{
-                        const result = S.Result({response_codec}, {error_codec}).dec(
-                          {response_restore}(responseVersion, payload),
-                        );
+                      payload: {request_codec}.enc({{ tag: \"V{version}\", value: {request_expr} }}),
+                      decodeResponse: (payload) => {{
+                        const result = S.Result({response_codec}, {error_codec}).dec(payload);
                 ",
                 ok_type = response.inner_type_ts,
                 err_type = error.inner_type_ts
@@ -2074,11 +2044,8 @@ fn emit_host_initiated_registration(
         "
             this.{field} = transport.registerHostInitiatedSubscription({{
               ids: W.{wire_const},
-              version: {version},
-              decodeRequest: (payload, startVersion) =>
-                {request_codec}.dec(S.decodeWithVersion(startVersion, payload)).value,
-              encodeItem: (item) =>
-                S.encodeWithoutVersion({item_codec}.enc({{ tag: \"V{version}\", value: item }})),
+              decodeRequest: (payload) => {request_codec}.dec(payload).value,
+              encodeItem: (item) => {item_codec}.enc({{ tag: \"V{version}\", value: item }}),
               interruptPayload: HOST_INITIATED_DECLINE_PAYLOAD,
               bufferCapacity: HOST_INITIATED_BUFFER_CAPACITY,
             }});
@@ -2160,11 +2127,9 @@ fn emit_subscribe_method(
         )
     };
 
-    // A `Start` payload is the request wrapper minus its version tag, which
-    // the frame header carries; a paramless subscription sends no payload.
     let start_payload = match request_name {
         Some(name) => format!(
-            "S.encodeWithoutVersion(T.{}.enc({{ tag: \"V{version}\", value: {} }}))",
+            "T.{}.enc({{ tag: \"V{version}\", value: {} }})",
             versioned_wrapper_ts_name(name),
             payload.value_expr
         ),
@@ -2179,7 +2144,6 @@ fn emit_subscribe_method(
               transport: this.transport,
               ids: W.{wire_const},
               payload: {start_payload},
-              version: {version},
         "
     )
     .unwrap();
@@ -2187,8 +2151,7 @@ fn emit_subscribe_method(
         writedoc!(
             out,
             "
-              decodeItem: (payload, itemVersion) =>
-                {item_codec}.dec(S.decodeWithVersion(itemVersion, payload)).value,
+              decodeItem: (payload) => {item_codec}.dec(payload).value,
             "
         )
         .unwrap();
@@ -2204,10 +2167,7 @@ fn emit_subscribe_method(
     writedoc!(
         out,
         "
-              decodeInterrupt: (payload, interruptVersion) =>
-                S.Option({error_codec}).dec(
-                  S.decodeInterruptWithVersion(interruptVersion, payload),
-                ),
+              decodeInterrupt: (payload) => S.Option({error_codec}).dec(payload),
             }});
           }}
         "
@@ -3616,22 +3576,18 @@ mod tests {
         let source = generate_decode_table(&api, 1).expect("generate decode table");
 
         assert!(source.contains("export const WIRE_DECODE_TABLE"));
-        assert!(source.contains("(payload: Uint8Array, version: number) => unknown"));
+        assert!(source.contains("(payload: Uint8Array) => unknown"));
         assert!(source.contains(
             "[W.EXAMPLE_FEATURE_SUPPORTED.trait * 256 + W.EXAMPLE_FEATURE_SUPPORTED.method]"
         ));
         assert!(source.contains("[W.EXAMPLE_STREAM.trait * 256 + W.EXAMPLE_STREAM.method]"));
-        // message_type 0 (Request/Start) and 1 (Response/Receive) each restore
-        // their payload's version tag from the frame's own `version` byte.
+        // message_type 0 (Request/Start) and 1 (Response/Receive) both decode
+        // straight through each leg's own versioned wrapper — no envelope.
+        assert!(source.contains("T.VersionedFeatureSupportedRequest.dec(payload)"));
         assert!(source.contains(
-            "T.VersionedFeatureSupportedRequest.dec(S.decodeWithVersion(version, payload))"
+            "S.Result(T.VersionedFeatureSupportedResponse, T.VersionedFeatureSupportedError).dec(payload)"
         ));
-        assert!(source.contains(
-            "S.Result(T.VersionedFeatureSupportedResponse, T.VersionedFeatureSupportedError).dec(S.decodeResponseWithVersion(version, payload))"
-        ));
-        assert!(
-            source.contains("T.VersionedStreamItem.dec(S.decodeWithVersion(version, payload))")
-        );
+        assert!(source.contains("T.VersionedStreamItem.dec(payload)"));
         // message_type 2 (Interrupt) on a plain subscription still decodes a
         // framework-level `CallError<GenericError>`, wrapped in `Option`.
         assert!(source.contains("S.Option(S.CallError(T.GenericError)).dec(payload)"));
@@ -3976,7 +3932,7 @@ mod tests {
         assert!(client_source.contains("request: T.LatestRequest"));
         assert!(
             client_source.contains(
-                "payload: S.encodeWithoutVersion(T.VersionedExampleRequest.enc({ tag: \"V2\", value: request })),"
+                "payload: T.VersionedExampleRequest.enc({ tag: \"V2\", value: request }),"
             )
         );
         assert!(client_source.contains("ResultAsync<T.LatestResponse, undefined>"));
@@ -4096,7 +4052,7 @@ mod tests {
         assert!(client_source.contains("request: T.LegacyRequest"));
         assert!(
             client_source.contains(
-                "payload: S.encodeWithoutVersion(T.VersionedExampleRequest.enc({ tag: \"V1\", value: request })),"
+                "payload: T.VersionedExampleRequest.enc({ tag: \"V1\", value: request }),"
             )
         );
         assert!(client_source.contains("ResultAsync<T.LegacyResponse, undefined>"));

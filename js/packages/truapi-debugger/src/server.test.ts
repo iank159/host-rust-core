@@ -2,7 +2,6 @@ import { expect, test } from "bun:test";
 
 import {
   encodeWireMessage,
-  encodeWithoutVersion,
   MESSAGE_TYPE_REQUEST,
   VersionedHostSignRawRequest,
   TRUAPI_CODEC_VERSION,
@@ -80,7 +79,6 @@ function encodeFrame(requestId: string, legId: number, value: Uint8Array): strin
     payload: {
       traitId: Math.floor(frameId / 256),
       methodId: frameId % 256,
-      version: 1,
       messageType,
       value,
     },
@@ -95,26 +93,21 @@ function encodeFrame(requestId: string, legId: number, value: Uint8Array): strin
  * can prove the value surfaced — this debugger decodes it like any other frame.
  */
 function signFrame(requestId: string): string {
-  // Stripped of its version tag, exactly as a client puts it on the wire:
-  // the frame's `version` byte carries it.
-  const value = encodeWithoutVersion(
-    VersionedHostSignRawRequest.enc({
-      tag: "V1",
-      value: {
-        account: {
-          dotNsIdentifier: "alice.dot",
-          derivationIndex: { tag: "Index", value: 0 },
-        },
-        payload: { tag: "Bytes", value: { bytes: "0xdeadbeef" } },
+  const value = VersionedHostSignRawRequest.enc({
+    tag: "V1",
+    value: {
+      account: {
+        dotNsIdentifier: "alice.dot",
+        derivationIndex: { tag: "Index", value: 0 },
       },
-    }),
-  );
+      payload: { tag: "Bytes", value: { bytes: "0xdeadbeef" } },
+    },
+  });
   const encoded = encodeWireMessage({
     requestId,
     payload: {
       traitId: REAL_W.SIGNING_SIGN_RAW.trait,
       methodId: REAL_W.SIGNING_SIGN_RAW.method,
-      version: 1,
       messageType: MESSAGE_TYPE_REQUEST,
       value,
     },
@@ -161,7 +154,6 @@ test("decodes and groups a frame a host streams over the WS", async () => {
       payload: {
         traitId: REAL_W.SYSTEM_HANDSHAKE.trait,
         methodId: REAL_W.SYSTEM_HANDSHAKE.method,
-        version: 1,
         messageType: MESSAGE_TYPE_REQUEST,
         value: new Uint8Array([0, 1, 2, 3]),
       },
@@ -1272,7 +1264,6 @@ test("a replayed backlog keeps the producer's clock through the real socket", as
         payload: {
           traitId: Math.floor(frameId / 256),
           methodId: frameId % 256,
-          version: 1,
           messageType,
           value: new Uint8Array([0]),
         },
@@ -1335,7 +1326,6 @@ test("a host-terminated subscription stops counting as live on /stats", async ()
         payload: {
           traitId: Math.floor(frameId / 256),
           methodId: frameId % 256,
-          version: 1,
           messageType,
           value: new Uint8Array([0]),
         },

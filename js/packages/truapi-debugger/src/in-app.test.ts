@@ -1,7 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   encodeWireMessage,
-  encodeWithoutVersion,
   MESSAGE_TYPE_REQUEST,
   VersionedHostAccountGetRequest,
   TRUAPI_CODEC_VERSION,
@@ -74,7 +73,6 @@ function frameBytes(
     payload: {
       traitId: Math.floor(frameId / 256),
       methodId: frameId % 256,
-      version: 1,
       messageType,
       value: new Uint8Array(value),
     },
@@ -85,25 +83,20 @@ function frameBytes(
 
 /** A real, decodable account-get request wire message (non-sensitive). */
 function accountGetRequestBytes(requestId = "p:1"): Uint8Array {
-  // Stripped of its version tag, exactly as a client puts it on the wire:
-  // the frame's `version` byte carries it.
-  const value = encodeWithoutVersion(
-    VersionedHostAccountGetRequest.enc({
-      tag: "V1",
-      value: {
-        productAccountId: {
-          dotNsIdentifier: "alice.dot",
-          derivationIndex: { tag: "Index", value: 0 },
-        },
+  const value = VersionedHostAccountGetRequest.enc({
+    tag: "V1",
+    value: {
+      productAccountId: {
+        dotNsIdentifier: "alice.dot",
+        derivationIndex: { tag: "Index", value: 0 },
       },
-    }),
-  );
+    },
+  });
   const r = encodeWireMessage({
     requestId,
     payload: {
       traitId: REAL_W.ACCOUNT_GET_ACCOUNT.trait,
       methodId: REAL_W.ACCOUNT_GET_ACCOUNT.method,
-      version: 1,
       messageType: MESSAGE_TYPE_REQUEST,
       value,
     },

@@ -4,26 +4,25 @@
 //! and a `payload`. On the wire the envelope is:
 //!
 //! ```text
-//!   [requestId: SCALE str][trait: u8][method: u8][version: u8][message_type: u8][payload bytes...]
+//!   [requestId: SCALE str][trait: u8][method: u8][message_type: u8][payload bytes...]
 //! ```
 //!
 //! The `(trait, method)` discriminant pair maps to a method/kind slot via the
 //! auto-generated [`crate::generated::wire_table::WIRE_TABLE`]. Trait ids and
 //! per-trait method ordering are part of the wire protocol; only ever append
-//! within a trait. `version` is the protocol version the payload speaks and
-//! `message_type` (see the `MESSAGE_TYPE_*` constants) names which leg of that
-//! method's exchange this frame carries — `Request`/`Response`, or a
-//! subscription's `Start`/`Receive`/`Interrupt`/`Stop`. Both sit in the outer
-//! envelope, ahead of the payload, so the framework dispatcher, the
-//! subscription manager, and any tooling that taps the wire read a frame's
-//! version and leg generically, without decoding the payload. The payload
-//! bytes that follow are that leg's own versioned wrapper (e.g.
-//! `{Method}Request`), SCALE-encoded and inlined without a length prefix.
+//! within a trait. `message_type` (see the `MESSAGE_TYPE_*` constants) names
+//! which leg of that method's exchange this frame carries — `Request`/
+//! `Response`, or a subscription's `Start`/`Receive`/`Interrupt`/`Stop` —
+//! generically, without decoding the payload: the framework dispatcher, the
+//! subscription manager, and any tooling that taps the wire can all read it
+//! directly off `Payload`. The payload bytes that follow are that leg's own
+//! versioned wrapper (e.g. `{Method}Request`), SCALE-encoded and inlined
+//! without a length prefix — nothing about direction lives inside them.
 //!
 //! In-memory we keep the numeric pair directly so dispatch does not need to
 //! reconstruct string action tags on every frame.
 
-use parity_scale_codec::{Decode, DecodeLimit, Encode, Error as CodecError, Input, Output};
+use parity_scale_codec::{Decode, Encode, Error as CodecError, Input, Output};
 use truapi::CallError;
 use truapi::versioned::{FromLatest, IntoLatest, Versioned};
 
@@ -50,11 +49,13 @@ pub const PROTOCOL_ERROR_METHOD_ID: u8 = 255;
 /// The reserved `(trait, method)` address protocol errors travel on.
 pub const PROTOCOL_ERROR_KEY: (u8, u8) = (PROTOCOL_ERROR_TRAIT_ID, PROTOCOL_ERROR_METHOD_ID);
 
-/// Version carried by [`PROTOCOL_ERROR_KEY`] frames: the sole variant of
-/// [`VersionedProtocolError`]. A protocol error answers a frame whose own
-/// version may be anything, including one this peer cannot decode, so it
-/// states its own version rather than echoing the frame it rejects.
-pub const PROTOCOL_ERROR_VERSION: u8 = 1;
+/// Versioned payload carried by [`PROTOCOL_ERROR_KEY`] frames.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
+pub enum VersionedProtocolError {
+    /// Initial protocol error shape.
+    #[codec(index = 0)]
+    V1(ProtocolErrorV1),
+}
 
 /// Protocol errors supported by codec version 1.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
@@ -71,38 +72,38 @@ pub enum ProtocolErrorV1 {
     },
 }
 
-/// Decode a [`PROTOCOL_ERROR_KEY`] frame's payload. Like every other payload
-/// it carries no version tag: the frame's `version` byte states it, and
-/// [`PROTOCOL_ERROR_VERSION`] is the only one this shape has.
+/// Decode a [`PROTOCOL_ERROR_KEY`] frame's payload.
 ///
-/// `Ok(None)` is a protocol error this build does not know: a variant index it
-/// has never heard of, from a peer built against a later protocol. That must
-/// not fail the frame. This is the one address every peer answers on, so a
-/// peer that rejects an unrecognised payload here cannot be told anything new
-/// without breaking the connection, and the channel would be frozen at
-/// whatever shape shipped first. A caller that gets `None` should settle the
-/// correlated call as an unspecified protocol failure and carry on.
+/// `Ok(None)` is a protocol error this build does not know: a version or a
+/// variant index it has never heard of, from a peer built against a later
+/// protocol. That must not fail the frame. This is the one address every peer
+/// answers on, so a peer that rejects an unrecognised payload here cannot be
+/// told anything new without breaking the connection, and the channel would be
+/// frozen at whatever shape shipped first. A caller that gets `None` should
+/// settle the correlated call as an unspecified protocol failure and carry on.
 ///
-/// A payload whose variant *is* known stays strict: a truncated or
-/// over-long [`ProtocolErrorV1::UnsupportedMessage`] is corruption, not a
-/// newer peer, and still fails.
+/// A payload this build does recognise stays strict: a truncated or over-long
+/// `V1(UnsupportedMessage)` is corruption, not a newer peer, and still fails.
 pub(crate) fn decode_protocol_error_payload(
     payload: &[u8],
-) -> Result<Option<ProtocolErrorV1>, CodecError> {
-    match payload.first() {
-        None => Err("protocol error payload is empty".into()),
-        // Every variant this build knows. Decode strictly.
-        Some(&0) => {
+) -> Result<Option<VersionedProtocolError>, CodecError> {
+    match (payload.first(), payload.get(1)) {
+        (None, _) => Err("protocol error payload is empty".into()),
+        // A version from a later protocol.
+        (Some(version), _) if *version != 0 => Ok(None),
+        // A `V1` variant from a later protocol.
+        (Some(_), Some(variant)) if *variant != 0 => Ok(None),
+        // `V1(UnsupportedMessage)`, the only shape this build knows.
+        _ => {
             let mut input = payload;
-            let error = ProtocolErrorV1::decode(&mut input)?;
+            let error = VersionedProtocolError::decode(&mut input)?;
             if !input.is_empty() {
                 return Err("protocol error payload has trailing bytes".into());
             }
             Ok(Some(error))
         }
-        // A variant from a later protocol. Its length is unknowable here, so
-        // the remaining bytes are skipped rather than validated.
-        Some(_) => Ok(None),
+    }
+}
     }
 }
 
@@ -124,177 +125,6 @@ where
         CallError::Unsupported => CallError::Unsupported,
         CallError::MalformedFrame { reason } => CallError::MalformedFrame { reason },
         CallError::HostFailure { reason } => CallError::HostFailure { reason },
-    }
-}
-
-/// SCALE variant index for a 1-based protocol version.
-///
-/// `versioned_type!` assigns positional codec indices (`V1` -> 0, `V2` -> 1)
-/// alongside 1-based version numbers, so the two differ by exactly one.
-/// [`version_tag_is_one_less_than_version`] pins that.
-fn version_tag(version: u8) -> Result<u8, CodecError> {
-    version
-        .checked_sub(1)
-        .ok_or_else(|| CodecError::from("version 0 is not a protocol version"))
-}
-
-/// Encode a versioned wrapper without its own version tag.
-///
-/// The frame header's `version` byte carries it instead, so a payload holds no
-/// second copy of what the envelope already states.
-pub fn encode_without_version<T>(value: &T) -> Vec<u8>
-where
-    T: Versioned + Encode,
-{
-    let mut bytes = value.encode();
-    // A versioned wrapper is a SCALE enum: its variant tag is the first byte.
-    bytes.remove(0);
-    bytes
-}
-
-/// Decode a versioned wrapper whose version the frame header carried.
-pub fn decode_with_version<T>(version: u8, bytes: &[u8]) -> Result<T, CodecError>
-where
-    T: Versioned + Decode,
-{
-    let mut full = Vec::with_capacity(bytes.len() + 1);
-    full.push(version_tag(version)?);
-    full.extend_from_slice(bytes);
-    let mut input = &full[..];
-    let value = T::decode(&mut input)?;
-    if !input.is_empty() {
-        return Err(CodecError::from("payload has trailing bytes"));
-    }
-    Ok(value)
-}
-
-/// Depth-limited [`decode_with_version`], for payloads from an untrusted peer.
-pub fn decode_with_version_limited<T>(
-    version: u8,
-    depth: u32,
-    bytes: &[u8],
-) -> Result<T, CodecError>
-where
-    T: Versioned + Decode,
-{
-    let mut full = Vec::with_capacity(bytes.len() + 1);
-    full.push(version_tag(version)?);
-    full.extend_from_slice(bytes);
-    let mut input = &full[..];
-    let value = T::decode_with_depth_limit(depth, &mut input)?;
-    if !input.is_empty() {
-        return Err(CodecError::from("payload has trailing bytes"));
-    }
-    Ok(value)
-}
-
-/// Encode a `CallError` whose domain payload is versioned, without that
-/// payload's version tag. The framework variants carry no version.
-pub fn encode_call_error_without_version<E>(value: &CallError<E>) -> Vec<u8>
-where
-    E: Versioned + Encode,
-{
-    let mut bytes = value.encode();
-    if matches!(value, CallError::Domain(_)) {
-        // [variant tag][domain wrapper's own version tag][domain payload]
-        bytes.remove(1);
-    }
-    bytes
-}
-
-/// The version a `Response` leg's payload is actually encoded in.
-///
-/// A method's legs version independently, so a response can only answer in a
-/// version its own wrapper has: asking for v2 of a method whose response
-/// wrapper stopped at v1 is answered in v1, and the frame must say so rather
-/// than echo the request. Framework errors carry no versioned payload at all,
-/// so they report `fallback` — the version the caller asked in.
-pub fn response_version<T, E>(value: &Result<T, CallError<E>>, fallback: u8) -> u8
-where
-    T: Versioned,
-    E: Versioned,
-{
-    match value {
-        Ok(ok) => ok.version(),
-        Err(CallError::Domain(err)) => err.version(),
-        Err(_) => fallback,
-    }
-}
-
-/// [`response_version`] for a unit-payload response: only a domain error
-/// carries a version.
-pub fn unit_response_version<E>(value: &Result<(), CallError<E>>, fallback: u8) -> u8
-where
-    E: Versioned,
-{
-    match value {
-        Err(CallError::Domain(err)) => err.version(),
-        Ok(()) | Err(_) => fallback,
-    }
-}
-
-/// The version an `Interrupt` leg's payload is encoded in, by the same rule.
-pub fn interrupt_version<E>(value: &Option<CallError<E>>, fallback: u8) -> u8
-where
-    E: Versioned,
-{
-    match value {
-        Some(CallError::Domain(err)) => err.version(),
-        None | Some(_) => fallback,
-    }
-}
-
-/// Encode a `Response` leg — `Result<T, CallError<E>>` — with no version tag
-/// on either side.
-pub fn encode_response_without_version<T, E>(value: &Result<T, CallError<E>>) -> Vec<u8>
-where
-    T: Versioned + Encode,
-    E: Versioned + Encode,
-{
-    let mut out = Vec::new();
-    match value {
-        Ok(ok) => {
-            out.push(0);
-            out.extend_from_slice(&encode_without_version(ok));
-        }
-        Err(err) => {
-            out.push(1);
-            out.extend_from_slice(&encode_call_error_without_version(err));
-        }
-    }
-    out
-}
-
-/// Encode a unit-payload `Response` leg — `Result<(), CallError<E>>`. Only the
-/// error side can carry a version tag, so only it is stripped.
-pub fn encode_unit_response_without_version<E>(value: &Result<(), CallError<E>>) -> Vec<u8>
-where
-    E: Versioned + Encode,
-{
-    let mut out = Vec::new();
-    match value {
-        Ok(()) => out.push(0),
-        Err(err) => {
-            out.push(1);
-            out.extend_from_slice(&encode_call_error_without_version(err));
-        }
-    }
-    out
-}
-
-/// Encode an `Interrupt` leg — `Option<CallError<E>>` — with no version tag.
-/// `None` is a subscription's natural completion.
-pub fn encode_interrupt_without_version<E>(value: &Option<CallError<E>>) -> Vec<u8>
-where
-    E: Versioned + Encode,
-{
-    match value {
-        None => vec![0],
-        Some(err) => {
-            let mut out = vec![1];
-            out.extend_from_slice(&encode_call_error_without_version(err));
-            out
-        }
     }
 }
 
@@ -335,7 +165,6 @@ impl Encode for ProtocolMessage {
         self.request_id.encode_to(dest);
         self.payload.trait_id.encode_to(dest);
         self.payload.method_id.encode_to(dest);
-        self.payload.version.encode_to(dest);
         self.payload.message_type.encode_to(dest);
         // Payload bytes are inlined; the receiver reads "until end of frame"
         // because each transport frame is one ProtocolMessage. This matches
@@ -355,8 +184,6 @@ impl Decode for ProtocolMessage {
             .map_err(|_| CodecError::from("frame is missing the trait discriminant byte"))?;
         let method_id = u8::decode(input)
             .map_err(|_| CodecError::from("frame is missing the method discriminant byte"))?;
-        let version =
-            u8::decode(input).map_err(|_| CodecError::from("frame is missing the version byte"))?;
         let message_type = u8::decode(input)
             .map_err(|_| CodecError::from("frame is missing the message-type byte"))?;
         // Unknown (trait, method) pairs are accepted here; routing is deferred
@@ -374,7 +201,6 @@ impl Decode for ProtocolMessage {
             payload: Payload {
                 trait_id,
                 method_id,
-                version,
                 message_type,
                 value,
             },
@@ -397,11 +223,6 @@ pub struct Payload {
     pub trait_id: u8,
     /// Method discriminant within the trait: second byte of the wire pair.
     pub method_id: u8,
-    /// Protocol version this frame's payload speaks, 1-based, matching
-    /// [`truapi::versioned::Versioned::version`]. Wire-level and ahead of
-    /// `message_type`, so a peer knows which shape a payload has before
-    /// decoding it.
-    pub version: u8,
     /// Which leg of the method's exchange this frame carries. See the
     /// `MESSAGE_TYPE_*` constants.
     pub message_type: u8,
@@ -464,7 +285,6 @@ mod tests {
             payload: Payload {
                 trait_id,
                 method_id,
-                version: 1,
                 message_type,
                 value,
             },
@@ -476,7 +296,6 @@ mod tests {
         "p:1".to_string().encode_to(&mut out);
         out.push(trait_id);
         out.push(method_id);
-        out.push(1); // version
         out.push(message_type);
         out.extend_from_slice(value);
         out
@@ -528,7 +347,6 @@ mod tests {
         "p:1".to_string().encode_to(&mut bytes);
         bytes.push(250); // far outside the populated trait range
         bytes.push(123);
-        bytes.push(1); // version
         bytes.push(MESSAGE_TYPE_REQUEST);
         bytes.extend_from_slice(&[0xaa, 0xbb]);
         let decoded = ProtocolMessage::decode(&mut &bytes[..]).expect("unknown pair must decode");
@@ -548,7 +366,8 @@ mod tests {
     fn an_unknown_protocol_error_variant_is_tolerated() {
         // A variant index this build has never heard of, with a payload whose
         // length it cannot know either.
-        for payload in [vec![7], vec![7, 1, 2, 3], vec![200, 0xff]] {
+        // An unknown version (byte 0) and an unknown `V1` variant (byte 1).
+        for payload in [vec![7], vec![7, 1, 2, 3], vec![200, 0xff], vec![0, 9, 1]] {
             assert_eq!(
                 decode_protocol_error_payload(&payload).expect("tolerated"),
                 None,
@@ -569,42 +388,40 @@ mod tests {
 
     #[test]
     fn protocol_error_payload_has_stable_versioned_shape() {
-        let error = ProtocolErrorV1::UnsupportedMessage {
+        let error = VersionedProtocolError::V1(ProtocolErrorV1::UnsupportedMessage {
             trait_id: 250,
             method_id: 251,
-        };
+        });
         let encoded = error.encode();
         let decoded = decode_protocol_error_payload(&encoded).expect("decode");
-        // [0] variant index, [250] trait, [251] method. Like every other
-        // payload this one carries no version tag - the frame's `version` byte
-        // states `PROTOCOL_ERROR_VERSION`. Trait and method differ here on
-        // purpose, so transposing the two fields cannot pass.
-        assert_eq!((encoded, decoded), (vec![0, 250, 251], Some(error)));
+        // [0] versioned index, [0] variant index, [250] trait, [251] method.
+        // Trait and method differ here on purpose, so transposing the two
+        // fields cannot pass.
+        assert_eq!((encoded, decoded), (vec![0, 0, 250, 251], Some(error)));
     }
 
     #[test]
     fn malformed_protocol_error_payloads_fail_frame_decoding() {
-        // Re-derived twice over: the 2-byte address made a valid payload 4
-        // bytes, then dropping the version tag made it 3, so `[0, 250, 0]` -
-        // the old trailing-byte case - now decodes cleanly as the pair
-        // (250, 0) and would silently stop testing anything.
+        // Re-derived for the 2-byte address: a valid payload is 4 bytes, so
+        // `[0, 0, 250, 0]` - the old trailing-byte case - decodes cleanly as
+        // the pair (250, 0) and would silently stop testing anything.
         //
-        // An unknown variant index is deliberately absent from this list: it
-        // is a newer peer, not corruption, and is tolerated so the
-        // protocol-error channel stays extensible. See
+        // An unknown version or variant index is deliberately absent from this
+        // list: that is a newer peer rather than corruption, and is tolerated
+        // so the protocol-error channel stays extensible. See
         // `an_unknown_protocol_error_variant_is_tolerated`.
         for payload in [
-            vec![],               // no payload at all
-            vec![0],              // known variant, no address
-            vec![0, 250],         // known variant, trait present, method truncated
-            vec![0, 250, 251, 0], // known variant, one trailing byte
+            vec![],                  // no payload at all
+            vec![0],                 // version present, variant truncated
+            vec![0, 0],              // no address at all
+            vec![0, 0, 250],         // trait present, method truncated
+            vec![0, 0, 250, 251, 0], // one trailing byte past a full pair
         ] {
             let message = ProtocolMessage {
                 request_id: "p:1".into(),
                 payload: Payload {
                     trait_id: PROTOCOL_ERROR_TRAIT_ID,
                     method_id: PROTOCOL_ERROR_METHOD_ID,
-                    version: 1,
                     message_type: MESSAGE_TYPE_REQUEST,
                     value: payload,
                 },
@@ -666,125 +483,6 @@ mod tests {
         assert!(request_ids("not_a_method").is_none());
     }
 
-    /// The splice helpers assume a versioned wrapper's SCALE tag is
-    /// `version - 1`. If `versioned_type!` ever stops assigning positional
-    /// codec indices, every stripped payload silently decodes as the wrong
-    /// version, so pin it here rather than trusting the macro from a distance.
-    #[test]
-    fn version_tag_is_one_less_than_version() {
-        use truapi::versioned::account::HostAccountGetRequest;
-
-        let v1 = HostAccountGetRequest::V1(truapi::v01::HostAccountGetRequest {
-            product_account_id: truapi::v01::ProductAccountId {
-                dot_ns_identifier: "foo".to_string(),
-                derivation_index: truapi::v01::DerivationIndex::Index(0),
-            },
-        });
-        assert_eq!(v1.version(), 1);
-        assert_eq!(v1.encode()[0], 0, "V1 must encode SCALE tag 0");
-        assert_eq!(version_tag(v1.version()).expect("tag"), v1.encode()[0]);
-    }
-
-    /// `CallError::Domain` must stay the first variant. The TS client decides
-    /// whether an error payload has a version tag to restore by testing this
-    /// byte (`CALL_ERROR_DOMAIN_INDEX` in `scale.ts`), so a reordering here
-    /// would make it splice into framework errors and skip domain ones.
-    #[test]
-    fn call_error_domain_index_is_zero() {
-        let error: CallError<truapi::versioned::account::HostAccountGetError> =
-            CallError::Domain(truapi::versioned::account::HostAccountGetError::V1(
-                truapi::v01::HostAccountGetError::NotConnected,
-            ));
-        assert_eq!(error.encode()[0], 0);
-    }
-
-    /// A stripped payload carries no version tag, and round-trips only when
-    /// the header's version is supplied back.
-    #[test]
-    fn versionless_payload_round_trips_through_the_header_version() {
-        use truapi::versioned::account::HostAccountGetRequest;
-
-        let request = HostAccountGetRequest::V1(truapi::v01::HostAccountGetRequest {
-            product_account_id: truapi::v01::ProductAccountId {
-                dot_ns_identifier: "foo".to_string(),
-                derivation_index: truapi::v01::DerivationIndex::Index(0),
-            },
-        });
-        let stripped = encode_without_version(&request);
-        assert_eq!(
-            stripped,
-            request.encode()[1..],
-            "the wrapper's own tag must not appear in the payload"
-        );
-        let decoded: HostAccountGetRequest =
-            decode_with_version(1, &stripped).expect("decode with header version");
-        assert_eq!(decoded, request);
-    }
-
-    /// Both `Response` arms strip their version tag, and framework errors -
-    /// which carry no version at all - pass through untouched.
-    #[test]
-    fn response_leg_strips_the_version_tag_on_both_arms() {
-        use truapi::versioned::account::{HostAccountGetError, HostAccountGetResponse};
-
-        type Leg = Result<HostAccountGetResponse, CallError<HostAccountGetError>>;
-
-        let domain: Leg = Err(CallError::Domain(HostAccountGetError::V1(
-            truapi::v01::HostAccountGetError::NotConnected,
-        )));
-        // [Result::Err=1][CallError::Domain=0][the domain error, no V1 tag].
-        let encoded = encode_response_without_version(&domain);
-        let with_tag = domain.encode();
-        assert_eq!(encoded[..2], with_tag[..2]);
-        assert_eq!(
-            encoded[2..],
-            with_tag[3..],
-            "exactly the domain wrapper's version tag is removed"
-        );
-        assert_eq!(response_version(&domain, 9), 1, "reports the wrapper's own");
-
-        let framework: Leg = Err(CallError::Denied);
-        assert_eq!(
-            encode_response_without_version(&framework),
-            framework.encode(),
-            "a framework error carries no version tag to strip"
-        );
-        assert_eq!(
-            response_version(&framework, 9),
-            9,
-            "nothing versioned in the payload, so the caller's version stands"
-        );
-    }
-
-    /// `Interrupt(None)` is a bare `0`, and a domain failure strips its tag.
-    #[test]
-    fn interrupt_leg_strips_the_version_tag() {
-        use truapi::versioned::account::HostAccountGetError;
-
-        type Leg = Option<CallError<HostAccountGetError>>;
-
-        let clean: Leg = None;
-        assert_eq!(
-            encode_interrupt_without_version(&clean),
-            encode_clean_interrupt()
-        );
-        assert_eq!(
-            interrupt_version(&clean, 9),
-            9,
-            "a clean end has no payload"
-        );
-
-        // [Option::Some=1][CallError::Domain=0][the domain error, no V1 tag].
-        let failed: Leg = Some(CallError::Domain(HostAccountGetError::V1(
-            truapi::v01::HostAccountGetError::NotConnected,
-        )));
-        let encoded = encode_interrupt_without_version(&failed);
-        let with_tag = failed.encode();
-        assert_eq!(encoded[..2], with_tag[..2]);
-        assert_eq!(encoded[2..], with_tag[3..]);
-        assert_eq!(interrupt_version(&failed, 9), 1);
-    }
-
     #[test]
     fn encode_clean_interrupt_is_a_bare_none() {
         assert_eq!(encode_clean_interrupt(), vec![0]);
@@ -798,9 +496,8 @@ mod tests {
         // local_storage_clear_response = (7, 5).
         let msg = build(7, 5, MESSAGE_TYPE_RESPONSE, Vec::new());
         let bytes = msg.encode();
-        // [SCALE compact-len 0x0c][p][:][1][u8 7][u8 5][u8 version][u8 message_type]
-        // = 4 + 4 = 8 bytes total
-        assert_eq!(bytes.len(), 8);
+        // [SCALE compact-len 0x0c][p][:][1][u8 7][u8 5][u8 message_type] = 4 + 3 = 7 bytes total
+        assert_eq!(bytes.len(), 7);
         let decoded = ProtocolMessage::decode(&mut &bytes[..]).expect("decode");
         assert_eq!(decoded, msg);
     }
@@ -815,7 +512,6 @@ mod tests {
             payload: Payload {
                 trait_id: 194,
                 method_id: 4,
-                version: 1,
                 message_type: MESSAGE_TYPE_REQUEST,
                 value: vec![0x00, 0xab, 0xcd],
             },
@@ -849,18 +545,9 @@ mod tests {
             format!("{err}").contains("method discriminant"),
             "unexpected error: {err}"
         );
-        // RequestId plus trait and method bytes, no version byte.
-        let mut missing_version = missing_method.clone();
-        missing_version.push(0);
-        let err = ProtocolMessage::decode(&mut &missing_version[..])
-            .expect_err("missing version byte must error");
-        assert!(
-            format!("{err}").contains("version"),
-            "unexpected error: {err}"
-        );
-        // RequestId plus trait, method and version bytes, no message-type byte.
-        let mut missing_message_type = missing_version.clone();
-        missing_message_type.push(1);
+        // RequestId plus trait and method bytes, no message-type byte.
+        let mut missing_message_type = missing_method.clone();
+        missing_message_type.push(0);
         let err = ProtocolMessage::decode(&mut &missing_message_type[..])
             .expect_err("missing message-type byte must error");
         assert!(
@@ -882,13 +569,12 @@ mod tests {
             payload: Payload {
                 trait_id: 194,
                 method_id: 4,
-                version: 1,
                 message_type: MESSAGE_TYPE_RESPONSE,
                 value: vec![0x00, 0x01, 0x02],
             },
         };
         let bytes = msg.encode();
-        // [SCALE compact-len 0 = 0x00][trait][method][version][message_type][payload]
+        // [SCALE compact-len 0 = 0x00][trait][method][message_type][payload]
         assert_eq!(bytes[0], 0x00);
         let decoded = ProtocolMessage::decode(&mut &bytes[..]).expect("decode");
         assert_eq!(decoded, msg);
@@ -902,7 +588,6 @@ mod tests {
             payload: Payload {
                 trait_id: 194,
                 method_id: 4,
-                version: 1,
                 message_type: MESSAGE_TYPE_REQUEST,
                 value: vec![0x00, 0x01],
             },

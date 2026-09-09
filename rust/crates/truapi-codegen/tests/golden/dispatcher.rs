@@ -30,15 +30,11 @@ use truapi::api::{
     System,
     Theme,
 };
-use truapi::versioned::{self};
+use truapi::versioned::{self, Versioned};
 use truapi_platform::ProductExecutionKind;
 
 use crate::dispatcher::Dispatcher;
-use crate::frame::{
-    decode_with_version, downgrade_call_error, encode_interrupt_without_version,
-    encode_response_without_version, encode_unit_response_without_version,
-    encode_without_version, interrupt_version, response_version, unit_response_version,
-};
+use crate::frame::downgrade_call_error;
 use crate::generated::wire_table;
 use crate::subscription::{HostInitiatedSubscriptionManager, subscription_stream};
 use crate::transport::Transport;
@@ -74,8 +70,7 @@ pub(crate) fn chat_custom_message_render(
 ) -> truapi::Subscription<Result<versioned::chat::ProductChatCustomMessageRenderItem, truapi::latest::GenericError>> {
     subscriptions.start(
         wire_table::CHAT_CUSTOM_MESSAGE_RENDER,
-        truapi::versioned::Versioned::version(&request),
-        encode_without_version(&request),
+        parity_scale_codec::Encode::encode(&request),
         transport,
     )
 }
@@ -86,7 +81,7 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::ACCOUNT_CONNECTION_STATUS_SUBSCRIBE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::ACCOUNT_CONNECTION_STATUS_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
                 let _request: () = match Decode::decode(&mut &bytes[..]) {
@@ -94,10 +89,10 @@ where
                     Err(err) => {
                         let error: truapi::CallError<truapi::latest::GenericError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err((version, Some(error).encode()));
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = <versioned::account::HostAccountConnectionStatusSubscribeItem as truapi::versioned::Versioned>::LATEST;
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = host.connection_status_subscribe(&cx).await;
                 let stream = futures::StreamExt::map(stream, move |item: versioned::account::HostAccountConnectionStatusSubscribeItem| {
@@ -112,20 +107,19 @@ where
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::ACCOUNT_GET_ACCOUNT, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ACCOUNT_GET_ACCOUNT, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::account::HostAccountGetRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::account::HostAccountGetRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::account::HostAccountGetError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::account::HostAccountGetResponse, truapi::CallError<versioned::account::HostAccountGetError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::account::HostAccountGetResponse, truapi::CallError<versioned::account::HostAccountGetError>> =
                     match host.get_account(&cx, request).await {
@@ -135,29 +129,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::ACCOUNT_GET_ACCOUNT_ALIAS, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ACCOUNT_GET_ACCOUNT_ALIAS, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::account::HostAccountGetAliasRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::account::HostAccountGetAliasRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::account::HostAccountGetAliasError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::account::HostAccountGetAliasResponse, truapi::CallError<versioned::account::HostAccountGetAliasError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::account::HostAccountGetAliasResponse, truapi::CallError<versioned::account::HostAccountGetAliasError>> =
                     match host.get_account_alias(&cx, request).await {
@@ -167,29 +157,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::ACCOUNT_CREATE_ACCOUNT_PROOF, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ACCOUNT_CREATE_ACCOUNT_PROOF, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::account::HostAccountCreateProofRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::account::HostAccountCreateProofRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::account::HostAccountCreateProofError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::account::HostAccountCreateProofResponse, truapi::CallError<versioned::account::HostAccountCreateProofError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::account::HostAccountCreateProofResponse, truapi::CallError<versioned::account::HostAccountCreateProofError>> =
                     match host.create_account_proof(&cx, request).await {
@@ -199,29 +185,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::ACCOUNT_SIGN_VRF, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ACCOUNT_SIGN_VRF, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::account::HostAccountSignVrfRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::account::HostAccountSignVrfRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::account::HostAccountSignVrfError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::account::HostAccountSignVrfResponse, truapi::CallError<versioned::account::HostAccountSignVrfError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::account::HostAccountSignVrfResponse, truapi::CallError<versioned::account::HostAccountSignVrfError>> =
                     match host.sign_vrf(&cx, request).await {
@@ -231,29 +213,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::ACCOUNT_REGISTER_RING_VRF_KEY, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ACCOUNT_REGISTER_RING_VRF_KEY, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::account::HostAccountRegisterRingVrfKeyRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::account::HostAccountRegisterRingVrfKeyRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::account::HostAccountRegisterRingVrfKeyError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::account::HostAccountRegisterRingVrfKeyResponse, truapi::CallError<versioned::account::HostAccountRegisterRingVrfKeyError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::account::HostAccountRegisterRingVrfKeyResponse, truapi::CallError<versioned::account::HostAccountRegisterRingVrfKeyError>> =
                     match host.register_ring_vrf_key(&cx, request).await {
@@ -263,29 +241,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::ACCOUNT_LIST_RING_VRF_KEYS, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ACCOUNT_LIST_RING_VRF_KEYS, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::account::HostAccountListRingVrfKeysRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::account::HostAccountListRingVrfKeysRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::account::HostAccountListRingVrfKeysError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::account::HostAccountListRingVrfKeysResponse, truapi::CallError<versioned::account::HostAccountListRingVrfKeysError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::account::HostAccountListRingVrfKeysResponse, truapi::CallError<versioned::account::HostAccountListRingVrfKeysError>> =
                     match host.list_ring_vrf_keys(&cx, request).await {
@@ -295,29 +269,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::ACCOUNT_RING_VRF_SIGN, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ACCOUNT_RING_VRF_SIGN, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::account::HostAccountRingVrfSignRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::account::HostAccountRingVrfSignRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::account::HostAccountRingVrfSignError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::account::HostAccountRingVrfSignResponse, truapi::CallError<versioned::account::HostAccountRingVrfSignError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::account::HostAccountRingVrfSignResponse, truapi::CallError<versioned::account::HostAccountRingVrfSignError>> =
                     match host.ring_vrf_sign(&cx, request).await {
@@ -327,29 +297,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::ACCOUNT_GET_LEGACY_ACCOUNTS, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ACCOUNT_GET_LEGACY_ACCOUNTS, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::account::HostGetLegacyAccountsRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::account::HostGetLegacyAccountsRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::account::HostGetLegacyAccountsError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::account::HostGetLegacyAccountsResponse, truapi::CallError<versioned::account::HostGetLegacyAccountsError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::account::HostGetLegacyAccountsResponse, truapi::CallError<versioned::account::HostGetLegacyAccountsError>> =
                     match host.get_legacy_accounts(&cx, request).await {
@@ -359,29 +325,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::ACCOUNT_GET_USER_ID, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ACCOUNT_GET_USER_ID, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::account::HostGetUserIdRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::account::HostGetUserIdRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::account::HostGetUserIdError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::account::HostGetUserIdResponse, truapi::CallError<versioned::account::HostGetUserIdError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::account::HostGetUserIdResponse, truapi::CallError<versioned::account::HostGetUserIdError>> =
                     match host.get_user_id(&cx, request).await {
@@ -391,29 +353,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host;
-        dispatcher.on_request(wire_table::ACCOUNT_REQUEST_LOGIN, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ACCOUNT_REQUEST_LOGIN, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::account::HostRequestLoginRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::account::HostRequestLoginRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::account::HostRequestLoginError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::account::HostRequestLoginResponse, truapi::CallError<versioned::account::HostRequestLoginError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::account::HostRequestLoginResponse, truapi::CallError<versioned::account::HostRequestLoginError>> =
                     match host.request_login(&cx, request).await {
@@ -423,10 +381,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -438,18 +393,18 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::CHAIN_FOLLOW_HEAD_SUBSCRIBE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::CHAIN_FOLLOW_HEAD_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                let request: versioned::chain::RemoteChainHeadFollowRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainHeadFollowRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<truapi::latest::GenericError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err((version, Some(error).encode()));
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = host.follow_head_subscribe(&cx, request).await;
                 let stream = futures::StreamExt::map(stream, move |item: versioned::chain::RemoteChainHeadFollowItem| {
@@ -464,20 +419,19 @@ where
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_GET_HEAD_HEADER, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_GET_HEAD_HEADER, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainHeadHeaderRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainHeadHeaderRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainHeadHeaderError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainHeadHeaderResponse, truapi::CallError<versioned::chain::RemoteChainHeadHeaderError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainHeadHeaderResponse, truapi::CallError<versioned::chain::RemoteChainHeadHeaderError>> =
                     match host.get_head_header(&cx, request).await {
@@ -487,29 +441,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_GET_HEAD_BODY, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_GET_HEAD_BODY, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainHeadBodyRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainHeadBodyRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainHeadBodyError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainHeadBodyResponse, truapi::CallError<versioned::chain::RemoteChainHeadBodyError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainHeadBodyResponse, truapi::CallError<versioned::chain::RemoteChainHeadBodyError>> =
                     match host.get_head_body(&cx, request).await {
@@ -519,29 +469,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_GET_HEAD_STORAGE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_GET_HEAD_STORAGE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainHeadStorageRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainHeadStorageRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainHeadStorageError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainHeadStorageResponse, truapi::CallError<versioned::chain::RemoteChainHeadStorageError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainHeadStorageResponse, truapi::CallError<versioned::chain::RemoteChainHeadStorageError>> =
                     match host.get_head_storage(&cx, request).await {
@@ -551,29 +497,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_CALL_HEAD, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_CALL_HEAD, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainHeadCallRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainHeadCallRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainHeadCallError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainHeadCallResponse, truapi::CallError<versioned::chain::RemoteChainHeadCallError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainHeadCallResponse, truapi::CallError<versioned::chain::RemoteChainHeadCallError>> =
                     match host.call_head(&cx, request).await {
@@ -583,29 +525,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_UNPIN_HEAD, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_UNPIN_HEAD, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainHeadUnpinRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainHeadUnpinRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainHeadUnpinError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainHeadUnpinResponse, truapi::CallError<versioned::chain::RemoteChainHeadUnpinError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainHeadUnpinResponse, truapi::CallError<versioned::chain::RemoteChainHeadUnpinError>> =
                     match host.unpin_head(&cx, request).await {
@@ -615,29 +553,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_CONTINUE_HEAD, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_CONTINUE_HEAD, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainHeadContinueRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainHeadContinueRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainHeadContinueError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainHeadContinueResponse, truapi::CallError<versioned::chain::RemoteChainHeadContinueError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainHeadContinueResponse, truapi::CallError<versioned::chain::RemoteChainHeadContinueError>> =
                     match host.continue_head(&cx, request).await {
@@ -647,29 +581,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_STOP_HEAD_OPERATION, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_STOP_HEAD_OPERATION, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainHeadStopOperationRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainHeadStopOperationRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainHeadStopOperationError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainHeadStopOperationResponse, truapi::CallError<versioned::chain::RemoteChainHeadStopOperationError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainHeadStopOperationResponse, truapi::CallError<versioned::chain::RemoteChainHeadStopOperationError>> =
                     match host.stop_head_operation(&cx, request).await {
@@ -679,29 +609,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_GET_SPEC_GENESIS_HASH, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_GET_SPEC_GENESIS_HASH, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainSpecGenesisHashRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainSpecGenesisHashRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainSpecGenesisHashError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainSpecGenesisHashResponse, truapi::CallError<versioned::chain::RemoteChainSpecGenesisHashError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainSpecGenesisHashResponse, truapi::CallError<versioned::chain::RemoteChainSpecGenesisHashError>> =
                     match host.get_spec_genesis_hash(&cx, request).await {
@@ -711,29 +637,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_GET_SPEC_CHAIN_NAME, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_GET_SPEC_CHAIN_NAME, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainSpecChainNameRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainSpecChainNameRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainSpecChainNameError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainSpecChainNameResponse, truapi::CallError<versioned::chain::RemoteChainSpecChainNameError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainSpecChainNameResponse, truapi::CallError<versioned::chain::RemoteChainSpecChainNameError>> =
                     match host.get_spec_chain_name(&cx, request).await {
@@ -743,29 +665,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_GET_SPEC_PROPERTIES, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_GET_SPEC_PROPERTIES, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainSpecPropertiesRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainSpecPropertiesRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainSpecPropertiesError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainSpecPropertiesResponse, truapi::CallError<versioned::chain::RemoteChainSpecPropertiesError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainSpecPropertiesResponse, truapi::CallError<versioned::chain::RemoteChainSpecPropertiesError>> =
                     match host.get_spec_properties(&cx, request).await {
@@ -775,29 +693,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_BROADCAST_TRANSACTION, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_BROADCAST_TRANSACTION, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainTransactionBroadcastRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainTransactionBroadcastRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainTransactionBroadcastError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainTransactionBroadcastResponse, truapi::CallError<versioned::chain::RemoteChainTransactionBroadcastError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainTransactionBroadcastResponse, truapi::CallError<versioned::chain::RemoteChainTransactionBroadcastError>> =
                     match host.broadcast_transaction(&cx, request).await {
@@ -807,29 +721,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAIN_STOP_TRANSACTION, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_STOP_TRANSACTION, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainTransactionStopRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainTransactionStopRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainTransactionStopError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainTransactionStopResponse, truapi::CallError<versioned::chain::RemoteChainTransactionStopError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainTransactionStopResponse, truapi::CallError<versioned::chain::RemoteChainTransactionStopError>> =
                     match host.stop_transaction(&cx, request).await {
@@ -839,29 +749,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host;
-        dispatcher.on_request(wire_table::CHAIN_GET_CHAIN_INFO, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAIN_GET_CHAIN_INFO, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chain::RemoteChainInfoRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chain::RemoteChainInfoRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chain::RemoteChainInfoError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chain::RemoteChainInfoResponse, truapi::CallError<versioned::chain::RemoteChainInfoError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::chain::RemoteChainInfoResponse, truapi::CallError<versioned::chain::RemoteChainInfoError>> =
                     match host.get_chain_info(&cx, request).await {
@@ -871,10 +777,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -887,25 +790,24 @@ where
     {
         let execution_allowed = dispatcher.allows_execution(ProductExecutionKind::Worker);
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAT_CREATE_ROOM, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAT_CREATE_ROOM, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chat::HostChatCreateRoomRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chat::HostChatCreateRoomRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chat::HostChatCreateRoomError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chat::HostChatCreateRoomResponse, truapi::CallError<versioned::chat::HostChatCreateRoomError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 if !execution_allowed {
                     let error: truapi::CallError<versioned::chat::HostChatCreateRoomError> = truapi::CallError::Denied;
                     let result: Result<versioned::chat::HostChatCreateRoomResponse, truapi::CallError<versioned::chat::HostChatCreateRoomError>> = Err(error);
-                    return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                    return Ok(result.encode());
                 }
                 let result: Result<versioned::chat::HostChatCreateRoomResponse, truapi::CallError<versioned::chat::HostChatCreateRoomError>> =
                     match host.create_room(&cx, request).await {
@@ -915,35 +817,31 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let execution_allowed = dispatcher.allows_execution(ProductExecutionKind::Worker);
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAT_REGISTER_BOT, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAT_REGISTER_BOT, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chat::HostChatRegisterBotRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chat::HostChatRegisterBotRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chat::HostChatRegisterBotError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chat::HostChatRegisterBotResponse, truapi::CallError<versioned::chat::HostChatRegisterBotError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 if !execution_allowed {
                     let error: truapi::CallError<versioned::chat::HostChatRegisterBotError> = truapi::CallError::Denied;
                     let result: Result<versioned::chat::HostChatRegisterBotResponse, truapi::CallError<versioned::chat::HostChatRegisterBotError>> = Err(error);
-                    return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                    return Ok(result.encode());
                 }
                 let result: Result<versioned::chat::HostChatRegisterBotResponse, truapi::CallError<versioned::chat::HostChatRegisterBotError>> =
                     match host.register_bot(&cx, request).await {
@@ -953,17 +851,14 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let execution_allowed = dispatcher.allows_execution(ProductExecutionKind::Worker);
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::CHAT_LIST_SUBSCRIBE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::CHAT_LIST_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
                 let _request: () = match Decode::decode(&mut &bytes[..]) {
@@ -971,14 +866,14 @@ where
                     Err(err) => {
                         let error: truapi::CallError<truapi::latest::GenericError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err((version, Some(error).encode()));
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = <versioned::chat::HostChatListSubscribeItem as truapi::versioned::Versioned>::LATEST;
                 let cx = CallContext::with_request_id(request_id.clone());
                 if !execution_allowed {
                     let error: truapi::CallError<truapi::latest::GenericError> = truapi::CallError::Denied;
-                    return Err((version, Some(error).encode()));
+                    return Err(Some(error).encode());
                 }
                 let stream = host.list_subscribe(&cx).await;
                 let stream = futures::StreamExt::map(stream, move |item: versioned::chat::HostChatListSubscribeItem| {
@@ -994,25 +889,24 @@ where
     {
         let execution_allowed = dispatcher.allows_execution(ProductExecutionKind::Worker);
         let host = host.clone();
-        dispatcher.on_request(wire_table::CHAT_POST_MESSAGE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::CHAT_POST_MESSAGE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::chat::HostChatPostMessageRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::chat::HostChatPostMessageRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::chat::HostChatPostMessageError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::chat::HostChatPostMessageResponse, truapi::CallError<versioned::chat::HostChatPostMessageError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 if !execution_allowed {
                     let error: truapi::CallError<versioned::chat::HostChatPostMessageError> = truapi::CallError::Denied;
                     let result: Result<versioned::chat::HostChatPostMessageResponse, truapi::CallError<versioned::chat::HostChatPostMessageError>> = Err(error);
-                    return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                    return Ok(result.encode());
                 }
                 let result: Result<versioned::chat::HostChatPostMessageResponse, truapi::CallError<versioned::chat::HostChatPostMessageError>> =
                     match host.post_message(&cx, request).await {
@@ -1022,17 +916,14 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let execution_allowed = dispatcher.allows_execution(ProductExecutionKind::Worker);
         let host = host;
-        dispatcher.on_subscription(wire_table::CHAT_ACTION_SUBSCRIBE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::CHAT_ACTION_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
                 let _request: () = match Decode::decode(&mut &bytes[..]) {
@@ -1040,14 +931,14 @@ where
                     Err(err) => {
                         let error: truapi::CallError<truapi::latest::GenericError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err((version, Some(error).encode()));
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = <versioned::chat::HostChatActionSubscribeItem as truapi::versioned::Versioned>::LATEST;
                 let cx = CallContext::with_request_id(request_id.clone());
                 if !execution_allowed {
                     let error: truapi::CallError<truapi::latest::GenericError> = truapi::CallError::Denied;
-                    return Err((version, Some(error).encode()));
+                    return Err(Some(error).encode());
                 }
                 let stream = host.action_subscribe(&cx).await;
                 let stream = futures::StreamExt::map(stream, move |item: versioned::chat::HostChatActionSubscribeItem| {
@@ -1068,20 +959,19 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::COIN_PAYMENT_CREATE_PURSE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::COIN_PAYMENT_CREATE_PURSE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::coin_payment::HostCoinPaymentCreatePurseRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::coin_payment::HostCoinPaymentCreatePurseRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::coin_payment::HostCoinPaymentCreatePurseError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::coin_payment::HostCoinPaymentCreatePurseResponse, truapi::CallError<versioned::coin_payment::HostCoinPaymentCreatePurseError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::coin_payment::HostCoinPaymentCreatePurseResponse, truapi::CallError<versioned::coin_payment::HostCoinPaymentCreatePurseError>> =
                     match host.create_purse(&cx, request).await {
@@ -1091,29 +981,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::COIN_PAYMENT_QUERY_PURSE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::COIN_PAYMENT_QUERY_PURSE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::coin_payment::HostCoinPaymentQueryPurseRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::coin_payment::HostCoinPaymentQueryPurseRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::coin_payment::HostCoinPaymentQueryPurseError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::coin_payment::HostCoinPaymentQueryPurseResponse, truapi::CallError<versioned::coin_payment::HostCoinPaymentQueryPurseError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::coin_payment::HostCoinPaymentQueryPurseResponse, truapi::CallError<versioned::coin_payment::HostCoinPaymentQueryPurseError>> =
                     match host.query_purse(&cx, request).await {
@@ -1123,33 +1009,30 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::COIN_PAYMENT_REBALANCE_PURSE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::COIN_PAYMENT_REBALANCE_PURSE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                let request: versioned::coin_payment::HostCoinPaymentRebalancePurseRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::coin_payment::HostCoinPaymentRebalancePurseRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::coin_payment::HostCoinPaymentRebalancePurseError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = match host.rebalance_purse(&cx, request).await {
                     Ok(sub) => sub,
                     Err(err) => {
                         let error = downgrade_call_error(err, target_version);
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
                 let stream = futures::StreamExt::map(stream, move |item: versioned::coin_payment::HostCoinPaymentRebalancePurseItem| {
@@ -1164,24 +1047,24 @@ where
     }
     {
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::COIN_PAYMENT_DELETE_PURSE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::COIN_PAYMENT_DELETE_PURSE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                let request: versioned::coin_payment::HostCoinPaymentDeletePurseRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::coin_payment::HostCoinPaymentDeletePurseRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::coin_payment::HostCoinPaymentDeletePurseError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = match host.delete_purse(&cx, request).await {
                     Ok(sub) => sub,
                     Err(err) => {
                         let error = downgrade_call_error(err, target_version);
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
                 let stream = futures::StreamExt::map(stream, move |item: versioned::coin_payment::HostCoinPaymentDeletePurseItem| {
@@ -1196,20 +1079,19 @@ where
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::COIN_PAYMENT_CREATE_RECEIVABLE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::COIN_PAYMENT_CREATE_RECEIVABLE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::coin_payment::HostCoinPaymentCreateReceivableRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::coin_payment::HostCoinPaymentCreateReceivableRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::coin_payment::HostCoinPaymentCreateReceivableError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::coin_payment::HostCoinPaymentCreateReceivableResponse, truapi::CallError<versioned::coin_payment::HostCoinPaymentCreateReceivableError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::coin_payment::HostCoinPaymentCreateReceivableResponse, truapi::CallError<versioned::coin_payment::HostCoinPaymentCreateReceivableError>> =
                     match host.create_receivable(&cx, request).await {
@@ -1219,29 +1101,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::COIN_PAYMENT_CREATE_CHEQUE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::COIN_PAYMENT_CREATE_CHEQUE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::coin_payment::HostCoinPaymentCreateChequeRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::coin_payment::HostCoinPaymentCreateChequeRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::coin_payment::HostCoinPaymentCreateChequeError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::coin_payment::HostCoinPaymentCreateChequeResponse, truapi::CallError<versioned::coin_payment::HostCoinPaymentCreateChequeError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::coin_payment::HostCoinPaymentCreateChequeResponse, truapi::CallError<versioned::coin_payment::HostCoinPaymentCreateChequeError>> =
                     match host.create_cheque(&cx, request).await {
@@ -1251,33 +1129,30 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::COIN_PAYMENT_DEPOSIT, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::COIN_PAYMENT_DEPOSIT, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                let request: versioned::coin_payment::HostCoinPaymentDepositRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::coin_payment::HostCoinPaymentDepositRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::coin_payment::HostCoinPaymentDepositError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = match host.deposit(&cx, request).await {
                     Ok(sub) => sub,
                     Err(err) => {
                         let error = downgrade_call_error(err, target_version);
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
                 let stream = futures::StreamExt::map(stream, move |item: versioned::coin_payment::HostCoinPaymentDepositItem| {
@@ -1292,24 +1167,24 @@ where
     }
     {
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::COIN_PAYMENT_REFUND, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::COIN_PAYMENT_REFUND, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                let request: versioned::coin_payment::HostCoinPaymentRefundRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::coin_payment::HostCoinPaymentRefundRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::coin_payment::HostCoinPaymentRefundError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = match host.refund(&cx, request).await {
                     Ok(sub) => sub,
                     Err(err) => {
                         let error = downgrade_call_error(err, target_version);
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
                 let stream = futures::StreamExt::map(stream, move |item: versioned::coin_payment::HostCoinPaymentRefundItem| {
@@ -1324,24 +1199,24 @@ where
     }
     {
         let host = host;
-        dispatcher.on_subscription(wire_table::COIN_PAYMENT_LISTEN_FOR_PAYMENT, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::COIN_PAYMENT_LISTEN_FOR_PAYMENT, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                let request: versioned::coin_payment::HostCoinPaymentListenForRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::coin_payment::HostCoinPaymentListenForRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::coin_payment::HostCoinPaymentListenForError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = match host.listen_for_payment(&cx, request).await {
                     Ok(sub) => sub,
                     Err(err) => {
                         let error = downgrade_call_error(err, target_version);
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
                 let stream = futures::StreamExt::map(stream, move |item: versioned::coin_payment::HostCoinPaymentListenForItem| {
@@ -1362,20 +1237,19 @@ where
 {
     {
         let host = host;
-        dispatcher.on_request(wire_table::ENTROPY_DERIVE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::ENTROPY_DERIVE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::entropy::HostDeriveEntropyRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::entropy::HostDeriveEntropyRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::entropy::HostDeriveEntropyError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::entropy::HostDeriveEntropyResponse, truapi::CallError<versioned::entropy::HostDeriveEntropyError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::entropy::HostDeriveEntropyResponse, truapi::CallError<versioned::entropy::HostDeriveEntropyError>> =
                     match host.derive(&cx, request).await {
@@ -1385,10 +1259,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -1400,20 +1271,19 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::LOCAL_STORAGE_READ, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::LOCAL_STORAGE_READ, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::local_storage::HostLocalStorageReadRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::local_storage::HostLocalStorageReadRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::local_storage::HostLocalStorageReadError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::local_storage::HostLocalStorageReadResponse, truapi::CallError<versioned::local_storage::HostLocalStorageReadError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::local_storage::HostLocalStorageReadResponse, truapi::CallError<versioned::local_storage::HostLocalStorageReadError>> =
                     match host.read(&cx, request).await {
@@ -1423,29 +1293,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::LOCAL_STORAGE_WRITE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::LOCAL_STORAGE_WRITE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::local_storage::HostLocalStorageWriteRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::local_storage::HostLocalStorageWriteRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::local_storage::HostLocalStorageWriteError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::local_storage::HostLocalStorageWriteResponse, truapi::CallError<versioned::local_storage::HostLocalStorageWriteError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::local_storage::HostLocalStorageWriteResponse, truapi::CallError<versioned::local_storage::HostLocalStorageWriteError>> =
                     match host.write(&cx, request).await {
@@ -1455,29 +1321,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host;
-        dispatcher.on_request(wire_table::LOCAL_STORAGE_CLEAR, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::LOCAL_STORAGE_CLEAR, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::local_storage::HostLocalStorageClearRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::local_storage::HostLocalStorageClearRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::local_storage::HostLocalStorageClearError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::local_storage::HostLocalStorageClearResponse, truapi::CallError<versioned::local_storage::HostLocalStorageClearError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::local_storage::HostLocalStorageClearResponse, truapi::CallError<versioned::local_storage::HostLocalStorageClearError>> =
                     match host.clear(&cx, request).await {
@@ -1487,10 +1349,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -1502,7 +1361,7 @@ where
 {
     {
         let host = host;
-        dispatcher.on_subscription(wire_table::LOCALE_SUBSCRIBE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::LOCALE_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
                 let _request: () = match Decode::decode(&mut &bytes[..]) {
@@ -1510,10 +1369,10 @@ where
                     Err(err) => {
                         let error: truapi::CallError<truapi::latest::GenericError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err((version, Some(error).encode()));
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = <versioned::locale::HostLocaleSubscribeItem as truapi::versioned::Versioned>::LATEST;
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = host.subscribe(&cx).await;
                 let stream = futures::StreamExt::map(stream, move |item: versioned::locale::HostLocaleSubscribeItem| {
@@ -1534,20 +1393,19 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::NOTIFICATIONS_SEND_PUSH_NOTIFICATION, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::NOTIFICATIONS_SEND_PUSH_NOTIFICATION, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::notifications::HostPushNotificationRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::notifications::HostPushNotificationRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::notifications::HostPushNotificationError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::notifications::HostPushNotificationResponse, truapi::CallError<versioned::notifications::HostPushNotificationError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::notifications::HostPushNotificationResponse, truapi::CallError<versioned::notifications::HostPushNotificationError>> =
                     match host.send_push_notification(&cx, request).await {
@@ -1557,29 +1415,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host;
-        dispatcher.on_request(wire_table::NOTIFICATIONS_CANCEL_PUSH_NOTIFICATION, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::NOTIFICATIONS_CANCEL_PUSH_NOTIFICATION, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::notifications::HostPushNotificationCancelRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::notifications::HostPushNotificationCancelRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::notifications::HostPushNotificationCancelError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::notifications::HostPushNotificationCancelResponse, truapi::CallError<versioned::notifications::HostPushNotificationCancelError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::notifications::HostPushNotificationCancelResponse, truapi::CallError<versioned::notifications::HostPushNotificationCancelError>> =
                     match host.cancel_push_notification(&cx, request).await {
@@ -1589,10 +1443,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -1604,24 +1455,24 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::PAYMENT_BALANCE_SUBSCRIBE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::PAYMENT_BALANCE_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                let request: versioned::payment::HostPaymentBalanceSubscribeRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::payment::HostPaymentBalanceSubscribeRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::payment::HostPaymentBalanceSubscribeError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = match host.balance_subscribe(&cx, request).await {
                     Ok(sub) => sub,
                     Err(err) => {
                         let error = downgrade_call_error(err, target_version);
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
                 let stream = futures::StreamExt::map(stream, move |item: versioned::payment::HostPaymentBalanceSubscribeItem| {
@@ -1636,20 +1487,19 @@ where
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::PAYMENT_REQUEST, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::PAYMENT_REQUEST, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::payment::HostPaymentRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::payment::HostPaymentRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::payment::HostPaymentError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::payment::HostPaymentResponse, truapi::CallError<versioned::payment::HostPaymentError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::payment::HostPaymentResponse, truapi::CallError<versioned::payment::HostPaymentError>> =
                     match host.request(&cx, request).await {
@@ -1659,33 +1509,30 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::PAYMENT_STATUS_SUBSCRIBE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::PAYMENT_STATUS_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                let request: versioned::payment::HostPaymentStatusSubscribeRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::payment::HostPaymentStatusSubscribeRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::payment::HostPaymentStatusSubscribeError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = match host.status_subscribe(&cx, request).await {
                     Ok(sub) => sub,
                     Err(err) => {
                         let error = downgrade_call_error(err, target_version);
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
                 let stream = futures::StreamExt::map(stream, move |item: versioned::payment::HostPaymentStatusSubscribeItem| {
@@ -1700,20 +1547,19 @@ where
     }
     {
         let host = host;
-        dispatcher.on_request(wire_table::PAYMENT_TOP_UP, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::PAYMENT_TOP_UP, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::payment::HostPaymentTopUpRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::payment::HostPaymentTopUpRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::payment::HostPaymentTopUpError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::payment::HostPaymentTopUpResponse, truapi::CallError<versioned::payment::HostPaymentTopUpError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::payment::HostPaymentTopUpResponse, truapi::CallError<versioned::payment::HostPaymentTopUpError>> =
                     match host.top_up(&cx, request).await {
@@ -1723,10 +1569,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -1738,20 +1581,19 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::PERMISSIONS_REQUEST_DEVICE_PERMISSION, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::PERMISSIONS_REQUEST_DEVICE_PERMISSION, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::permissions::HostDevicePermissionRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::permissions::HostDevicePermissionRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::permissions::HostDevicePermissionError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::permissions::HostDevicePermissionResponse, truapi::CallError<versioned::permissions::HostDevicePermissionError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::permissions::HostDevicePermissionResponse, truapi::CallError<versioned::permissions::HostDevicePermissionError>> =
                     match host.request_device_permission(&cx, request).await {
@@ -1761,29 +1603,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host;
-        dispatcher.on_request(wire_table::PERMISSIONS_REQUEST_REMOTE_PERMISSION, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::PERMISSIONS_REQUEST_REMOTE_PERMISSION, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::permissions::RemotePermissionRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::permissions::RemotePermissionRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::permissions::RemotePermissionError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::permissions::RemotePermissionResponse, truapi::CallError<versioned::permissions::RemotePermissionError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::permissions::RemotePermissionResponse, truapi::CallError<versioned::permissions::RemotePermissionError>> =
                     match host.request_remote_permission(&cx, request).await {
@@ -1793,10 +1631,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -1808,18 +1643,18 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::PREIMAGE_LOOKUP_SUBSCRIBE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::PREIMAGE_LOOKUP_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                let request: versioned::preimage::RemotePreimageLookupSubscribeRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::preimage::RemotePreimageLookupSubscribeRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<truapi::latest::GenericError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err((version, Some(error).encode()));
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = host.lookup_subscribe(&cx, request).await;
                 let stream = futures::StreamExt::map(stream, move |item: versioned::preimage::RemotePreimageLookupSubscribeItem| {
@@ -1834,20 +1669,19 @@ where
     }
     {
         let host = host;
-        dispatcher.on_request(wire_table::PREIMAGE_SUBMIT, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::PREIMAGE_SUBMIT, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::preimage::RemotePreimageSubmitRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::preimage::RemotePreimageSubmitRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::preimage::RemotePreimageSubmitError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::preimage::RemotePreimageSubmitResponse, truapi::CallError<versioned::preimage::RemotePreimageSubmitError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::preimage::RemotePreimageSubmitResponse, truapi::CallError<versioned::preimage::RemotePreimageSubmitError>> =
                     match host.submit(&cx, request).await {
@@ -1857,10 +1691,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -1872,20 +1703,19 @@ where
 {
     {
         let host = host;
-        dispatcher.on_request(wire_table::RESOURCE_ALLOCATION_REQUEST, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::RESOURCE_ALLOCATION_REQUEST, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::resource_allocation::HostRequestResourceAllocationRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::resource_allocation::HostRequestResourceAllocationRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::resource_allocation::HostRequestResourceAllocationError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::resource_allocation::HostRequestResourceAllocationResponse, truapi::CallError<versioned::resource_allocation::HostRequestResourceAllocationError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::resource_allocation::HostRequestResourceAllocationResponse, truapi::CallError<versioned::resource_allocation::HostRequestResourceAllocationError>> =
                     match host.request(&cx, request).await {
@@ -1895,10 +1725,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -1910,20 +1737,19 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::SIGNING_CREATE_TRANSACTION, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SIGNING_CREATE_TRANSACTION, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::signing::HostCreateTransactionRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::signing::HostCreateTransactionRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::signing::HostCreateTransactionError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::signing::HostCreateTransactionResponse, truapi::CallError<versioned::signing::HostCreateTransactionError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::signing::HostCreateTransactionResponse, truapi::CallError<versioned::signing::HostCreateTransactionError>> =
                     match host.create_transaction(&cx, request).await {
@@ -1933,29 +1759,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::SIGNING_CREATE_TRANSACTION_WITH_LEGACY_ACCOUNT, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SIGNING_CREATE_TRANSACTION_WITH_LEGACY_ACCOUNT, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::signing::HostCreateTransactionWithLegacyAccountRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::signing::HostCreateTransactionWithLegacyAccountRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::signing::HostCreateTransactionWithLegacyAccountError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::signing::HostCreateTransactionWithLegacyAccountResponse, truapi::CallError<versioned::signing::HostCreateTransactionWithLegacyAccountError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::signing::HostCreateTransactionWithLegacyAccountResponse, truapi::CallError<versioned::signing::HostCreateTransactionWithLegacyAccountError>> =
                     match host.create_transaction_with_legacy_account(&cx, request).await {
@@ -1965,29 +1787,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::SIGNING_SIGN_RAW_WITH_LEGACY_ACCOUNT, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SIGNING_SIGN_RAW_WITH_LEGACY_ACCOUNT, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::signing::HostSignRawWithLegacyAccountRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::signing::HostSignRawWithLegacyAccountRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::signing::HostSignRawWithLegacyAccountError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::signing::HostSignRawWithLegacyAccountResponse, truapi::CallError<versioned::signing::HostSignRawWithLegacyAccountError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::signing::HostSignRawWithLegacyAccountResponse, truapi::CallError<versioned::signing::HostSignRawWithLegacyAccountError>> =
                     match host.sign_raw_with_legacy_account(&cx, request).await {
@@ -1997,29 +1815,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::SIGNING_SIGN_PAYLOAD_WITH_LEGACY_ACCOUNT, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SIGNING_SIGN_PAYLOAD_WITH_LEGACY_ACCOUNT, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::signing::HostSignPayloadWithLegacyAccountRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::signing::HostSignPayloadWithLegacyAccountRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::signing::HostSignPayloadWithLegacyAccountError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::signing::HostSignPayloadWithLegacyAccountResponse, truapi::CallError<versioned::signing::HostSignPayloadWithLegacyAccountError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::signing::HostSignPayloadWithLegacyAccountResponse, truapi::CallError<versioned::signing::HostSignPayloadWithLegacyAccountError>> =
                     match host.sign_payload_with_legacy_account(&cx, request).await {
@@ -2029,29 +1843,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::SIGNING_SIGN_RAW, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SIGNING_SIGN_RAW, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::signing::HostSignRawRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::signing::HostSignRawRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::signing::HostSignRawError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::signing::HostSignRawResponse, truapi::CallError<versioned::signing::HostSignRawError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::signing::HostSignRawResponse, truapi::CallError<versioned::signing::HostSignRawError>> =
                     match host.sign_raw(&cx, request).await {
@@ -2061,29 +1871,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host;
-        dispatcher.on_request(wire_table::SIGNING_SIGN_PAYLOAD, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SIGNING_SIGN_PAYLOAD, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::signing::HostSignPayloadRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::signing::HostSignPayloadRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::signing::HostSignPayloadError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::signing::HostSignPayloadResponse, truapi::CallError<versioned::signing::HostSignPayloadError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::signing::HostSignPayloadResponse, truapi::CallError<versioned::signing::HostSignPayloadError>> =
                     match host.sign_payload(&cx, request).await {
@@ -2093,10 +1899,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -2108,24 +1911,24 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_subscription(wire_table::STATEMENT_STORE_SUBSCRIBE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::STATEMENT_STORE_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                let request: versioned::statement_store::RemoteStatementStoreSubscribeRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::statement_store::RemoteStatementStoreSubscribeRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::statement_store::RemoteStatementStoreSubscribeError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = match host.subscribe(&cx, request).await {
                     Ok(sub) => sub,
                     Err(err) => {
                         let error = downgrade_call_error(err, target_version);
-                        return Err({ let interrupt = Some(error);              (interrupt_version(&interrupt, version), encode_interrupt_without_version(&interrupt)) });
+                        return Err(Some(error).encode());
                     }
                 };
                 let stream = futures::StreamExt::map(stream, move |item: versioned::statement_store::RemoteStatementStoreSubscribeItem| {
@@ -2140,20 +1943,19 @@ where
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::STATEMENT_STORE_CREATE_PROOF, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::STATEMENT_STORE_CREATE_PROOF, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::statement_store::RemoteStatementStoreCreateProofRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::statement_store::RemoteStatementStoreCreateProofRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::statement_store::RemoteStatementStoreCreateProofError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::statement_store::RemoteStatementStoreCreateProofResponse, truapi::CallError<versioned::statement_store::RemoteStatementStoreCreateProofError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::statement_store::RemoteStatementStoreCreateProofResponse, truapi::CallError<versioned::statement_store::RemoteStatementStoreCreateProofError>> =
                     match host.create_proof(&cx, request).await {
@@ -2163,29 +1965,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::STATEMENT_STORE_CREATE_PROOF_AUTHORIZED, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::STATEMENT_STORE_CREATE_PROOF_AUTHORIZED, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::statement_store::RemoteStatementStoreCreateProofAuthorizedRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::statement_store::RemoteStatementStoreCreateProofAuthorizedRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::statement_store::RemoteStatementStoreCreateProofAuthorizedError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::statement_store::RemoteStatementStoreCreateProofAuthorizedResponse, truapi::CallError<versioned::statement_store::RemoteStatementStoreCreateProofAuthorizedError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::statement_store::RemoteStatementStoreCreateProofAuthorizedResponse, truapi::CallError<versioned::statement_store::RemoteStatementStoreCreateProofAuthorizedError>> =
                     match host.create_proof_authorized(&cx, request).await {
@@ -2195,38 +1993,31 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host;
-        dispatcher.on_request(wire_table::STATEMENT_STORE_SUBMIT, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::STATEMENT_STORE_SUBMIT, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::statement_store::RemoteStatementStoreSubmitRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::statement_store::RemoteStatementStoreSubmitRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::statement_store::RemoteStatementStoreSubmitError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<(), truapi::CallError<versioned::statement_store::RemoteStatementStoreSubmitError>> = Err(error);
-                        return Ok((unit_response_version(&result, version), encode_unit_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<(), truapi::CallError<versioned::statement_store::RemoteStatementStoreSubmitError>> = match host.submit(&cx, request).await {
                     Ok(()) => Ok(()),
                     Err(err) => Err(downgrade_call_error(err, target_version)),
                 };
-                Ok((
-                    unit_response_version(&result, version),
-                    encode_unit_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -2238,20 +2029,19 @@ where
 {
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::SYSTEM_HANDSHAKE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SYSTEM_HANDSHAKE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::system::HostHandshakeRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::system::HostHandshakeRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::system::HostHandshakeError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::system::HostHandshakeResponse, truapi::CallError<versioned::system::HostHandshakeError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::system::HostHandshakeResponse, truapi::CallError<versioned::system::HostHandshakeError>> =
                     match host.handshake(&cx, request).await {
@@ -2261,29 +2051,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::SYSTEM_FEATURE_SUPPORTED, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SYSTEM_FEATURE_SUPPORTED, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::system::HostFeatureSupportedRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::system::HostFeatureSupportedRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::system::HostFeatureSupportedError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::system::HostFeatureSupportedResponse, truapi::CallError<versioned::system::HostFeatureSupportedError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::system::HostFeatureSupportedResponse, truapi::CallError<versioned::system::HostFeatureSupportedError>> =
                     match host.feature_supported(&cx, request).await {
@@ -2293,29 +2079,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::SYSTEM_NAVIGATE_TO, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SYSTEM_NAVIGATE_TO, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::system::HostNavigateToRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::system::HostNavigateToRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::system::HostNavigateToError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::system::HostNavigateToResponse, truapi::CallError<versioned::system::HostNavigateToError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::system::HostNavigateToResponse, truapi::CallError<versioned::system::HostNavigateToError>> =
                     match host.navigate_to(&cx, request).await {
@@ -2325,29 +2107,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host.clone();
-        dispatcher.on_request(wire_table::SYSTEM_HOST_INFO, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SYSTEM_HOST_INFO, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::system::HostInfoRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::system::HostInfoRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::system::HostInfoError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::system::HostInfoResponse, truapi::CallError<versioned::system::HostInfoError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::system::HostInfoResponse, truapi::CallError<versioned::system::HostInfoError>> =
                     match host.host_info(&cx, request).await {
@@ -2357,29 +2135,25 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
     {
         let host = host;
-        dispatcher.on_request(wire_table::SYSTEM_GET_PRODUCT_CONTEXT, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_request(wire_table::SYSTEM_GET_PRODUCT_CONTEXT, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
-                // The version tag lives in the frame header, not the payload.
-                let request: versioned::system::HostGetProductContextRequest = match decode_with_version(version, &bytes) {
+                let request: versioned::system::HostGetProductContextRequest = match Decode::decode(&mut &bytes[..]) {
                     Ok(request) => request,
                     Err(err) => {
                         let error: truapi::CallError<versioned::system::HostGetProductContextError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
                         let result: Result<versioned::system::HostGetProductContextResponse, truapi::CallError<versioned::system::HostGetProductContextError>> = Err(error);
-                        return Ok((response_version(&result, version), encode_response_without_version(&result)));
+                        return Ok(result.encode());
                     }
                 };
-                let target_version = version;
+                let target_version = request.version();
                 let cx = CallContext::with_request_id(request_id.clone());
                 let result: Result<versioned::system::HostGetProductContextResponse, truapi::CallError<versioned::system::HostGetProductContextError>> =
                     match host.get_product_context(&cx, request).await {
@@ -2389,10 +2163,7 @@ where
                         )),
                         Err(err) => Err(downgrade_call_error(err, target_version)),
                     };
-                Ok((
-                    response_version(&result, version),
-                    encode_response_without_version(&result),
-                ))
+                Ok(result.encode())
             })
         });
     }
@@ -2404,7 +2175,7 @@ where
 {
     {
         let host = host;
-        dispatcher.on_subscription(wire_table::THEME_SUBSCRIBE, move |request_id: String, version: u8, bytes: Vec<u8>| {
+        dispatcher.on_subscription(wire_table::THEME_SUBSCRIBE, move |request_id: String, bytes: Vec<u8>| {
             let host = host.clone();
             Box::pin(async move {
                 let _request: () = match Decode::decode(&mut &bytes[..]) {
@@ -2412,10 +2183,10 @@ where
                     Err(err) => {
                         let error: truapi::CallError<truapi::latest::GenericError> =
                             truapi::CallError::MalformedFrame { reason: err.to_string() };
-                        return Err((version, Some(error).encode()));
+                        return Err(Some(error).encode());
                     }
                 };
-                let target_version = version;
+                let target_version = <versioned::theme::HostThemeSubscribeItem as truapi::versioned::Versioned>::LATEST;
                 let cx = CallContext::with_request_id(request_id.clone());
                 let stream = host.subscribe(&cx).await;
                 let stream = futures::StreamExt::map(stream, move |item: versioned::theme::HostThemeSubscribeItem| {

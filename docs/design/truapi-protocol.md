@@ -52,16 +52,16 @@ struct Message {
 `requestId` ties related messages together (see [Rules](#rules)); `payload` carries the action itself. On the wire the envelope is laid out as:
 
 ```text
-[requestId: SCALE str][trait: u8][method: u8][version: u8][message_type: u8][payload bytes...]
+[requestId: SCALE str][trait: u8][method: u8][message_type: u8][payload bytes...]
 ```
 
-The four bytes after the `requestId` are the **`(trait, method, version, message_type)` header**. The first byte identifies the API trait (`System`, `Account`, `Chain`, ...); the second identifies a method within it: exactly one id per method, regardless of that method's shape; the third, `version`, is the protocol version the payload speaks (1-based); the fourth, `message_type`, names which leg of that method's exchange this frame carries (see below). Version precedes message type because version selects a method's *shape*: a later version of a method may turn a plain call into a subscription, which changes which message types are legal. The payload bytes are that leg's SCALE-encoded value, inlined without a length prefix and carrying no version tag of their own; the receiver reads to the end of the transport frame.
+The three bytes after the `requestId` are the **`(trait, method, message_type)` triple**. The first byte identifies the API trait (`System`, `Account`, `Chain`, ...); the second identifies a method within it: exactly one id per method, regardless of that method's shape; the third, `message_type`, names which leg of that method's exchange this frame carries (see below). The payload bytes are the SCALE-encoded value for that leg's own already-versioned wrapper type, inlined without a length prefix; the receiver reads to the end of the transport frame.
 
 Trait discriminants are assigned per trait in the `truapi` crate via the trait-level `#[wire_trait(id = N)]` annotation, with the `System` trait fixed at `1`, so a handshake request frame always starts `[requestId][0x01][0x00]`. Each method carries an explicit discriminant within its trait, assigned via the `#[wire(id = N)]` annotation and numbered from `0` independently inside every trait. Ids are **append-only per trait and never reused**: once a `(trait, method)` pair ships it keeps its meaning forever, which is what lets a newer Host and an older Product still understand each other, and adding methods to one trait never disturbs the ids of any other trait. The crate is the source of truth for all values. Trait discriminant `255` is permanently reserved for protocol errors and cannot be assigned to an API trait, so no method can ever be addressed there; a protocol error travels on the pair `(255, 255)`.
 
-#### The version and message type bytes
+#### The message type byte
 
-A `(trait, method)` pair names a method, not a version or a leg: request and response share it, and so do a subscription's four phases. Both the version a frame speaks and which leg it carries are bytes in the outer envelope, ahead of the payload rather than nested inside it. `version` is 1-based, matching the payload wrapper's own `V1`/`V2`/... numbering, so `0` names no version any peer can decode and MUST be refused at the frame boundary alongside the trait and method checks. `message_type` takes these values:
+A `(trait, method)` pair names a method, not a leg: request and response share it, and so do a subscription's four phases. Which leg a frame carries is `message_type`, a third byte in the outer envelope, not something nested inside the payload:
 
 ```text
 MESSAGE_TYPE_REQUEST   = 0   MESSAGE_TYPE_START     = 0
@@ -72,31 +72,31 @@ MESSAGE_TYPE_RESPONSE  = 1   MESSAGE_TYPE_RECEIVE   = 1
 
 `Request` and `Start` share `0`, `Response` and `Receive` share `1`, in the same position: a subscription's first two legs occupy the same slots a plain request/response method's two legs would, so the byte alone plus the method's registered kind (never both a request/response method and a subscription) resolves unambiguously.
 
-The payload bytes that follow are that leg's payload with **no version tag of its own** — the header's `version` byte is the only one on the wire, and a peer reconstructs the wrapper variant from it:
+The payload bytes that follow `message_type` are exactly that leg's own already-versioned wrapper type, SCALE-encoded as it would be if it were the only shape that method ever had — there is no further nesting and no separate version byte:
 
-- **Request**: `{Method}Request`'s payload for the header's version.
-- **Response**: `Result<{Method}Response, CallError<{Method}Error>>`. The `Result` tag and, on the error side, the `CallError` tag stay; only the versioned payload behind them loses its tag. Framework errors (`Denied`, `Unsupported`, `MalformedFrame`, `HostFailure`) carry no version at all.
-- **Start**: the request payload, or zero bytes when the subscription takes no request.
-- **Receive**: the item payload.
-- **Interrupt**: `Option<CallError<{Method}Error>>` — `None` is natural completion, `Some(err)` a failure. A subscription with no domain-specific error uses a bare `GenericError`, which carries no version tag either.
+- **Request**: `{Method}Request`'s own encoding; its `V1`/`V2`/... tag is the sole version signal for this leg.
+- **Response**: `Result<{Method}Response, CallError<{Method}Error>>`, both sides already-versioned wrappers.
+- **Start**: the request wrapper's own encoding, or zero bytes when the subscription takes no request at all.
+- **Receive**: the item wrapper's own encoding.
+- **Interrupt**: `Option<CallError<{Method}Error>>` — `None` is natural completion, `Some(err)` is a failure. A subscription with no domain-specific error uses a bare `GenericError` in the same position.
 - **Stop**: zero bytes, unconditionally.
 
-Each frame states the version **its own payload** is encoded in, not the version of the exchange. A method's legs version independently, so a peer asking at v2 for a method whose response wrapper stopped at v1 is answered in v1, and the response frame says `1` — echoing the request's version would describe bytes that are not there. Frames with nothing versioned in them (a `Stop`, a clean `Interrupt`, a framework-only error) report the version their caller asked in. The version appears exactly once per frame; a payload never restates it. A later version of the same method could switch it from a plain call to a subscription (or vice versa) without needing a new `(trait, method)` pair — the version byte selects the shape, and only the set of `message_type` values that method's dispatch entry accepts changes.
+Each leg therefore versions independently: a method's `Response` does not share a version number with its `Request`, nor do a subscription's four legs share one with each other. A later version of the same method could switch it from a plain call to a subscription (or vice versa) without needing a new `(trait, method)` pair — only the set of `message_type` values that method's dispatch entry accepts changes.
 
 For example, a `system_feature_supported` request/response pair (trait `1`, method `1`) is carried as:
 
 ```text
-outbound (Request):  [0x01][0x01][0x01 v1][0x00 REQUEST][...request fields]
-inbound  (Response): [0x01][0x01][0x01 v1][0x01 RESPONSE][0x00 Ok][...response fields]
+outbound (Request):  [0x01][0x01][0x00 REQUEST][0x00 V1][...request fields]
+inbound  (Response): [0x01][0x01][0x01 RESPONSE][0x00 Ok][0x00 V1][...response fields]
 ```
 
-and a subscription's four legs all address the same `(trait, method)` pair at the version its `Start` negotiated, distinguished only by `message_type`:
+and a subscription's four legs all address the same `(trait, method)` pair, distinguished only by `message_type`:
 
 ```text
-start:     [trait][method][0x01 v1][0x00 START][...start fields]
-receive:   [trait][method][0x01 v1][0x01 RECEIVE][...item fields]
-interrupt: [trait][method][0x01 v1][0x02 INTERRUPT][...Option<CallError<Err>> bytes]
-stop:      [trait][method][0x01 v1][0x03 STOP]
+start:     [trait][method][0x00 START][0x00 V1][...start fields]
+receive:   [trait][method][0x01 RECEIVE][0x00 V1][...item fields]
+interrupt: [trait][method][0x02 INTERRUPT][...Option<CallError<Err>> bytes]
+stop:      [trait][method][0x03 STOP]
 ```
 
 Request/response and subscription methods are both derived mechanically from the TrUAPI trait methods, so the high-level method signature and the wire format can never drift apart; nothing is written by hand.
@@ -109,7 +109,7 @@ A single byte channel carries every call in both directions at once, so the two 
 
 Every request expects exactly one response. Each Host or Product MUST send a response message for every request it receives, and the request and its response MUST share the same `requestId` — so the caller can match a reply to the call it made even with many calls in flight.
 
-If a receiver has no handler for an incoming `(trait, method)` pair, it MUST send a protocol-error frame addressed to `(255, 255)` with the same `requestId`, `message_type` set to `MESSAGE_TYPE_RESPONSE`, `version` set to the protocol-error payload's own version (`1`) rather than echoing a frame it could not decode, and payload `UnsupportedMessage { trait_id, method_id }` — encoded as the three bytes `[0, unsupported_trait, unsupported_method]`, the variant index followed by the pair the peer could not handle. The sender maps this method-independent response to its own pending request or subscription and reports a generic unsupported error. A receiver MUST NOT answer a protocol-error frame with another protocol error.
+If a receiver has no handler for an incoming `(trait, method)` pair, it MUST send a protocol-error frame addressed to `(255, 255)` with the same `requestId`, `message_type` set to `MESSAGE_TYPE_RESPONSE`, and payload `V1(UnsupportedMessage { trait_id, method_id })` — encoded as the four bytes `[0, 0, unsupported_trait, unsupported_method]` — one byte cannot name a pair, so the error that describes the envelope grew with it. The sender maps this method-independent response to its own pending request or subscription and reports a generic unsupported error. A receiver MUST NOT answer a protocol-error frame with another protocol error.
 
 A protocol-error frame MUST NOT receive another protocol-error response. An unmatched error is ignored. A protocol-error payload whose variant index the receiver does not recognize MUST settle the correlated call and leave the frame and the connection intact: `(255, 255)` is the one address every peer answers on, so a receiver that rejected an unfamiliar payload here could never be told anything new without the connection dying, which would freeze this channel at whatever shape shipped first. A payload whose variant IS recognized stays strict, and a malformed one is rejected as a wire violation. These rules prevent error loops and keep the channel extensible without hiding corrupt control messages.
 
@@ -117,7 +117,7 @@ Hosts and Products released before this control frame was introduced still silen
 
 #### Subscription
 
-A subscription is not a one-shot call but an ongoing stream: the consumer asks once and then receives updates until it stops listening. Its four messages (`start`, `stop`, `interrupt`, and `receive`) all address the same `(trait, method)` pair (distinguished by the `message_type` byte in the outer envelope, all at the version the `start` carried) and MUST all share the same `requestId`, so a subscription handler can route every update and teardown signal to the right place.
+A subscription is not a one-shot call but an ongoing stream: the consumer asks once and then receives updates until it stops listening. Its four messages (`start`, `stop`, `interrupt`, and `receive`) all address the same `(trait, method)` pair (distinguished by the `message_type` byte in the outer envelope) and MUST all share the same `requestId`, so a subscription handler can route every update and teardown signal to the right place.
 
 Each message has a defined role:
 

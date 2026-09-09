@@ -265,7 +265,6 @@ export function createDebugIngest(
         requestId: "malformed",
         frameId: -1,
         messageType: -1,
-        version: -1,
         role: "malformed",
         byteLength: envelope.frame.length,
         timestamp,
@@ -281,7 +280,6 @@ export function createDebugIngest(
       requestId: normalizeId(requestId, maxIdChars),
       frameId,
       messageType: payload.messageType,
-      version: payload.version,
       // Resolve the lifecycle role from the method's wire-table kind plus the
       // frame's own `messageType` byte (see resolveRole). "unknown" when no
       // map was given, or the id is off-table (a frame from a newer host).

@@ -15,8 +15,8 @@ use tracing::instrument;
 
 use crate::frame::{
     MESSAGE_TYPE_INTERRUPT, MESSAGE_TYPE_RESPONSE, MESSAGE_TYPE_STOP, PROTOCOL_ERROR_KEY,
-    PROTOCOL_ERROR_METHOD_ID, PROTOCOL_ERROR_TRAIT_ID, PROTOCOL_ERROR_VERSION, Payload,
-    ProtocolErrorV1, ProtocolMessage,
+    PROTOCOL_ERROR_METHOD_ID, PROTOCOL_ERROR_TRAIT_ID, Payload, ProtocolErrorV1, ProtocolMessage,
+    VersionedProtocolError,
 };
 use crate::generated::wire_table::MethodIds;
 use crate::subscription::{Spawner, SubscriptionManager, SubscriptionStream};
@@ -29,19 +29,13 @@ use crate::transport::Transport;
 /// thread it into the `CallContext` so trait methods can correlate
 /// logs/cancellation with the originating request. On the error path handlers
 /// return the complete SCALE-encoded response payload.
-/// A handler for a request method. Both arms carry the version the payload
-/// bytes are encoded in, which a method's legs decide independently of the
-/// version its caller asked in.
-pub type RequestHandler = Arc<
-    dyn Fn(String, u8, Vec<u8>) -> BoxFuture<'static, Result<(u8, Vec<u8>), (u8, Vec<u8>)>>
-        + Send
-        + Sync,
->;
+pub type RequestHandler =
+    Arc<dyn Fn(String, Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, Vec<u8>>> + Send + Sync>;
 
 /// A handler for a subscription method. On the error path the handler
 /// returns the complete SCALE-encoded `Interrupt` payload.
 pub type SubscriptionHandler = Arc<
-    dyn Fn(String, u8, Vec<u8>) -> BoxFuture<'static, Result<SubscriptionStream, (u8, Vec<u8>)>>
+    dyn Fn(String, Vec<u8>) -> BoxFuture<'static, Result<SubscriptionStream, Vec<u8>>>
         + Send
         + Sync,
 >;
@@ -103,7 +97,7 @@ impl Dispatcher {
     /// own exactly one handler.
     pub fn on_request<F>(&mut self, ids: MethodIds, handler: F) -> Option<RequestEntry>
     where
-        F: Fn(String, u8, Vec<u8>) -> BoxFuture<'static, Result<(u8, Vec<u8>), (u8, Vec<u8>)>>
+        F: Fn(String, Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, Vec<u8>>>
             + Send
             + Sync
             + 'static,
@@ -124,7 +118,7 @@ impl Dispatcher {
     /// invoking this handler. Returns the previously registered entry if any.
     pub fn on_subscription<F>(&mut self, ids: MethodIds, handler: F) -> Option<SubscriptionEntry>
     where
-        F: Fn(String, u8, Vec<u8>) -> BoxFuture<'static, Result<SubscriptionStream, (u8, Vec<u8>)>>
+        F: Fn(String, Vec<u8>) -> BoxFuture<'static, Result<SubscriptionStream, Vec<u8>>>
             + Send
             + Sync
             + 'static,
@@ -167,16 +161,14 @@ impl Dispatcher {
         // the pending call, and answered with a spurious `MalformedFrame`.
         if let Some(entry) = self.by_request.get(&key) {
             let request_id = message.request_id.clone();
-            let (version, value) =
-                (entry.handler)(request_id, message.payload.version, message.payload.value)
-                    .await
-                    .unwrap_or_else(|answer| answer);
+            let value = (entry.handler)(request_id, message.payload.value)
+                .await
+                .unwrap_or_else(|value| value);
             transport.send(ProtocolMessage {
                 request_id: message.request_id,
                 payload: Payload {
                     trait_id: entry.ids.trait_id,
                     method_id: entry.ids.method_id,
-                    version,
                     message_type: MESSAGE_TYPE_RESPONSE,
                     value,
                 },
@@ -190,28 +182,25 @@ impl Dispatcher {
             // arriving while the handler resolves cancels the pending
             // subscription instead of racing the registration.
             let request_id = message.request_id.clone();
-            let start_version = message.payload.version;
             let token = self.subscriptions.reserve(request_id.clone());
-            let result = (entry.handler)(request_id, start_version, message.payload.value).await;
+            let result = (entry.handler)(request_id, message.payload.value).await;
             match result {
                 Ok(stream) => {
                     self.subscriptions.activate(
                         token,
                         entry.ids.trait_id,
                         entry.ids.method_id,
-                        start_version,
                         stream,
                         transport,
                     );
                 }
-                Err((err_version, err_bytes)) => {
+                Err(err_bytes) => {
                     self.subscriptions.cancel_reservation(token);
                     transport.send(ProtocolMessage {
                         request_id: message.request_id,
                         payload: Payload {
                             trait_id: entry.ids.trait_id,
                             method_id: entry.ids.method_id,
-                            version: err_version,
                             message_type: MESSAGE_TYPE_INTERRUPT,
                             value: err_bytes,
                         },
@@ -232,12 +221,11 @@ impl Dispatcher {
                 payload: Payload {
                     trait_id: PROTOCOL_ERROR_TRAIT_ID,
                     method_id: PROTOCOL_ERROR_METHOD_ID,
-                    version: PROTOCOL_ERROR_VERSION,
                     message_type: MESSAGE_TYPE_RESPONSE,
-                    value: ProtocolErrorV1::UnsupportedMessage {
+                    value: VersionedProtocolError::V1(ProtocolErrorV1::UnsupportedMessage {
                         trait_id,
                         method_id,
-                    }
+                    })
                     .encode(),
                 },
             });
@@ -301,7 +289,6 @@ mod tests {
             payload: Payload {
                 trait_id,
                 method_id,
-                version: 1,
                 message_type,
                 value,
             },
@@ -324,12 +311,11 @@ mod tests {
                 payload: Payload {
                     trait_id: PROTOCOL_ERROR_TRAIT_ID,
                     method_id: PROTOCOL_ERROR_METHOD_ID,
-                    version: 1,
                     message_type: MESSAGE_TYPE_RESPONSE,
-                    value: ProtocolErrorV1::UnsupportedMessage {
+                    value: VersionedProtocolError::V1(ProtocolErrorV1::UnsupportedMessage {
                         trait_id: 250,
                         method_id: 251,
-                    }
+                    })
                     .encode(),
                 },
             }]
@@ -344,10 +330,10 @@ mod tests {
             PROTOCOL_ERROR_TRAIT_ID,
             PROTOCOL_ERROR_METHOD_ID,
             MESSAGE_TYPE_RESPONSE,
-            ProtocolErrorV1::UnsupportedMessage {
+            VersionedProtocolError::V1(ProtocolErrorV1::UnsupportedMessage {
                 trait_id: 250,
                 method_id: 251,
-            }
+            })
             .encode(),
         );
         futures::executor::block_on(dispatcher.dispatch(frame, transport.clone()));
@@ -364,8 +350,8 @@ mod tests {
             trait_id: 7,
             method_id: 200,
         };
-        dispatcher.on_request(ids, |_request_id, _version: u8, _bytes| {
-            Box::pin(async move { Err((1, vec![9, 8, 7])) })
+        dispatcher.on_request(ids, |_request_id, _bytes| {
+            Box::pin(async move { Err(vec![9, 8, 7]) })
         });
         let transport = Arc::new(RecordingTransport::default());
         let frame = make_frame(7, 200, MESSAGE_TYPE_REQUEST, Vec::new());
@@ -387,12 +373,12 @@ mod tests {
             trait_id: 7,
             method_id: 200,
         };
-        let prev = dispatcher.on_request(ids, |_request_id, _version: u8, _bytes| {
-            Box::pin(async move { Ok((1, Vec::new())) })
+        let prev = dispatcher.on_request(ids, |_request_id, _bytes| {
+            Box::pin(async move { Ok(Vec::new()) })
         });
         assert!(prev.is_none(), "first registration has no predecessor");
-        let prev = dispatcher.on_request(ids, |_request_id, _version: u8, _bytes| {
-            Box::pin(async move { Ok((1, Vec::new())) })
+        let prev = dispatcher.on_request(ids, |_request_id, _bytes| {
+            Box::pin(async move { Ok(Vec::new()) })
         });
         assert!(
             prev.is_some(),
@@ -414,7 +400,7 @@ mod tests {
         };
         let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let invoked_in_handler = invoked.clone();
-        dispatcher.on_subscription(ids, move |_request_id, _version: u8, _bytes| {
+        dispatcher.on_subscription(ids, move |_request_id, _bytes| {
             invoked_in_handler.store(true, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move { Ok(Box::pin(futures::stream::empty()) as SubscriptionStream) })
         });
