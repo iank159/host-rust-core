@@ -21,9 +21,9 @@ Pocket-targeted deeplink and approves a host dialog showing the card as it will 
 product can remove a card. Three privileged cards, Humanity, Balance and Scarcity, are always present and removable by
 neither.
 
-A face is drawn through the [Unified Renderer](unified-renderer.md)'s `PocketCard` context, and a visible face is one
-worker reference in [Worker Lifecycle](worker-lifecycle.md) terms. The collection itself is one `Pocket` trait with two
-methods, a Pocket section in the Worker manifest, and a deeplink grammar that names a target modality.
+A face is drawn through the [Unified Renderer](https://github.com/paritytech/host-rust-core/pull/633)'s `PocketCard`
+context. The collection itself is one `Pocket` trait with two methods, a Pocket section in the Worker manifest, and a
+deeplink grammar that names a target modality.
 
 Tracking issue: [#563](https://github.com/paritytech/host-rust-core/issues/563).
 
@@ -55,9 +55,10 @@ The host is the only writer of the collection. A product observes its own cards 
 
 ### Rendering and actions
 
-A face is a body drawn through [Renderer](unified-renderer.md), on the `PocketCard { card_id }` context. The host opens
-a `render` stream while the face is on screen and gets a `RendererNode` tree per item; presses and edits inside the tree
-arrive on `action_subscribe` under the same context, so one handler serves every card of the product.
+A face is a body drawn through [Renderer](https://github.com/paritytech/host-rust-core/pull/633), on the
+`PocketCard { card_id }` context. The host opens a `render` stream while the face is on screen and gets a `RendererNode`
+tree per item; presses and edits inside the tree arrive on `action_subscribe` under the same context, so one handler
+serves every card of the product.
 
 Pocket adds one rule on top: the host caches the newest tree per card durably, so a face is shown offline and at cold
 start before the worker answers, and a privileged card has something to show on first run.
@@ -71,12 +72,8 @@ and close animation, and preloading the WebView, are host implementation and not
 
 ### Lifecycle
 
-Pocket holds **one worker reference per card whose face is on screen**, which is that card's open `render` stream. A
-product cannot add a reference; it can only drop one, by removing a card.
-
-Adding a card is an acknowledgement, so the worker gets its [acknowledgement grant](worker-lifecycle.md) to register
-handlers before any face is requested. Issue #563 calls that run `onLoad`; the name is avoided here because RFC 0024
-uses it for a manifest flag with a different meaning.
+Pocket holds one worker reference per card whose face is on screen. A product cannot add a reference, only drop one by
+removing a card.
 
 ### Adding a card (full iteration)
 
@@ -126,7 +123,7 @@ sequenceDiagram
   H->>H: resolve worker manifest, find card `loyalty`, fetch preview from archive
   H->>U: dialog: title + rendered preview + Add
   U->>H: Add
-  H->>H: insert card, acknowledgement grant
+  H->>H: insert card
   H->>W: start, register renderer handlers
   H->>H: face on screen, reference 0 → 1
   H->>W: renderer.render { context: PocketCard { card_id: "loyalty" } }
