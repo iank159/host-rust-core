@@ -1397,16 +1397,22 @@ impl NativeEventBus {
             .retain(|tx| tx.unbounded_send(item.clone()).is_ok());
     }
 
+    /// Subscribe to the host's card collection. `snapshot` supplies the
+    /// current list and runs after the subscriber is registered, and outside
+    /// the mutex: a change the host reports in between is then queued ahead of
+    /// the snapshot rather than dropped, and a host that notifies from the
+    /// thread it was called on cannot deadlock.
     fn subscribe_pocket_cards(
         &self,
-        current: v01::HostPocketListSubscribeItem,
+        snapshot: impl FnOnce() -> v01::HostPocketListSubscribeItem,
     ) -> BoxStream<'static, v01::HostPocketListSubscribeItem> {
         let (tx, rx) = mpsc::unbounded();
         self.pocket_card_changes
             .lock()
             .expect("native Pocket card subscribers mutex poisoned")
-            .push(tx);
-        stream::once(async move { current }).chain(rx).boxed()
+            .push(tx.clone());
+        let _ = tx.unbounded_send(snapshot());
+        rx.boxed()
     }
 
     fn notify_pocket_cards_changed(&self, cards: Vec<v01::PocketCard>) {
@@ -1831,10 +1837,14 @@ impl truapi_platform::PocketPlatform for PocketCallbackPlatform {
         &self,
         _product: &ProductContext,
     ) -> BoxStream<'static, Result<v01::HostPocketListSubscribeItem, v01::GenericError>> {
-        let current = v01::HostPocketListSubscribeItem {
-            cards: self.pocket.list_cards().unwrap_or_default(),
-        };
-        Box::pin(self.events.subscribe_pocket_cards(current).map(Ok))
+        let pocket = self.pocket.clone();
+        Box::pin(
+            self.events
+                .subscribe_pocket_cards(move || v01::HostPocketListSubscribeItem {
+                    cards: pocket.list_cards().unwrap_or_default(),
+                })
+                .map(Ok),
+        )
     }
 
     async fn remove_pocket_card(
@@ -1864,11 +1874,48 @@ impl truapi_platform::PocketPlatform for PocketCallbackPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::FutureExt;
     use truapi::Bytes32;
     use truapi::v01::LegacyAccountTxPayload;
     use truapi_platform::CreateTransactionReview;
 
     type PreimageFixtureEntries = Vec<(Vec<u8>, Option<Vec<u8>>)>;
+
+    /// A Pocket subscriber registers before its snapshot is taken, so a change
+    /// the host reports while the snapshot is in flight is queued ahead of it
+    /// instead of being dropped. Taking the snapshot first would leave the
+    /// product holding a stale list with no later correction.
+    #[test]
+    fn a_pocket_change_during_the_snapshot_is_not_lost() {
+        let bus = NativeEventBus::default();
+        let card = |card_id: &str| v01::PocketCard {
+            card_id: card_id.to_string(),
+            privileged: false,
+        };
+
+        // The closure stands in for the host callback, and notifying from
+        // inside it is what makes the interleaving deterministic. It also
+        // proves the snapshot runs outside the subscriber mutex: a host that
+        // notifies from the same thread would otherwise deadlock.
+        let mut stream = bus.subscribe_pocket_cards(|| {
+            bus.notify_pocket_cards_changed(vec![card("during")]);
+            v01::HostPocketListSubscribeItem {
+                cards: vec![card("snapshot")],
+            }
+        });
+
+        // Both items are queued by the time the stream is polled, so a
+        // missing one reads as pending here rather than hanging the test.
+        let mut seen = Vec::new();
+        while let Some(Some(item)) = stream.next().now_or_never() {
+            seen.push(item.cards);
+        }
+        assert_eq!(
+            seen,
+            vec![vec![card("during")], vec![card("snapshot")]],
+            "the interleaved change must arrive, and the snapshot must land last"
+        );
+    }
 
     /// UniFFI hands `account_id` over as a length-free `Vec<u8>`, so the width
     /// the ledger depends on is only enforced here. A short id that converted
