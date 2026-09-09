@@ -82,7 +82,7 @@ impl<'a> DotnsLookup<'a> {
     }
 }
 
-#[truapi_platform::async_trait]
+#[async_trait::async_trait]
 impl DotnsTransport for DotnsLookup<'_> {
     /// Reads one storage value at the pinned block. `Ok(None)` when absent.
     async fn storage(&mut self, key: Vec<u8>) -> Result<Option<Vec<u8>>, String> {

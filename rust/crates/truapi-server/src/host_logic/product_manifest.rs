@@ -17,24 +17,16 @@ const SUPPORTED_SCHEMA_VERSION: u32 = 1;
 /// `All` is a superset rather than a peer: it satisfies every other variant,
 /// present and future. A value this core does not recognise parses as
 /// [`Granted::Unrecognised`] rather than failing the document.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Granted {
     /// Every mediated interaction, present and future.
     All,
     /// Reading the granting product's host-local storage.
     Storage,
     /// A grant value defined after this core was built.
+    #[serde(other)]
     Unrecognised,
-}
-
-impl<'de> Deserialize<'de> for Granted {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        Ok(match String::deserialize(deserializer)?.as_str() {
-            "all" => Self::All,
-            "storage" => Self::Storage,
-            _ => Self::Unrecognised,
-        })
-    }
 }
 
 /// The product-wide manifest published at a base name's `manifest` text record.
@@ -141,6 +133,20 @@ mod tests {
     fn an_entry_of_only_unrecognised_grants_grants_nothing() {
         let m = manifest(r#"{"dim2":["storage-write"]}"#);
         assert!(!m.grants("dim2", Granted::Storage));
+    }
+
+    #[test]
+    fn a_grant_of_the_wrong_shape_still_fails_the_document() {
+        // Unrecognised means "a value this core does not know", not "anything at
+        // all". A grant list holding a number is a malformed manifest, and the
+        // publisher is told so rather than silently granted less than they wrote.
+        assert!(
+            RootManifest::parse(
+                r#"{"$v":1,"displayName":"D","description":"d",
+                    "icon":{"cid":"c","format":"png"},"trustedProducts":{"dim2":[17]}}"#
+            )
+            .is_err()
+        );
     }
 
     #[test]

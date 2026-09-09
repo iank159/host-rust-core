@@ -175,15 +175,10 @@ impl LocalStorage for ProductRuntimeHost {
     ) -> Result<HostLocalStorageReadResponse, CallError<HostLocalStorageReadError>> {
         let v02::HostLocalStorageReadRequest { product, key } = request.into_latest();
 
-        // A read addressed at another product needs that product's `storage`
-        // grant. The refusal is deliberately indistinguishable from "that
-        // product granted you nothing": telling them apart would make this call
-        // a probe for which products exist and which hold data. Falling back to
-        // a prompt is not an option either — stored values are opaque bytes, so
-        // the user would be approving something nobody can inspect.
-        //
-        // The grant resolves to the owner the key is then built from, so a
-        // granted read reaches the storage it named rather than the caller's.
+        // One refusal for every reason the grant is not held: telling them apart
+        // would make this call a probe for which products exist and which hold
+        // data. A prompt is not the fallback either, since stored values are
+        // opaque bytes nobody could inspect to approve.
         let owner = match product {
             Some(target) => {
                 match self
@@ -208,12 +203,9 @@ impl LocalStorage for ProductRuntimeHost {
                 HostLocalStorageReadResponse::V2(v01::HostLocalStorageReadResponse { value })
             })
             .map_err(|err| {
-                CallError::Domain(HostLocalStorageReadError::V2(match err {
-                    v01::HostLocalStorageReadError::Full => v02::HostLocalStorageReadError::Full,
-                    v01::HostLocalStorageReadError::Unknown { reason } => {
-                        v02::HostLocalStorageReadError::Unknown { reason }
-                    }
-                }))
+                CallError::Domain(HostLocalStorageReadError::V2(
+                    HostLocalStorageReadError::V1(err).into_latest(),
+                ))
             })
     }
 
