@@ -9,7 +9,8 @@ use parity_scale_codec::{Decode, Encode};
 
 use super::{
     CreateTransactionLegacyRequest, CreateTransactionRequest, CreateTransactionResponse,
-    ListRingVrfKeysRequest, ListRingVrfKeysResponse, ProductSubtreeRequest, ProductSubtreeResponse,
+    ListRingVrfKeysRequest, ListRingVrfKeysResponse, ProductDeviceChatRequest,
+    ProductDeviceChatResponse, ProductSubtreeRequest, ProductSubtreeResponse,
     RegisterRingVrfKeyRequest, RegisterRingVrfKeyResponse, ResourceAllocationRequest,
     ResourceAllocationResponse, RingVrfAliasRequest, RingVrfAliasResponse, RingVrfProofRequest,
     RingVrfProofResponse, RingVrfSignRequest, RingVrfSignResponse, SignRawLegacyRequest,
@@ -104,4 +105,12 @@ pub enum RemoteMessage {
     #[codec(index = 23)]
     #[display("ring_vrf_sign_response")]
     RingVrfSignResponse(RingVrfSignResponse),
+    /// Forward a product-device Chat v2 operation to the Account Holder.
+    #[codec(index = 24)]
+    #[display("product_device_chat")]
+    ProductDeviceChatRequest(ProductDeviceChatRequest),
+    /// Account Holder's product-device Chat v2 response.
+    #[codec(index = 25)]
+    #[display("product_device_chat_response")]
+    ProductDeviceChatResponse(ProductDeviceChatResponse),
 }

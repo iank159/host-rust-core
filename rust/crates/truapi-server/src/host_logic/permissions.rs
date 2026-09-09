@@ -7,9 +7,9 @@
 //! The cache layer is shared but keys are typed so a device grant cannot
 //! authorize a remote operation by accident. Keys are also scoped by product id
 //! so one product's authorization never grants another product's request.
-//! Identity disclosure is also represented as a product-scoped authorization,
-//! but the prompt itself is handled by the account runtime because it uses the
-//! richer user-confirmation surface rather than the device/remote callbacks.
+//! Identity disclosure is also represented as a product-scoped authorization;
+//! its richer user-confirmation prompt is coordinated here so local and remote
+//! account-authority paths share one decision state machine.
 //!
 //! Domain grants (`RemotePermission::Remote`) are the one request that does not
 //! occupy a single slot. A product may ask for several domains at once, while
@@ -42,9 +42,10 @@ use truapi::latest::{
     RemotePermissionRequest, RemotePermissionResponse,
 };
 use truapi_platform::{
-    CoreStorage, CoreStorageKey, DevicePermissionStatus, PermissionAuthorizationRequest,
-    PermissionAuthorizationStatus, PermissionStatusHost, Permissions,
-    has_trusted_remote_permissions, remote_domain_candidates,
+    CoreStorage, CoreStorageKey, DevicePermissionStatus, IdentityDisclosureReview,
+    PermissionAuthorizationRequest, PermissionAuthorizationStatus, PermissionStatusHost,
+    Permissions, UserConfirmation, UserConfirmationReview, has_trusted_remote_permissions,
+    remote_domain_candidates,
 };
 
 /// Persisted answer for a single permission request. Keep `Authorized` at
@@ -356,6 +357,40 @@ impl<'a, S: CoreStorage + ?Sized, P: Permissions + ?Sized> PermissionsService<'a
             }
         };
         set_authorization_status(self.storage, key, status).await
+    }
+
+    /// Resolve the product's identity-disclosure grant, prompting once when no
+    /// durable user decision exists.
+    pub async fn check_or_prompt_identity_disclosure(
+        &self,
+    ) -> Result<PermissionAuthorizationStatus, GenericError>
+    where
+        P: UserConfirmation,
+    {
+        let request = PermissionAuthorizationRequest::IdentityDisclosure;
+        let cached = self.authorization_status(&request).await?;
+        if cached != PermissionAuthorizationStatus::NotDetermined {
+            return Ok(cached);
+        }
+        let confirmed = match self
+            .prompt
+            .confirm_user_action(UserConfirmationReview::IdentityDisclosure(
+                IdentityDisclosureReview {
+                    product_id: self.product_id.to_string(),
+                },
+            ))
+            .await
+        {
+            Ok(confirmed) => confirmed,
+            Err(_) => return Ok(PermissionAuthorizationStatus::NotDetermined),
+        };
+        let status = if confirmed {
+            PermissionAuthorizationStatus::Authorized
+        } else {
+            PermissionAuthorizationStatus::Denied
+        };
+        self.set_authorization_status(&request, status).await?;
+        Ok(status)
     }
 
     /// Resolves a device capability against both the OS state and the stored
