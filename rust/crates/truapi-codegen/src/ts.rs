@@ -651,9 +651,9 @@ fn trait_wire_id(trait_def: &TraitDef) -> Result<u8> {
 }
 
 /// One row of the wire contract: a frame id, its method leg, whether the method
-/// is `#[wire(..., sensitive)]`, whether the method is host-initiated, and the
-/// structural signature of the payload that frame carries.
-type WireIdRow = (u8, u8, String, bool, bool, String);
+/// is host-initiated, and the structural signature of the payload that frame
+/// carries.
+type WireIdRow = (u8, u8, String, bool, String);
 
 /// Every wire address (sorted by `(trait, method)`) with the facts above. The
 /// one iteration the schema-hash fingerprint is derived from, so the
@@ -661,9 +661,7 @@ type WireIdRow = (u8, u8, String, bool, bool, String);
 ///
 /// `host_initiated` is in the row because it decides WHICH SIDE sends a frame
 /// id. A host and product that disagree on it both send `start` on the same id
-/// and neither answers - a mismatch the fingerprint has to catch, and one that is
-/// strictly more consequential than `sensitive`, which changes no runtime
-/// behaviour at all.
+/// and neither answers, a mismatch the fingerprint has to catch.
 fn wire_id_rows(api: &ApiDefinition, target_version: u32) -> Result<Vec<WireIdRow>> {
     let wrappers = collect_versioned_wrappers(api);
     let types = types_by_name(api);
@@ -672,17 +670,12 @@ fn wire_id_rows(api: &ApiDefinition, target_version: u32) -> Result<Vec<WireIdRo
     // not what the hash folds over, so without this row the reserved address could
     // be reassigned and every already-built debugger would keep confirming the
     // table. It carries no payload and no method, so its facts are fixed.
-    let mut seen: BTreeMap<(u8, u8), (String, bool, bool, String)> = BTreeMap::from([(
+    let mut seen: BTreeMap<(u8, u8), (String, bool, String)> = BTreeMap::from([(
         (
             RESERVED_PROTOCOL_ERROR_TRAIT_ID,
             RESERVED_PROTOCOL_ERROR_TRAIT_ID,
         ),
-        (
-            "reserved::protocol_error".to_string(),
-            false,
-            false,
-            String::new(),
-        ),
+        ("reserved::protocol_error".to_string(), false, String::new()),
     )]);
     for trait_def in &api.traits {
         // Method-less traits (e.g. the `TrUApi` umbrella trait) own no wire
@@ -706,14 +699,9 @@ fn wire_id_rows(api: &ApiDefinition, target_version: u32) -> Result<Vec<WireIdRo
             // proceeds under the wrong label, which is the exact failure this hash
             // exists to refuse.
             let qualified = format!("{}::{}", trait_def.name, method.name);
-            if let Some((existing, _, _, _)) = seen.insert(
+            if let Some((existing, _, _)) = seen.insert(
                 (trait_id, method_id),
-                (
-                    qualified.clone(),
-                    method.wire.sensitive,
-                    method.wire.host_initiated,
-                    payload,
-                ),
+                (qualified.clone(), method.wire.host_initiated, payload),
             ) {
                 bail!(
                     "wire id ({trait_id}, {method_id}) reused: `{existing}` and \
@@ -724,11 +712,9 @@ fn wire_id_rows(api: &ApiDefinition, target_version: u32) -> Result<Vec<WireIdRo
     }
     Ok(seen
         .into_iter()
-        .map(
-            |((trait_id, method_id), (tag, sensitive, host_initiated, payload))| {
-                (trait_id, method_id, tag, sensitive, host_initiated, payload)
-            },
-        )
+        .map(|((trait_id, method_id), (tag, host_initiated, payload))| {
+            (trait_id, method_id, tag, host_initiated, payload)
+        })
         .collect())
 }
 
@@ -912,10 +898,10 @@ fn type_signature(
     }
 }
 
-/// A stable fingerprint of the wire contract: every frame id, the method leg it
-/// resolves to, and its sensitivity, folded together with the codec version.
-/// Two builds whose frame tables differ - a reassigned id, a renamed or
-/// added/removed method, or a flipped `#[wire(sensitive)]` - produce different
+/// A stable fingerprint of the wire contract: every frame id and the method leg
+/// it resolves to, folded together with the codec version. Two builds whose
+/// frame tables differ - a reassigned id, or a renamed, added or removed
+/// method - produce different
 /// hashes even when the handshake `codec_version` is unchanged, which is the
 /// case the coarse codec number cannot see. Emitted as `TRUAPI_WIRE_SCHEMA_HASH`
 /// on both the TS and Rust sides so a host stamps it on every debug envelope and
@@ -927,16 +913,13 @@ pub(crate) fn wire_schema_hash(
 ) -> Result<String> {
     let mut canonical = format!("codec={codec_version}\n");
     let mut unresolved: BTreeSet<String> = BTreeSet::new();
-    for (trait_id, method_id, tag, sensitive, host_initiated, payload) in
-        wire_id_rows(api, target_version)?
-    {
-        let flag = u8::from(sensitive);
+    for (trait_id, method_id, tag, host_initiated, payload) in wire_id_rows(api, target_version)? {
         let initiator = u8::from(host_initiated);
         for marker in payload.split("UNRESOLVED<").skip(1) {
             unresolved.insert(marker.chars().take_while(|c| *c != '>').collect());
         }
         canonical.push_str(&format!(
-            "{trait_id}.{method_id}:{tag}:{flag}:{initiator}:{payload}\n"
+            "{trait_id}.{method_id}:{tag}:{initiator}:{payload}\n"
         ));
     }
     // Fail the BUILD, not a test. A type that does not resolve contributes only

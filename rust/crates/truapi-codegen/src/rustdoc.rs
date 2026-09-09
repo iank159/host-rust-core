@@ -128,11 +128,6 @@ pub struct WireAttrs {
     pub host_initiated: bool,
     /// Method frame discriminant.
     pub id: Option<u8>,
-    /// Whether the method's payloads carry key material or bearer secrets.
-    /// Marked by `#[wire(..., sensitive)]`; folded into the wire schema-hash
-    /// fingerprint so a change in a frame's sensitivity classification is caught
-    /// as contract drift.
-    pub sensitive: bool,
 }
 
 /// Wire-shape classification of a trait method.
@@ -907,17 +902,6 @@ fn extract_wire_attrs(docs: &str) -> WireAttrs {
         if line.starts_with("@wire_host_initiated") {
             attrs.host_initiated = true;
         }
-        if line.starts_with("@wire_sensitive=") {
-            // Fail CLOSED, and never downgrade. The previous
-            // `.parse::<bool>().ok().unwrap_or(false)` turned every unexpected
-            // value - `1`, `yes`, a typo - into "not sensitive", which is the wrong
-            // default for a flag that classifies secret-bearing methods. Only an
-            // explicit `false` leaves it clear, and `|=` means a later marker
-            // cannot undo an earlier `true`.
-            let value = line.trim_end().trim_start_matches("@wire_sensitive=");
-            attrs.sensitive |= value != "false";
-            continue;
-        }
         const NEEDLE: &str = "@wire_id=";
         let Some(start) = line.find(NEEDLE).map(|index| index + NEEDLE.len()) else {
             continue;
@@ -1578,7 +1562,7 @@ mod tests {
 
     #[test]
     fn clean_docs_strips_wire_markers() {
-        let docs = "Trait summary.\n\n@wire_id=7\n@wire_trait_id=3\n@wire_sensitive=true\n\
+        let docs = "Trait summary.\n\n@wire_id=7\n@wire_trait_id=3\n\
                     @service_required_execution=Chat\n";
 
         assert_eq!(clean_docs(Some(docs)).as_deref(), Some("Trait summary."));
@@ -1641,18 +1625,6 @@ mod tests {
             format!("{err:#}").contains("more than one"),
             "unexpected error: {err:#}"
         );
-    }
-
-    #[test]
-    fn extract_wire_attrs_reads_sensitive_flag() {
-        let sensitive = extract_wire_attrs("@wire_id=114\n@wire_sensitive=true");
-        assert_eq!(sensitive.id, Some(114));
-        assert!(sensitive.sensitive);
-
-        // Absent marker ⇒ not sensitive (the default for every unmarked method).
-        let plain = extract_wire_attrs("@wire_id=22");
-        assert_eq!(plain.id, Some(22));
-        assert!(!plain.sensitive);
     }
 
     #[test]

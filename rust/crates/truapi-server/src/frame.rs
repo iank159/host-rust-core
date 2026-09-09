@@ -104,8 +104,6 @@ pub(crate) fn decode_protocol_error_payload(
         }
     }
 }
-    }
-}
 
 /// Downgrade a call error's domain payload to the version its caller speaks.
 ///

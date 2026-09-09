@@ -38,7 +38,6 @@ use syn::{
 struct WireArgs {
     host_initiated: bool,
     id: Option<u8>,
-    sensitive: bool,
 }
 
 struct ServiceArgs {
@@ -84,20 +83,12 @@ impl Parse for WireArgs {
                     return Err(syn::Error::new(key.span(), "duplicate `host_initiated`"));
                 }
                 args.host_initiated = true;
-            } else if key == "sensitive" {
-                // `sensitive` is a bare flag with no `= N` value: it classifies
-                // the method's payloads as carrying key material or bearer
-                // secrets. The classification is folded into the wire
-                // schema-hash fingerprint, so a change in a frame's sensitivity
-                // is caught as contract drift. It suppresses no decoding: it
-                // reaches neither the generated TS nor any runtime.
-                if args.sensitive {
-                    return Err(syn::Error::new(key.span(), "duplicate `sensitive`"));
-                }
-                args.sensitive = true;
             } else {
                 if key != "id" {
-                    return Err(syn::Error::new(key.span(), "expected `id = N`"));
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "expected `id = N` or `host_initiated`",
+                    ));
                 }
                 input.parse::<Token![=]>()?;
                 let lit: LitInt = input.parse()?;
@@ -142,7 +133,7 @@ impl Parse for WireArgs {
 /// // classification only, and grants no confidentiality: it reaches neither the
 /// // generated TypeScript nor any runtime, and nothing suppresses decoding of
 /// // the payload.
-/// #[wire(id = 14, sensitive)]
+/// #[wire(id = 14)]
 /// async fn sign_raw(...) -> ...;
 /// ```
 ///
@@ -235,9 +226,6 @@ fn wire_tags(args: &WireArgs) -> Vec<String> {
     }
     if args.host_initiated {
         tags.push("@wire_host_initiated".to_string());
-    }
-    if args.sensitive {
-        tags.push("@wire_sensitive=true".to_string());
     }
     tags
 }

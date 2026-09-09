@@ -158,7 +158,6 @@ mod tests {
             wire: WireAttrs {
                 host_initiated: false,
                 id: Some(request_id),
-                sensitive: false,
             },
             docs: None,
         }
@@ -176,7 +175,6 @@ mod tests {
             wire: WireAttrs {
                 host_initiated: false,
                 id: Some(start_id),
-                sensitive: false,
             },
             docs: None,
         }

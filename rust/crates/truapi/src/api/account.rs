@@ -152,7 +152,7 @@ pub trait Account: Send + Sync {
     /// );
     /// console.log("foreign account proof refused without prompting");
     /// ```
-    #[wire(id = 3, sensitive)]
+    #[wire(id = 3)]
     async fn create_account_proof(
         &self,
         _cx: &CallContext,
@@ -186,7 +186,7 @@ pub trait Account: Send + Sync {
     /// assert(result.isOk(), "signVrf failed:", result);
     /// console.log("vrf signature:", result.value);
     /// ```
-    #[wire(id = 7, sensitive)]
+    #[wire(id = 7)]
     async fn sign_vrf(
         &self,
         _cx: &CallContext,
@@ -299,7 +299,7 @@ pub trait Account: Send + Sync {
     /// assert(result.isOk(), "getUserId failed:", result);
     /// console.log("user id:", result.value);
     /// ```
-    #[wire(id = 5, sensitive)]
+    #[wire(id = 5)]
     async fn get_user_id(
         &self,
         _cx: &CallContext,
@@ -320,7 +320,7 @@ pub trait Account: Send + Sync {
     /// assert(result.isOk(), "requestLogin failed:", result);
     /// console.log("login completed:", result.value);
     /// ```
-    #[wire(id = 6, sensitive)]
+    #[wire(id = 6)]
     async fn request_login(
         &self,
         _cx: &CallContext,
