@@ -13,7 +13,6 @@ export type {
   WebSocketWireProvider,
   WireProvider,
 } from "./transport.js";
-export type { CreateTransportOptions } from "./client.js";
 export {
   MESSAGE_TYPE_INTERRUPT,
   MESSAGE_TYPE_RECEIVE,

@@ -27,10 +27,11 @@ use crate::transport::Transport;
 /// across executor threads while WASM remains free to poll the same future on
 /// its local executor. The `request_id` is the per-frame identifier; handlers
 /// thread it into the `CallContext` so trait methods can correlate
-/// logs/cancellation with the originating request. On the error path handlers
-/// return the complete SCALE-encoded response payload.
-pub type RequestHandler =
-    Arc<dyn Fn(String, Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, Vec<u8>>> + Send + Sync>;
+/// logs/cancellation with the originating request. The returned bytes are the
+/// complete SCALE-encoded response payload on both the success and error
+/// paths, since a method's failure is a `Result` inside that payload rather
+/// than a failure to produce one.
+pub type RequestHandler = Arc<dyn Fn(String, Vec<u8>) -> BoxFuture<'static, Vec<u8>> + Send + Sync>;
 
 /// A handler for a subscription method. On the error path the handler
 /// returns the complete SCALE-encoded `Interrupt` payload.
@@ -97,10 +98,7 @@ impl Dispatcher {
     /// own exactly one handler.
     pub fn on_request<F>(&mut self, ids: MethodIds, handler: F) -> Option<RequestEntry>
     where
-        F: Fn(String, Vec<u8>) -> BoxFuture<'static, Result<Vec<u8>, Vec<u8>>>
-            + Send
-            + Sync
-            + 'static,
+        F: Fn(String, Vec<u8>) -> BoxFuture<'static, Vec<u8>> + Send + Sync + 'static,
     {
         self.by_request.insert(
             (ids.trait_id, ids.method_id),
@@ -166,9 +164,7 @@ impl Dispatcher {
                 return;
             }
             let request_id = message.request_id.clone();
-            let value = (entry.handler)(request_id, message.payload.value)
-                .await
-                .unwrap_or_else(|value| value);
+            let value = (entry.handler)(request_id, message.payload.value).await;
             transport.send(ProtocolMessage {
                 request_id: message.request_id,
                 payload: Payload {
@@ -370,7 +366,9 @@ mod tests {
             method_id: 200,
         };
         dispatcher.on_request(ids, |_request_id, _bytes| {
-            Box::pin(async move { Err(vec![9, 8, 7]) })
+            // A method's failure is a `Result` inside the response payload, so
+            // an error path still hands back bytes to send.
+            Box::pin(async move { vec![9, 8, 7] })
         });
         let transport = Arc::new(RecordingTransport::default());
         let frame = make_frame(7, 200, MESSAGE_TYPE_REQUEST, Vec::new());
@@ -393,11 +391,11 @@ mod tests {
             method_id: 200,
         };
         let prev = dispatcher.on_request(ids, |_request_id, _bytes| {
-            Box::pin(async move { Ok(Vec::new()) })
+            Box::pin(async move { Vec::new() })
         });
         assert!(prev.is_none(), "first registration has no predecessor");
         let prev = dispatcher.on_request(ids, |_request_id, _bytes| {
-            Box::pin(async move { Ok(Vec::new()) })
+            Box::pin(async move { Vec::new() })
         });
         assert!(
             prev.is_some(),
@@ -457,7 +455,7 @@ mod tests {
             let invoked_in_handler = invoked.clone();
             dispatcher.on_request(ids, move |_request_id, _bytes| {
                 invoked_in_handler.store(true, std::sync::atomic::Ordering::SeqCst);
-                Box::pin(async move { Ok(Vec::new()) })
+                Box::pin(async move { Vec::new() })
             });
             let transport = Arc::new(RecordingTransport::default());
             let transport_dyn: Arc<dyn Transport> = transport.clone();

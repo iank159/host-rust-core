@@ -271,15 +271,6 @@ export interface RegisterHostInitiatedSubscriptionParams<Request, Item> {
  **/
 export interface TrUApiTransport {
   /**
-   * SCALE codec version used by generated handshake calls.
-   *
-   * @deprecated TODO(shared-core-wire): remove this public transport field once
-   * generated handshake requests read `TRUAPI_CODEC_VERSION` directly instead
-   * of going through transport state.
-   **/
-  readonly codecVersion: number;
-
-  /**
    * Send a one-shot request and resolve with the typed Ok/Err outcome.
    **/
   request<Ok, Err>(

@@ -211,6 +211,8 @@ struct MethodEmission {
     wire_name: String,
     module: String,
     kind: MethodKind,
+    /// `None` when the method declares no request parameter. Never `Raw`:
+    /// `build` rejects an unrepresentable parameter outright.
     request_payload: Option<WirePayload>,
     response_wrapper: Option<String>,
     error_payload: WirePayload,
@@ -221,10 +223,9 @@ struct MethodEmission {
 #[derive(Clone)]
 enum WirePayload {
     Versioned(String),
-    /// Not a recognized versioned wrapper: a method's param, or error type,
-    /// that doesn't follow the codec-2 authoring convention. No wire payload
-    /// shape is representable for this, so every path that reaches it errors
-    /// rather than falling back to a legacy encoding.
+    /// No representable wire payload: the absent error type of a plain
+    /// (non-`Result`) subscription. Request parameters never reach this state,
+    /// since `MethodEmission::build` rejects an unrepresentable one.
     Raw,
 }
 
@@ -245,7 +246,15 @@ impl MethodEmission {
                 {
                     Some(WirePayload::Versioned(name.clone()))
                 }
-                _ => Some(WirePayload::Raw),
+                // Rejected here rather than stored as `Raw`: the
+                // subscription path reads an absent request off this field,
+                // so a `Raw` reaching it would emit a host call missing its
+                // declared argument instead of failing codegen.
+                _ => bail!(
+                    "Method `{}`: its request parameter is not a versioned wrapper, so it has no \
+                     representable wire payload",
+                    method.name
+                ),
             },
             _ => bail!(
                 "Method `{}`: expected at most one request parameter (got {})",
@@ -365,13 +374,13 @@ impl MethodEmission {
             16,
             &formatdoc! {
                 r#"
-                let request: {request_path} = match Decode::decode(&mut &bytes[..]) {{
+                let request: {request_path} = match DecodeAll::decode_all(&mut &bytes[..]) {{
                     Ok(request) => request,
                     Err(err) => {{
                         let error: truapi::CallError<{error_path}> =
                             truapi::CallError::MalformedFrame {{ reason: err.to_string() }};
                         let result: Result<{response_ty}, truapi::CallError<{error_path}>> = Err(error);
-                        return Ok(result.encode());
+                        return result.encode();
                     }}
                 }};
                 let target_version = request.version();
@@ -389,7 +398,7 @@ impl MethodEmission {
                     if !execution_allowed {{
                         let error: truapi::CallError<{error_path}> = truapi::CallError::Denied;
                         let result: Result<{response_ty}, truapi::CallError<{error_path}>> = Err(error);
-                        return Ok(result.encode());
+                        return result.encode();
                     }}
                     "#
                 },
@@ -411,7 +420,7 @@ impl MethodEmission {
                                 )),
                                 Err(err) => Err(downgrade_call_error(err, target_version)),
                             }};
-                        Ok(result.encode())
+                        result.encode()
                         "#
                     },
                 );
@@ -426,7 +435,7 @@ impl MethodEmission {
                             Ok(()) => Ok(()),
                             Err(err) => Err(downgrade_call_error(err, target_version)),
                         }};
-                        Ok(result.encode())
+                        result.encode()
                         "#
                     },
                 );
@@ -513,7 +522,7 @@ impl MethodEmission {
             16,
             &formatdoc! {
                 r#"
-                let {request_binding}: {start_ty} = match Decode::decode(&mut &bytes[..]) {{
+                let {request_binding}: {start_ty} = match DecodeAll::decode_all(&mut &bytes[..]) {{
                     Ok(request) => request,
                     Err(err) => {{
                         let error: truapi::CallError<{error_ty}> =
@@ -735,7 +744,7 @@ fn write_imports(out: &mut String, traits: &[&TraitDef]) {
         r#"
         use std::sync::Arc;
 
-        use parity_scale_codec::{{Decode, Encode}};
+        use parity_scale_codec::{{DecodeAll, Encode}};
 
         use truapi::CallContext;
         use truapi::api::{{

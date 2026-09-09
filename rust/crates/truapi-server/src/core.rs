@@ -186,6 +186,49 @@ mod tests {
     use crate::frame::{Payload, request_ids, subscription_ids};
     use crate::test_support::{StubPlatform, runtime_config, test_spawner};
 
+    /// A request payload must consume exactly its own bytes. Trailing bytes
+    /// mean the sender and this build disagree about the shape, so running the
+    /// handler on the prefix would act on a frame neither side agreed to.
+    #[test]
+    fn a_request_with_trailing_bytes_is_refused_before_the_handler_runs() {
+        let (host_config, product) = runtime_config("dotli.dot");
+        let core = TrUApiCore::from_platform_with_config(
+            Arc::new(StubPlatform::default()),
+            host_config,
+            product,
+            test_spawner(),
+        );
+        let request = v01::HostFeatureSupportedRequest::Chain {
+            genesis_hash: vec![0u8; 32],
+        };
+        let ids = request_ids("system_feature_supported").expect("known request method");
+        let mut value =
+            truapi::versioned::system::HostFeatureSupportedRequest::V1(request).encode();
+        value.extend_from_slice(&[0xde, 0xad]);
+        let frame = ProtocolMessage {
+            request_id: "p:1".into(),
+            payload: Payload {
+                trait_id: ids.trait_id,
+                method_id: ids.method_id,
+                message_type: crate::frame::MESSAGE_TYPE_REQUEST,
+                value,
+            },
+        };
+        let response_bytes =
+            futures::executor::block_on(core.receive_from_product(&frame.encode()))
+                .expect("dispatcher should emit a response");
+        let response = ProtocolMessage::decode(&mut &response_bytes[..]).expect("decode response");
+        let decoded = Result::<
+            truapi::versioned::system::HostFeatureSupportedResponse,
+            truapi::CallError<truapi::versioned::system::HostFeatureSupportedError>,
+        >::decode(&mut &response.payload.value[..])
+        .expect("decode response payload");
+        assert!(
+            matches!(decoded, Err(truapi::CallError::MalformedFrame { .. })),
+            "trailing bytes must be refused, got {decoded:?}"
+        );
+    }
+
     #[test]
     fn from_platform_dispatches_feature_supported() {
         let (host_config, product) = runtime_config("dotli.dot");

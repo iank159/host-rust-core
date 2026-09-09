@@ -326,8 +326,14 @@ impl SubscriptionManager {
 /// sends nothing, so an interrupt is a failure and never a normal end.
 enum HostInitiatedFrame {
     Item(Vec<u8>),
+    /// `Interrupt(Some(error))`: the product ended the stream with a failure.
     Interrupt,
+    /// `Interrupt(None)`: the product ended the stream cleanly.
+    Complete,
     Unsupported,
+    /// A correlated protocol error this build cannot read. Terminal, because
+    /// the peer has answered and will not answer again.
+    UnknownProtocolError,
 }
 
 struct HostInitiatedSlot {
@@ -436,20 +442,30 @@ impl HostInitiatedSubscriptionManager {
         // guarding on the trait first would make the arm below dead code and
         // silently drop the frame that reports our start as unsupported.
         if key == PROTOCOL_ERROR_KEY {
-            let Ok(Some(VersionedProtocolError::V1(ProtocolErrorV1::UnsupportedMessage {
-                trait_id,
-                method_id,
-            }))) = decode_protocol_error_payload(&message.payload.value)
-            else {
-                return None;
+            let frame = match decode_protocol_error_payload(&message.payload.value) {
+                Ok(Some(VersionedProtocolError::V1(ProtocolErrorV1::UnsupportedMessage {
+                    trait_id,
+                    method_id,
+                }))) => {
+                    // Only OUR start frame going unsupported ends this render;
+                    // an error about any other pair belongs to a different
+                    // subscription.
+                    if (trait_id, method_id) != (slot.ids.trait_id, slot.ids.method_id) {
+                        return None;
+                    }
+                    HostInitiatedFrame::Unsupported
+                }
+                // A protocol error from a later build. Its shape is unknowable
+                // here, so it cannot be attributed to a pair, but it is
+                // correlated to this request id and the peer will not answer
+                // again. Settling is what stops the stream waiting forever.
+                Ok(None) => HostInitiatedFrame::UnknownProtocolError,
+                // Unreachable in practice: `ProtocolMessage::decode` rejects a
+                // malformed protocol-error payload at the frame boundary.
+                Err(_) => return None,
             };
-            // Only OUR start frame going unsupported ends this render; an error
-            // about any other pair belongs to a different subscription.
-            if (trait_id, method_id) != (slot.ids.trait_id, slot.ids.method_id) {
-                return None;
-            }
             let sender = slot.sender.clone();
-            let _ = sender.unbounded_send(HostInitiatedFrame::Unsupported);
+            let _ = sender.unbounded_send(frame);
             state.active.remove(&message.request_id);
             return None;
         }
@@ -463,10 +479,18 @@ impl HostInitiatedSubscriptionManager {
             drop(state);
             let _ = sender.unbounded_send(HostInitiatedFrame::Item(message.payload.value));
         } else if message.payload.message_type == MESSAGE_TYPE_INTERRUPT {
-            // Deliver the terminal before dropping the sender, so the stream
-            // reports a declining product rather than a silent end.
+            // `Interrupt` carries `Option<CallError<E>>`. `None` is a clean
+            // completion and `Some(err)` a failure, so the `Option` tag alone
+            // decides which terminal this is. Only the tag is read here: `E`
+            // is method-specific and this manager is generic over the item
+            // type alone. Deliver the terminal before dropping the sender, so
+            // the stream never reports a silent end for either case.
+            let frame = match message.payload.value.split_first() {
+                Some((0, [])) => HostInitiatedFrame::Complete,
+                _ => HostInitiatedFrame::Interrupt,
+            };
             let sender = slot.sender.clone();
-            let _ = sender.unbounded_send(HostInitiatedFrame::Interrupt);
+            let _ = sender.unbounded_send(frame);
             state.active.remove(&message.request_id);
         }
         None
@@ -562,10 +586,22 @@ where
                     reason: "product interrupted the host-initiated subscription".to_string(),
                 })))
             }
+            Poll::Ready(Some(HostInitiatedFrame::Complete)) => {
+                // `Interrupt(None)`: the product ended the stream with no
+                // error, which is a completion and not a failure.
+                self.terminated = true;
+                Poll::Ready(None)
+            }
             Poll::Ready(Some(HostInitiatedFrame::Unsupported)) => {
                 self.terminated = true;
                 Poll::Ready(Some(Err(v01::GenericError {
                     reason: "product does not support host-initiated subscription".to_string(),
+                })))
+            }
+            Poll::Ready(Some(HostInitiatedFrame::UnknownProtocolError)) => {
+                self.terminated = true;
+                Poll::Ready(Some(Err(v01::GenericError {
+                    reason: "product reported a protocol error this build cannot read".to_string(),
                 })))
             }
             // The sender is gone: the host closed the manager or disposed the
@@ -810,7 +846,14 @@ mod tests {
         let manager = HostInitiatedSubscriptionManager::new();
         let mut declined = manager.start::<u32>(host_ids(), vec![], transport);
 
-        manager.handle_message(host_frame("h:1", 2, vec![0]));
+        // A declining product sends `Interrupt(Some(error))`. A payloadless
+        // `Interrupt(None)` is a clean completion instead, covered by
+        // `a_clean_host_interrupt_completes_the_stream_instead_of_erroring`.
+        let declining = Some(truapi::CallError::<v01::GenericError>::HostFailure {
+            reason: "unavailable".to_string(),
+        })
+        .encode();
+        manager.handle_message(host_frame("h:1", MESSAGE_TYPE_INTERRUPT, declining));
 
         assert!(matches!(
             futures::executor::block_on(declined.next()),
@@ -848,6 +891,64 @@ mod tests {
             })))
         );
         assert_eq!(unsupported.next().now_or_never(), Some(None));
+        assert_eq!(transport_typed.sent().len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_protocol_error_settles_the_host_render() {
+        // `(255, 255)` is correlated to this request id, so a payload from a
+        // later build is still this render's terminal even though its shape
+        // cannot be attributed to a pair. Leaving the slot alive instead would
+        // strand the stream on a peer that has already answered.
+        let transport_typed = Arc::new(RecordingTransport::new());
+        let transport: Arc<dyn Transport> = transport_typed.clone();
+        let manager = HostInitiatedSubscriptionManager::new();
+        let mut render = manager.start::<u32>(host_ids(), vec![], transport);
+
+        manager.handle_message(ProtocolMessage {
+            request_id: "h:1".into(),
+            payload: Payload {
+                trait_id: PROTOCOL_ERROR_TRAIT_ID,
+                method_id: PROTOCOL_ERROR_METHOD_ID,
+                message_type: MESSAGE_TYPE_RESPONSE,
+                // A protocol-error version this build does not know.
+                value: vec![1],
+            },
+        });
+
+        assert_eq!(
+            render.next().now_or_never(),
+            Some(Some(Err(v01::GenericError {
+                reason: "product reported a protocol error this build cannot read".to_string(),
+            }))),
+            "an unreadable protocol error must settle the stream, not leave it pending"
+        );
+        assert_eq!(render.next().now_or_never(), Some(None));
+        // Only the Start frame: a settled render does not echo Stop.
+        assert_eq!(transport_typed.sent().len(), 1);
+    }
+
+    #[test]
+    fn a_clean_host_interrupt_completes_the_stream_instead_of_erroring() {
+        // `Interrupt` carries `Option<CallError<E>>`, so `None` (a single `0`
+        // byte) is a clean completion. Reporting it as an error would make
+        // every well-behaved product look like it had failed.
+        let transport_typed = Arc::new(RecordingTransport::new());
+        let transport: Arc<dyn Transport> = transport_typed.clone();
+        let manager = HostInitiatedSubscriptionManager::new();
+        let mut render = manager.start::<u32>(host_ids(), vec![], transport);
+
+        manager.handle_message(host_frame(
+            "h:1",
+            MESSAGE_TYPE_INTERRUPT,
+            encode_clean_interrupt(),
+        ));
+
+        assert_eq!(
+            render.next().now_or_never(),
+            Some(None),
+            "a clean interrupt must end the stream without an error"
+        );
         assert_eq!(transport_typed.sent().len(), 1);
     }
 

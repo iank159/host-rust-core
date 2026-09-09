@@ -131,6 +131,22 @@ fn snake_case(name: &str) -> String {
 mod tests {
     use super::*;
 
+    /// A `V1`-only enum, which is what marks a type as a versioned wrapper.
+    fn versioned_wrapper_def(name: &str) -> TypeDef {
+        TypeDef {
+            name: name.to_string(),
+            module_path: Vec::new(),
+            generic_params: Vec::new(),
+            kind: TypeDefKind::Enum(vec![VariantDef {
+                name: "V1".to_string(),
+                fields: VariantFields::Unit,
+                codec_index: Some(0),
+                docs: None,
+            }]),
+            docs: None,
+        }
+    }
+
     fn make_request_method(name: &str, request_id: u8) -> MethodDef {
         MethodDef {
             name: name.to_string(),
@@ -708,7 +724,10 @@ mod tests {
                 docs: None,
             }],
             public_trait_order: vec!["Permissions".to_string()],
-            types: vec![],
+            // `ReqWrapper` must be a real versioned wrapper here: otherwise the
+            // request-parameter check fires first and this stops exercising the
+            // response check it is named for.
+            types: vec![versioned_wrapper_def("ReqWrapper")],
             framework_types: Vec::new(),
         };
         let err = generate_dispatcher(&api).expect_err("primitive response must error");
@@ -716,6 +735,29 @@ mod tests {
         assert!(
             msg.contains("response is not a versioned wrapper"),
             "unexpected error message: {msg}",
+        );
+    }
+
+    /// A request parameter that is not a versioned wrapper has no wire payload
+    /// shape, and must fail codegen rather than emit a call without it.
+    #[test]
+    fn dispatcher_non_versioned_request_parameter_errors() {
+        let api = ApiDefinition {
+            traits: vec![TraitDef {
+                name: "Permissions".to_string(),
+                module_path: Vec::new(),
+                wire_trait_id: Some(197),
+                methods: vec![make_request_method("alpha", 10)],
+                docs: None,
+            }],
+            public_trait_order: vec!["Permissions".to_string()],
+            types: vec![],
+            framework_types: Vec::new(),
+        };
+        let err = generate_dispatcher(&api).expect_err("a raw request parameter must error");
+        assert!(
+            format!("{err}").contains("request parameter is not a versioned wrapper"),
+            "unexpected error message: {err}",
         );
     }
 }

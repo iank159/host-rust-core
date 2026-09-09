@@ -671,6 +671,43 @@ describe("generated client transport", () => {
         expect(fixture.sent.length).toBe(2);
     });
 
+    it("ignores a frame whose message type is not a response on a pending call", () => {
+        // Every leg of a method shares one address, so id plus address cannot
+        // establish that a frame is the answer. Without the leg check a
+        // `Request`, `Interrupt`, `Stop` or an out-of-range byte settles the
+        // call from the wrong bytes before the real response arrives.
+        //
+        // `decodeResponse` runs synchronously inside the pending entry's
+        // resolve, so counting its calls is what proves the frame was refused;
+        // racing the returned promise does not, because its `.then` lands a
+        // microtask later either way.
+        for (const messageType of [
+            MESSAGE_TYPE_REQUEST,
+            MESSAGE_TYPE_INTERRUPT,
+            MESSAGE_TYPE_STOP,
+            255,
+        ]) {
+            const fixture = providerFixture();
+            const transport = createTransport(fixture.provider);
+            let decodeCalls = 0;
+            void transport.request<string, CallErrorValue<never>>({
+                ids: W.LOCAL_STORAGE_READ,
+                payload: new Uint8Array(),
+                decodeResponse: () => {
+                    decodeCalls += 1;
+                    return { success: true, value: "answered" };
+                },
+            });
+
+            fixture.receive(wireFrame("p:1", W.LOCAL_STORAGE_READ, messageType));
+            expect(decodeCalls).toBe(0);
+
+            // The pending entry survived, so the real response still lands.
+            fixture.receive(wireFrame("p:1", W.LOCAL_STORAGE_READ, MESSAGE_TYPE_RESPONSE));
+            expect(decodeCalls).toBe(1);
+        }
+    });
+
     it("ignores a response whose trait does not match the pending request", async () => {
         const fixture = providerFixture();
         const transport = createTransport(fixture.provider);

@@ -1269,20 +1269,9 @@ fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) 
 
         export type Client = TrUApiClient;
 
-        export type GeneratedClientTransport = Omit<TrUApiTransport, "codecVersion"> &
-          Partial<Pick<TrUApiTransport, "codecVersion">>;
-
-        function withGeneratedCodecVersion(transport: GeneratedClientTransport): TrUApiTransport {{
-          return {{
-            ...transport,
-            codecVersion: transport.codecVersion ?? TRUAPI_CODEC_VERSION,
-          }};
-        }}
-
         /** Creates the generated client facade by binding each service namespace to the
          * shared transport instance. */
-        export function createClient(transport: GeneratedClientTransport): TrUApiClient {{
-          const transportWithCodecVersion = withGeneratedCodecVersion(transport);
+        export function createClient(transport: TrUApiTransport): TrUApiClient {{
           return {{
         "#
     )
@@ -1295,7 +1284,7 @@ fn generate_client(api: &ApiDefinition, target_version: u32, codec_version: u8) 
         let field = to_camel_case(&trait_def.name);
         writeln!(
             out,
-            "    {}: new {}Client(transportWithCodecVersion),",
+            "    {}: new {}Client(transport),",
             field, trait_def.name
         )
         .unwrap();
@@ -1849,7 +1838,7 @@ fn emit_method(
                 format!("request: {}", payload.inner_type_ts)
             };
             let request_expr = if is_handshake {
-                "{ codecVersion: this.transport.codecVersion }".to_string()
+                "{ codecVersion: TRUAPI_CODEC_VERSION }".to_string()
             } else {
                 payload.value_expr.clone()
             };

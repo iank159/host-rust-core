@@ -81,7 +81,9 @@ The payload bytes that follow `message_type` are exactly that leg's own already-
 - **Interrupt**: `Option<CallError<{Method}Error>>` — `None` is natural completion, `Some(err)` is a failure. A subscription with no domain-specific error uses a bare `GenericError` in the same position.
 - **Stop**: zero bytes, unconditionally.
 
-Each leg therefore versions independently: a method's `Response` does not share a version number with its `Request`, nor do a subscription's four legs share one with each other. A later version of the same method could switch it from a plain call to a subscription (or vice versa) without needing a new `(trait, method)` pair — only the set of `message_type` values that method's dispatch entry accepts changes.
+Each leg therefore versions independently: a method's `Response` does not share a version number with its `Request`, nor do a subscription's four legs share one with each other.
+
+A method's shape is fixed for the life of its `(trait, method)` pair. Nothing in the envelope selects between shapes, and dispatch registers a pair as either a request or a subscription, accepting only that shape's inbound legs. A method that has to become the other shape takes a new method id; the old id keeps answering the old shape for as long as any peer still speaks it.
 
 For example, a `system_feature_supported` request/response pair (trait `1`, method `1`) is carried as:
 

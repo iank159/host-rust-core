@@ -52,20 +52,6 @@ const KNOWN_WIRE_IDS = new Set<string>(
 const STOP_FRAME = new Uint8Array();
 
 /**
- * Version overrides used when constructing a transport.
- */
-export interface CreateTransportOptions {
-  /**
-   * SCALE codec version advertised during host handshake negotiation.
-   *
-   * @deprecated TODO(shared-core-wire): remove this override with
-   * `TrUApiTransport.codecVersion` once generated handshake requests use
-   * `TRUAPI_CODEC_VERSION` directly.
-   */
-  codecVersion?: number;
-}
-
-/**
  * Report a frame the transport received but cannot act on.
  *
  * Every such frame is a disagreement with the peer about the wire, and the
@@ -169,11 +155,7 @@ function decodeUnsupportedMessage(
  * Build a `TrUApiTransport` on top of a `WireProvider`, adding request/response
  * correlation and subscription start/receive/stop lifecycle handling.
  */
-export function createTransport(
-  provider: WireProvider,
-  options: CreateTransportOptions = {},
-): TrUApiTransport {
-  const codecVersion = options.codecVersion ?? TRUAPI_CODEC_VERSION;
+export function createTransport(provider: WireProvider): TrUApiTransport {
   let idCounter = 0;
   let closedError: Error | null = null;
   const pending = new Map<
@@ -350,12 +332,12 @@ export function createTransport(
         const request = T.VersionedHostHandshakeRequest.dec(payload.value);
         const requestedCodecVersion = request.value.codecVersion;
         response =
-          requestedCodecVersion === codecVersion
+          requestedCodecVersion === TRUAPI_CODEC_VERSION
             ? encodeSuccessfulHandshakeResponse()
             : encodeUnsupportedHandshakeResponse();
       } catch (error) {
         reportProtocolViolation(
-          `undecodable handshake request from the host (expected wire codec ${codecVersion}): ${
+          `undecodable handshake request from the host (expected wire codec ${TRUAPI_CODEC_VERSION}): ${
             toError(error).message
           }`,
         );
@@ -417,6 +399,18 @@ export function createTransport(
         reportProtocolViolation(
           `ignoring frame for request ${requestId}: got discriminant (${payload.traitId}, ${payload.methodId}), expected (${p.ids.trait}, ${p.ids.method})`,
         );
+      } else if (payload.messageType !== MESSAGE_TYPE_RESPONSE) {
+        // Right id, right address, wrong leg. Every leg of a method shares one
+        // address, so the address alone cannot establish that this frame is
+        // the answer: without this check a `Request`, `Interrupt`, `Stop` or
+        // an out-of-range byte consumes the pending call and either resolves
+        // it from the wrong bytes or fails its decoder, before the real
+        // response ever arrives. The call stays pending, since this frame is
+        // not its answer.
+        reportProtocolViolation(
+          `ignoring frame for request ${requestId}: unexpected messageType ${payload.messageType}, expected Response (${MESSAGE_TYPE_RESPONSE}) on (${p.ids.trait}, ${p.ids.method})`,
+        );
+        return;
       } else {
         pending.delete(requestId);
         try {
@@ -619,7 +613,6 @@ export function createTransport(
   }
 
   return {
-    codecVersion,
     /**
      * Send one request frame and resolve with the typed Ok/Err outcome
      * decoded from the response payload's `ResultPayload` envelope.
@@ -654,7 +647,7 @@ export function createTransport(
                 }
                 reject(
                   new Error(
-                    `TrUAPI handshake timed out after ${HANDSHAKE_TIMEOUT_MS}ms; the host did not answer on wire codec ${codecVersion}`,
+                    `TrUAPI handshake timed out after ${HANDSHAKE_TIMEOUT_MS}ms; the host did not answer on wire codec ${TRUAPI_CODEC_VERSION}`,
                   ),
                 );
               }, HANDSHAKE_TIMEOUT_MS)

@@ -68,7 +68,7 @@ A method's version history is therefore not one shared sequence across all its l
 
 ### Routing is unchanged
 
-The dispatcher still keys on `(trait_id, method_id)`, one lookup. `message_type` is a second-level check the handler for that method already expects: a request/response registration accepts `Request` inbound and answers `Response`; a subscription registration accepts `Start`/`Stop` inbound and answers `Receive`/`Interrupt`. A frame carrying a `message_type` its registered handler does not expect (an outbound-shaped tag arriving inbound, or an unrecognized value) is a protocol violation, answered with `CallError::MalformedFrame`, exactly as an undecodable payload is today.
+The dispatcher still keys on `(trait_id, method_id)`, one lookup. `message_type` is a second-level check the handler for that method already expects: a request/response registration accepts `Request` inbound and answers `Response`; a subscription registration accepts `Start`/`Stop` inbound and answers `Receive`/`Interrupt`. A frame carrying a `message_type` its registered handler does not expect (an outbound-shaped tag arriving inbound, or an unrecognized value) is a protocol violation. It is logged and dropped rather than answered: the pair is one this build implements, so a protocol error would misreport it as unsupported, and answering an inbound `Response` with a `Response` is how an error loop starts. An undecodable *payload* on an expected leg still answers with `CallError::MalformedFrame`.
 
 The reserved `(255, 255)` address is the exception, because it is the one address every peer answers on. A protocol error whose version or variant index this build does not recognize settles the correlated call and leaves the frame and the connection intact, rather than being rejected: a peer that refused an unfamiliar payload here could never be told anything new without the connection dying, which would freeze that channel at whatever shape shipped first. A recognized shape stays strict, since a malformed one is corruption rather than a newer peer.
 
@@ -78,7 +78,7 @@ Because `message_type` is not derived from a method's ids, growing a method's sh
 
 ### Compatibility
 
-This folds into codec 2: `WIRE_CODEC_VERSION` stays `2`, and `MIN_TRAIT_ID`/`MAX_CODEC_1_METHOD_ID` are untouched, since the codec-1/codec-2 boundary is entirely about the first (trait) byte. Codec 2 has not shipped yet, so this is a zero-cost renumbering: there is no codec-2 peer anywhere to break a second time. Folding it into the same unreleased cutover avoids a third wire-breaking version bump before public release.
+This folds into codec 2: `WIRE_CODEC_VERSION` stays `2`. The codec-1/codec-2 boundary is entirely about the first (trait) byte, and codec 1 is no longer decodable at all, so no id-range constants survive to guard it. Codec 2 has not shipped yet, so this is a zero-cost renumbering: there is no codec-2 peer anywhere to break a second time. Folding it into the same unreleased cutover avoids a third wire-breaking version bump before public release.
 
 ## Drawbacks
 
@@ -106,4 +106,4 @@ Covered above: folds into codec 2, no additional version bump.
 
 ## Future Directions and Related Material
 
-Once every trait's method ids are dense and gap-free under this scheme, a later RFC could reconsider whether trait ids need the same permanent `MIN_TRAIT_ID` reservation once no codec-1 peer remains in the field.
+Nothing here reserves a range of trait ids. The only address this scheme holds back is `(255, 255)`, for method-independent protocol errors; a later RFC could revisit that if the protocol-error channel ever needs more than one address.
