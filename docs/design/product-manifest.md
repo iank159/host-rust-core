@@ -172,7 +172,10 @@ trustedProducts: {
 
 `all` is a superset, not a peer, so `["all", "storage"]` is just `["all"]` — never treat a narrow
 value as carving something out of the wildcard. The list is a set: ignore order, collapse
-duplicates. A scope you do not implement is an unrecognised value, so prompt for it.
+duplicates. A scope you do not implement is an unrecognised value: it grants nothing, and the
+call falls back to whatever it does without a grant. That is a prompt for most calls, but a
+refusal where prompting would disclose something — a cross-product storage read answers one
+refusal for every reason it failed, and a prompt naming the target would say the target exists.
 
 Keys carry no TLD: `wallet`, not `wallet.dot`. Append the TLD of the network you resolve against
 before matching. Missing field, empty record, empty array all mean "prompt as usual".
@@ -191,7 +194,7 @@ Two rules the host owes the user:
 | Unknown `$v`                             | Undiscoverable; skip, surface diagnostic |
 | Malformed JSON / schema validation fail  | Do not launch; surface diagnostic        |
 | Unknown `icon.format`                    | Placeholder; never sniff or auto-correct |
-| Unknown `Granted` value                  | Ignore it; prompt. Manifest stays valid  |
+| Unknown `Granted` value                  | Ignore it; the call proceeds ungranted. Manifest stays valid |
 | `trustedProducts` key does not resolve   | Entry inert; manifest stays valid        |
 | `trustedProducts` key carries a TLD      | Does not resolve; entry inert            |
 | Icon CID unreachable, or bytes undecodable | Render placeholder; product launchable |

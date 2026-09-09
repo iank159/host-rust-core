@@ -238,16 +238,22 @@ fn authority_cancellation_error(cx: &CallContext, reason: CancellationReason) ->
 /// manifest is read again.
 const MANIFEST_TTL_SECS: u64 = 24 * 60 * 60;
 
-/// A cached root manifest and when it was read.
+/// A cached root manifest lookup and when it was made.
 ///
 /// The document is stored verbatim rather than reduced to the grants this core
 /// reads today, so a later consumer needs no cache migration.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode)]
 struct CachedManifest {
-    /// Seconds since the Unix epoch at which the manifest was read.
+    /// Seconds since the Unix epoch at which the lookup was made.
     fetched_at_secs: u64,
-    /// The manifest JSON exactly as published.
-    json: String,
+    /// The manifest JSON exactly as published, or `None` where the chain
+    /// answered that the product publishes none.
+    ///
+    /// A miss is cached because refusing is the common outcome: without it every
+    /// refused call reopens a chainHead follow and re-reads the contracts, and
+    /// the round trip tells the caller which targets have a manifest and which
+    /// do not — the distinction one uniform refusal exists to hide.
+    json: Option<String>,
 }
 
 /// Seconds since the Unix epoch, or `None` on a clock before it.
@@ -331,7 +337,13 @@ async fn user_denied_account_access(
 /// [`MANIFEST_TTL_SECS`] and from dotNS otherwise.
 ///
 /// A freshly read manifest is cached even though the caller may not be granted
-/// anything by it: the document describes the product, not the asker.
+/// anything by it: the document describes the product, not the asker. So is the
+/// chain's answer that there is no manifest, which is authoritative for the same
+/// TTL.
+///
+/// A failed lookup is not cached. It says nothing about the product, only that
+/// the chain could not be read, and holding that for a day would turn one blip
+/// into a day of withdrawn grants.
 async fn root_manifest(
     services: &RuntimeServices,
     platform: &dyn Platform,
@@ -345,14 +357,13 @@ async fn root_manifest(
         && let Ok(cached) = CachedManifest::decode(&mut bytes.as_slice())
         && now.saturating_sub(cached.fetched_at_secs) < MANIFEST_TTL_SECS
     {
-        return Some(cached.json);
+        return cached.json;
     }
 
     let genesis_hash = services.asset_hub_chain_genesis_hash()?;
     let json =
         match product_manifest::fetch_root_manifest(&services.chain, genesis_hash, target).await {
-            Ok(Some(json)) => json,
-            Ok(None) => return None,
+            Ok(json) => json,
             Err(reason) => {
                 warn!(%target, %reason, "root manifest lookup failed");
                 return None;
@@ -368,7 +379,7 @@ async fn root_manifest(
             .encode(),
         )
         .await;
-    Some(json)
+    json
 }
 
 /// A scope a publisher pre-approves for another product in the manifest's

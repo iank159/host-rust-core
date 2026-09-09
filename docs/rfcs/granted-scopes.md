@@ -31,7 +31,7 @@ type Granted = 'all' | 'storage' | 'context';
 | --------- | ------------------------------------------------------------------------------------------------------- |
 | `all`     | Every cross-product interaction the Host mediates on the granting product's behalf, present and future. |
 | `storage` | Reading the granting product's host-local storage. Read-only.                                           |
-| `context` | Reading the granting product's account and the identity that follows from it.                           |
+| `context` | Acting as the granting product's account: reading it and the identity that follows from it, and producing proofs and signatures under its keys. |
 
 `trustedProducts` keeps its `Record<string, Granted[]>` shape, so this needs no new field and no `$v` bump.
 
@@ -41,11 +41,13 @@ type Granted = 'all' | 'storage' | 'context';
 - **Existing rules are unchanged.** Hosts MUST ignore unrecognised values and MUST NOT fail validation over them, so a Host implementing only `all` reads `["storage"]` as an empty grant and prompts. Publishers MUST NOT emit a value outside `Granted`. A grant never overrides a denial the user already gave.
 - **A key names a product, and a product is all its executables.** The key is the segment above the TLD, so `dim2.dot`, `app.dim2.dot` and `worker.dim2.dot` are one grantee: granting `dim2` grants every executable published beneath it. A subname of another domain is that domain — `dim2.attacker.dot` reads as `attacker` and collects nothing published for `dim2`.
 
-Which calls each scope gates remains a Host runtime contract, as it already is for `all`.
+Which calls each scope gates remains a Host runtime contract, as it already is for `all`. A grant is a standing answer, so a call it does not cover refuses rather than prompts wherever prompting would itself disclose something — a cross-product storage read answers one refusal for every reason, and a prompt naming the target would say the target exists.
+
+`context` gates proofs and signatures today; the account and identity reads it also names still take the user prompt, tracked in #655.
 
 ## Drawbacks
 
-Writes stay on the wildcard: `storage` is read-only, so "read and write, nothing else" is still inexpressible. Signing has no scope of its own either. And `all` still widens silently, so staying narrow means revisiting the manifest as scopes are added.
+Writes stay on the wildcard: `storage` is read-only, so "read and write, nothing else" is still inexpressible. `context` bundles reading an account with signing under it, so "see who I am, sign nothing" is not expressible either — splitting them costs a third value and neither half has a use without the other yet. And `all` still widens silently, so staying narrow means revisiting the manifest as scopes are added.
 
 ## Alternatives
 

@@ -265,6 +265,11 @@ fn cache_manifest(platform: &StubPlatform, owner: &str, trusted: &str, age_secs:
         r#"{{"$v":1,"displayName":"D","description":"d",
                 "icon":{{"cid":"c","format":"png"}},"trustedProducts":{trusted}}}"#
     );
+    cache_manifest_entry(platform, owner, Some(json), age_secs);
+}
+
+/// Seeds `owner`'s cached lookup, `None` standing for "publishes no manifest".
+fn cache_manifest_entry(platform: &StubPlatform, owner: &str, json: Option<String>, age_secs: u64) {
     let entry = CachedManifest {
         fetched_at_secs: unix_time_secs()
             .expect("clock is after the epoch")
@@ -316,6 +321,34 @@ fn a_grant_to_another_product_does_not_admit_this_caller() {
     let platform = stub_platform();
     cache_manifest(&platform, "wallet.dot", r#"{"stash":["storage"]}"#, 0);
     let host = ProductRuntimeHost::new_compat(platform, test_spawner());
+    assert!(read_storage(&host, Some("wallet.dot"), "k").is_err());
+}
+
+#[test]
+fn a_cached_miss_refuses_without_returning_to_the_chain() {
+    // "This product publishes no manifest" is an answer worth keeping. Without
+    // it every refusal re-reads the contracts, and the round trip separates a
+    // target that has a manifest from one that does not.
+    let platform = stub_platform();
+    cache_manifest_entry(&platform, "wallet.dot", None, 0);
+    let host = ProductRuntimeHost::new_compat(platform, test_spawner());
+    assert_eq!(
+        read_storage(&host, Some("wallet.dot"), "k").unwrap_err(),
+        CallError::Domain(HostLocalStorageReadError::V2(
+            v02::HostLocalStorageReadError::AccessNotGranted
+        ))
+    );
+}
+
+#[test]
+fn a_cached_miss_expires_on_the_same_bound_as_a_grant() {
+    // A product that publishes a manifest after the miss was cached must not
+    // stay unreachable for longer than a revoked grant stays in force.
+    let platform = stub_platform();
+    cache_manifest_entry(&platform, "wallet.dot", None, MANIFEST_TTL_SECS + 1);
+    let host = ProductRuntimeHost::new_compat(platform, test_spawner());
+    // Still refused here only because the compat host reaches no chain to
+    // re-read from; what this pins is that the stale entry is not consulted.
     assert!(read_storage(&host, Some("wallet.dot"), "k").is_err());
 }
 

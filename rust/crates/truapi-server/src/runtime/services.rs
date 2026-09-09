@@ -140,7 +140,6 @@ impl RuntimeServices {
         self.permission_status.set(host).is_ok()
     }
 
-    /// The host's live OS permission-status adapter, when one is installed.
     /// Records the Asset Hub the dotNS contracts live on. Returns false when a
     /// hash is already installed.
     pub(crate) fn install_asset_hub_genesis_hash(&self, genesis_hash: [u8; 32]) -> bool {
@@ -158,6 +157,7 @@ impl RuntimeServices {
             .filter(|hash| *hash != [0u8; 32])
     }
 
+    /// The host's live OS permission-status adapter, when one is installed.
     pub(crate) fn permission_status_host(&self) -> Option<Arc<dyn PermissionStatusHost>> {
         self.permission_status.get().cloned()
     }
