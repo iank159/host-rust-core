@@ -11,12 +11,12 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use parity_scale_codec::Encode;
-use tracing::instrument;
+use tracing::{instrument, warn};
 
 use crate::frame::{
-    MESSAGE_TYPE_INTERRUPT, MESSAGE_TYPE_RESPONSE, MESSAGE_TYPE_STOP, PROTOCOL_ERROR_KEY,
-    PROTOCOL_ERROR_METHOD_ID, PROTOCOL_ERROR_TRAIT_ID, Payload, ProtocolErrorV1, ProtocolMessage,
-    VersionedProtocolError,
+    MESSAGE_TYPE_INTERRUPT, MESSAGE_TYPE_REQUEST, MESSAGE_TYPE_RESPONSE, MESSAGE_TYPE_START,
+    MESSAGE_TYPE_STOP, PROTOCOL_ERROR_KEY, PROTOCOL_ERROR_METHOD_ID, PROTOCOL_ERROR_TRAIT_ID,
+    Payload, ProtocolErrorV1, ProtocolMessage, VersionedProtocolError,
 };
 use crate::generated::wire_table::MethodIds;
 use crate::subscription::{Spawner, SubscriptionManager, SubscriptionStream};
@@ -147,19 +147,24 @@ impl Dispatcher {
             return;
         }
 
-        // Precondition this relies on: nothing on this side ever sends its
-        // *own* outbound `Request::Request` and awaits the matching
-        // `Request::Response` at the same address a handler is registered
-        // on. Every frame that arrives at a registered `by_request` key is
-        // unconditionally routed into that handler — there is no table of
-        // this dispatcher's own pending outbound calls to consult first, the
-        // way the TS client's `createTransport` has for exactly this reason
-        // (see its `system_handshake` handling, where request and response
-        // share one address). If a caller is ever added on this side for a
-        // method whose handler is also registered here, that caller's own
-        // response would be misrouted into the handler instead of settling
-        // the pending call, and answered with a spurious `MalformedFrame`.
         if let Some(entry) = self.by_request.get(&key) {
+            // `Request` is the only leg a request method ever receives. Its
+            // `Response` shares this address, so without this guard a peer
+            // whose table disagrees with ours, or this side's own outbound
+            // response arriving here, would run the handler and be answered
+            // with a `Response` to a non-request. Logged because the pair is
+            // one we implement: an unknown pair is merely an incompatible
+            // peer, but a known method receiving a leg it cannot have is a
+            // bug on one side or the other.
+            if message.payload.message_type != MESSAGE_TYPE_REQUEST {
+                warn!(
+                    trait_id = key.0,
+                    method_id = key.1,
+                    message_type = message.payload.message_type,
+                    "dropping a frame whose message type a request method cannot receive"
+                );
+                return;
+            }
             let request_id = message.request_id.clone();
             let value = (entry.handler)(request_id, message.payload.value)
                 .await
@@ -176,6 +181,19 @@ impl Dispatcher {
         } else if let Some(entry) = self.by_start.get(&key) {
             if message.payload.message_type == MESSAGE_TYPE_STOP {
                 self.subscriptions.handle_stop(&message.request_id);
+                return;
+            }
+            // `Start` and `Stop` are the only legs this side receives; a
+            // subscription's `Receive` and `Interrupt` flow the other way and
+            // share this address too, so anything else here would otherwise
+            // start a subscription off a frame that is not a start.
+            if message.payload.message_type != MESSAGE_TYPE_START {
+                warn!(
+                    trait_id = key.0,
+                    method_id = key.1,
+                    message_type = message.payload.message_type,
+                    "dropping a frame whose message type a subscription cannot receive"
+                );
                 return;
             }
             // Reserve the slot before awaiting the handler so a `_stop`
@@ -241,6 +259,7 @@ impl Dispatcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::MESSAGE_TYPE_RECEIVE;
     use crate::frame::MESSAGE_TYPE_REQUEST;
     use std::sync::Mutex;
 
@@ -416,6 +435,76 @@ mod tests {
             transport.sent().is_empty(),
             "handle_stop on an unknown request id emits no frame"
         );
+    }
+
+    /// A request method's `Response` shares its address. Reading the leg off
+    /// `message_type` is the only thing that stops an inbound `Response`, or
+    /// any other leg, from being run as a fresh request and answered.
+    #[test]
+    fn a_request_method_ignores_every_leg_but_request() {
+        for message_type in [
+            MESSAGE_TYPE_RESPONSE,
+            MESSAGE_TYPE_INTERRUPT,
+            MESSAGE_TYPE_STOP,
+            99,
+        ] {
+            let mut dispatcher = Dispatcher::new(test_spawner());
+            let ids = MethodIds {
+                trait_id: 7,
+                method_id: 50,
+            };
+            let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let invoked_in_handler = invoked.clone();
+            dispatcher.on_request(ids, move |_request_id, _bytes| {
+                invoked_in_handler.store(true, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move { Ok(Vec::new()) })
+            });
+            let transport = Arc::new(RecordingTransport::default());
+            let transport_dyn: Arc<dyn Transport> = transport.clone();
+            let frame = make_frame(7, 50, message_type, Vec::new());
+            futures::executor::block_on(dispatcher.dispatch(frame, transport_dyn));
+            assert!(
+                !invoked.load(std::sync::atomic::Ordering::SeqCst),
+                "message_type {message_type} must not invoke a request handler"
+            );
+            assert!(
+                transport.sent().is_empty(),
+                "message_type {message_type} must not be answered"
+            );
+        }
+    }
+
+    /// `Receive` and `Interrupt` flow host to product and share the start
+    /// address, so they must not start a subscription when they arrive here.
+    #[test]
+    fn a_subscription_starts_only_on_a_start_leg() {
+        for message_type in [MESSAGE_TYPE_RECEIVE, MESSAGE_TYPE_INTERRUPT, 99] {
+            let mut dispatcher = Dispatcher::new(test_spawner());
+            let ids = MethodIds {
+                trait_id: 7,
+                method_id: 50,
+            };
+            let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let invoked_in_handler = invoked.clone();
+            dispatcher.on_subscription(ids, move |_request_id, _bytes| {
+                invoked_in_handler.store(true, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(
+                    async move { Ok(Box::pin(futures::stream::empty()) as SubscriptionStream) },
+                )
+            });
+            let transport = Arc::new(RecordingTransport::default());
+            let transport_dyn: Arc<dyn Transport> = transport.clone();
+            let frame = make_frame(7, 50, message_type, Vec::new());
+            futures::executor::block_on(dispatcher.dispatch(frame, transport_dyn));
+            assert!(
+                !invoked.load(std::sync::atomic::Ordering::SeqCst),
+                "message_type {message_type} must not start a subscription"
+            );
+            assert!(
+                transport.sent().is_empty(),
+                "message_type {message_type} must not be answered"
+            );
+        }
     }
 
     #[test]
