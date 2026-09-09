@@ -9,7 +9,7 @@ struct Service;
 
 #[truapi_macros::sso_service]
 impl Service {
-    async fn foo(&self, _: &SsoRequestContext, _request: FooRequest) -> MissingResponse {
+    async fn foo(&self, _: &SsoRequestContext, _request: Request<u32>) -> MissingResponse {
         Ok(1)
     }
 

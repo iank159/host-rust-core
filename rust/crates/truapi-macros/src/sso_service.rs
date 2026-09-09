@@ -1,10 +1,10 @@
 //! Request/response pairing and dispatch for an inherent SSO handler implementation.
 
 use proc_macro2::{Ident, TokenStream};
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::{FnArg, ImplItem, ItemImpl, Pat, Signature, Type, parse_macro_input};
 
-use crate::sso_common::{enum_path, snake_case, wire_path};
+use crate::sso_common::{enum_path, wire_path};
 
 /// Parse the macro input and emit generated code or a compiler diagnostic.
 pub(super) fn expand(
@@ -70,23 +70,23 @@ fn expand_sso_service(mut item: ItemImpl) -> syn::Result<TokenStream> {
         method.block = syn::parse_quote!({
             (async move #body).await.into()
         });
-        let variant = last_segment(&request_ty)?;
         let response_variant = last_segment(&response_ty)?;
         let name = &method.sig.ident;
-        let variant_name = variant.to_string();
-        let stem = variant_name.strip_suffix("Request").ok_or_else(|| {
-            syn::Error::new_spanned(&request_ty, "request type must end in `Request`")
-        })?;
-        let expected_name = snake_case(stem);
-        if name != &expected_name {
-            return Err(syn::Error::new_spanned(
-                name,
-                format!("the method for `{variant}` must be named `{expected_name}`"),
-            ));
-        }
+        let method_name = name.to_string();
+        let stem: String = method_name
+            .split('_')
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            })
+            .collect();
+        let variant = format_ident!("{stem}Request", span = name.span());
         impls.push(quote! {
             impl #wire::SsoRequest for #request_ty {
-                const NAME: &'static str = #expected_name;
+                const NAME: &'static str = #method_name;
                 type Response = #response_ty;
 
                 fn response_into_message(
@@ -107,14 +107,6 @@ fn expand_sso_service(mut item: ItemImpl) -> syn::Result<TokenStream> {
                 fn into_message(self) -> #message {
                     use crate::host_logic::sso::messages::v1::AnyRequest;
                     AnyRequest::#variant(self).into()
-                }
-
-                fn from_message(message: #message) -> Option<Self> {
-                    use crate::host_logic::sso::messages::v1::{AnyRequest, Incoming, classify};
-                    match classify(message) {
-                        Incoming::Request(AnyRequest::#variant(request)) => Some(request),
-                        _ => None,
-                    }
                 }
             }
         });
@@ -235,21 +227,6 @@ fn last_segment(ty: &Type) -> syn::Result<Ident> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn service_method_names_cannot_drift_from_client_actions() {
-        let item = syn::parse_quote! {
-            impl Service {
-                async fn sign_raw_legacy(&self, cx: &SsoRequestContext, request: SignRawWithLegacyAccountRequest)
-                    -> SignRawWithLegacyAccountResponse { Ok(vec![]) }
-            }
-        };
-        let error = expand_sso_service(item).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "the method for `SignRawWithLegacyAccountRequest` must be named `sign_raw_with_legacy_account`"
-        );
-    }
 
     #[test]
     fn service_requires_an_explicit_wire_response() {

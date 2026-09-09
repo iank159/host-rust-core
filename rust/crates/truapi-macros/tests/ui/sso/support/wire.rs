@@ -9,7 +9,6 @@ mod host_logic {
                 const NAME: &'static str;
                 type Response;
                 fn into_message(self) -> RemoteMessage;
-                fn from_message(message: RemoteMessage) -> Option<Self>;
                 fn response_into_message(response: Response<Self::Response>) -> RemoteMessage;
                 fn response_from_message(
                     message: RemoteMessage,
@@ -37,7 +36,7 @@ mod host_logic {
 
         pub mod messages {
             #[derive(Debug, Clone, PartialEq, Eq)]
-            pub struct FooRequest(pub u32);
+            pub struct Request<T>(pub T);
 
             #[derive(Debug, Clone, PartialEq, Eq)]
             pub struct BarRequest;
@@ -65,7 +64,7 @@ mod host_logic {
                 #[derive(truapi_macros::SsoWire)]
                 pub enum RemoteMessage {
                     Disconnected,
-                    FooRequest(Box<FooRequest>),
+                    FooRequest(Box<Request<u32>>),
                     FooResponse(Response<FooResponse>),
                     BarRequest(BarRequest),
                     BarResponse(Response<BarResponse>),

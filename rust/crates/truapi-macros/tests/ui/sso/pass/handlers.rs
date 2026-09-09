@@ -11,14 +11,14 @@ impl Service {
         Self
     }
 
-    async fn value(&self, request: FooRequest) -> Result<u32, String> {
+    async fn value(&self, request: Request<u32>) -> Result<u32, String> {
         Ok(request.0)
     }
 }
 
 #[truapi_macros::sso_service]
 impl Service {
-    async fn foo(&self, _: &SsoRequestContext, request: FooRequest) -> FooResponse {
+    async fn foo(&self, _: &SsoRequestContext, request: Request<u32>) -> FooResponse {
         let value = self.value(request).await?;
         if value == 0 {
             return Err("zero".into());
@@ -38,7 +38,7 @@ fn main() {
         None,
         RemoteMessage {
             message_id: "m-1".into(),
-            data: RemoteMessageData::V1(v1::RemoteMessage::FooRequest(Box::new(FooRequest(1)))),
+            data: RemoteMessageData::V1(v1::RemoteMessage::FooRequest(Box::new(Request(1)))),
         },
     ));
 }

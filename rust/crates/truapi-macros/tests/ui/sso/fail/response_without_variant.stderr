@@ -1,8 +1,8 @@
 error[E0599]: no variant or associated item named `MissingResponse` found for enum `messages::v1::RemoteMessage` in the current scope
-  --> tests/ui/sso/fail/response_without_variant.rs:12:73
+  --> tests/ui/sso/fail/response_without_variant.rs:12:75
    |
-12 |     async fn foo(&self, _: &SsoRequestContext, _request: FooRequest) -> MissingResponse {
-   |                                                                         ^^^^^^^^^^^^^^^ variant or associated item not found in `messages::v1::RemoteMessage`
+12 |     async fn foo(&self, _: &SsoRequestContext, _request: Request<u32>) -> MissingResponse {
+   |                                                                           ^^^^^^^^^^^^^^^ variant or associated item not found in `messages::v1::RemoteMessage`
    |
   ::: tests/ui/sso/fail/../support/wire.rs
    |

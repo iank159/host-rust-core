@@ -8,7 +8,7 @@ struct Service;
 
 #[truapi_macros::sso_service]
 impl Service {
-    async fn foo(&self, _: &SsoRequestContext, _request: FooRequest) -> BarResponse {
+    async fn foo(&self, _: &SsoRequestContext, _request: Request<u32>) -> BarResponse {
         Ok(1)
     }
 
@@ -19,8 +19,8 @@ impl Service {
 
 fn main() {
     fn check<R: SsoRequest<Response = BarResponse>>() {}
-    check::<FooRequest>();
-    let response = FooRequest::response_into_message(Response {
+    check::<Request<u32>>();
+    let response = Request::<u32>::response_into_message(Response {
         responding_to: "m-1".into(),
         payload: Ok(7),
     });

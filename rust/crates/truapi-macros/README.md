@@ -16,8 +16,9 @@ the thin public entry points, which Rust requires at the proc-macro crate root.
 
 ## Handler contract
 
-Every method in the annotated impl is an endpoint. Its parameter names a wire
-request type and its return type names the response's `Result` payload:
+Every method in the annotated impl is an endpoint. Its name selects a wire
+request variant, its parameter declares the payload, and its return type names
+the response's `Result` payload:
 
 ```rust
 pub type GetAccountAliasResponse = Result<HostAccountGetAliasResponse, RingVrfError>;
@@ -27,7 +28,7 @@ impl SigningHostSsoService {
     async fn get_account_alias(
         &self,
         cx: &SsoRequestContext,
-        request: GetAccountAliasRequest,
+        request: ProductRequest<HostAccountGetAliasRequest>,
     ) -> GetAccountAliasResponse {
         self.signing_host
             .account_alias(&cx.call, &cx.session, request)
@@ -36,8 +37,9 @@ impl SigningHostSsoService {
 }
 ```
 
-The method name is the request type's snake-case stem: `GetAccountAliasRequest`
-requires `get_account_alias`. The return type's name selects the wire response
+The method `get_account_alias` selects `GetAccountAliasRequest`; parameter types
+can be canonical payloads or generic wrappers without request aliases.
+The return type's name selects the wire response
 variant, including when two handlers share one variant. Distinct variants may
 carry identical result types; conversion belongs to the request, so those
 responses remain distinguishable. Constructors and helpers belong in a separate impl.
@@ -54,6 +56,11 @@ handler. Without a session it returns the response's typed disconnected error.
 Shared reply finishing supplies correlation and defaults the transcript outcome
 to success or error; handlers classify operation-specific outcomes. Missing
 handlers, undeclared wire variants, and incompatible payloads fail compilation.
+
+The wire enum contains requests, responses, and disconnects in one SCALE tag
+space. `SsoWire` projects its requests into `AnyRequest` through `classify()`.
+Dispatch matches that request-only enum exhaustively, so a new wire request
+cannot silently fall through without a handler.
 
 ## Server integration
 

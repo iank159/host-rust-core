@@ -88,7 +88,8 @@ pub fn derive_sso_wire(item: TokenStream) -> TokenStream {
 ///
 /// Every method must be `async fn name(&self, cx: &SsoRequestContext, request:
 /// <Request>) -> <Response>`, where the named response aliases its `Result`
-/// payload and selects the wire variant. Each signature supplies `SsoRequest` pairing;
+/// payload and selects the wire variant. The method name selects the request
+/// variant; its payload type can be generic. Each signature supplies `SsoRequest` pairing;
 /// the macro generates an exhaustive `dispatch` method on the service type.
 /// Handler return types expand to `SsoReply<Payload>`, and bodies return
 /// ordinary `Result` payloads or explicit replies with a transcript outcome.
