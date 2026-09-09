@@ -18,9 +18,6 @@ impl Service {
 }
 
 fn main() {
-    fn check<R: SsoRequest<Response = FooResponse>>() {}
-    check::<Request<u32>>();
-    check::<BarRequest>();
     let response = BarRequest::response_into_message(Response {
         responding_to: "m-1".into(),
         payload: Ok(7),

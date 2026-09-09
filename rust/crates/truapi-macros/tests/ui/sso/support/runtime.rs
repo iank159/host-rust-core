@@ -1,4 +1,4 @@
-// Context and reply operations consumed by generated dispatch.
+// Compile-time contracts consumed by generated dispatch; runtime behavior is tested in the server.
 #[allow(dead_code)]
 mod runtime {
     pub mod authority {
@@ -25,23 +25,16 @@ mod runtime {
 
         pub struct Answer;
 
-        pub struct SsoReply<P> {
-            payload: P,
-            outcome: Option<ResponseOutcome>,
-        }
+        pub struct SsoReply<P>(P);
 
         impl<P> From<P> for SsoReply<P> {
             fn from(payload: P) -> Self {
-                Self {
-                    payload,
-                    outcome: None,
-                }
+                Self(payload)
             }
         }
 
         impl<P> SsoReply<P> {
-            pub fn with_outcome(mut self, outcome: ResponseOutcome) -> Self {
-                self.outcome = Some(outcome);
+            pub fn with_outcome(self, _: ResponseOutcome) -> Self {
                 self
             }
         }
@@ -49,16 +42,9 @@ mod runtime {
         impl<T, E: core::fmt::Display> SsoReply<Result<T, E>> {
             pub fn finish(
                 self,
-                id: &str,
-                wrap: impl FnOnce(Response<Result<T, E>>) -> v1::RemoteMessage,
+                _: &str,
+                _: impl FnOnce(Response<Result<T, E>>) -> v1::RemoteMessage,
             ) -> Answer {
-                let _outcome = self
-                    .outcome
-                    .unwrap_or_else(|| ResponseOutcome::from_payload(&self.payload));
-                let _message = wrap(Response {
-                    responding_to: id.to_string(),
-                    payload: self.payload,
-                });
                 Answer
             }
         }

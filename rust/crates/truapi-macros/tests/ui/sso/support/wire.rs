@@ -26,12 +26,6 @@ mod host_logic {
             }
 
             pub struct ResponseOutcome;
-
-            impl ResponseOutcome {
-                pub fn from_payload<T, E>(_: &Result<T, E>) -> Self {
-                    Self
-                }
-            }
         }
 
         pub mod messages {
