@@ -4,7 +4,6 @@
 //! public proc-macro entry points to be defined at the crate root.
 
 mod service;
-mod sso_common;
 mod sso_service;
 mod sso_wire;
 mod versioned_type;

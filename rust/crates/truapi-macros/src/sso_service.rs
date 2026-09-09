@@ -3,9 +3,7 @@
 use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 use syn::ext::IdentExt;
-use syn::{FnArg, ImplItem, ItemImpl, Pat, Signature, Type, parse_macro_input};
-
-use crate::sso_common::{enum_path, wire_path};
+use syn::{FnArg, ImplItem, ItemImpl, Signature, Type, parse_macro_input};
 
 /// Parse the macro input and emit generated code or a compiler diagnostic.
 pub(super) fn expand(
@@ -34,10 +32,6 @@ pub(super) fn expand(
     }
 }
 
-fn reply_path() -> TokenStream {
-    quote!(crate::runtime::sso_service::SsoReply)
-}
-
 /// Pair and dispatch the handlers in one inherent implementation.
 fn expand_sso_service(mut item: ItemImpl) -> syn::Result<TokenStream> {
     if item.trait_.is_some() {
@@ -52,10 +46,10 @@ fn expand_sso_service(mut item: ItemImpl) -> syn::Result<TokenStream> {
             "SSO handlers require a concrete service type",
         ));
     }
-    let wire = wire_path();
-    let message = enum_path();
-    let reply = reply_path();
+    let wire = quote!(crate::host_logic::sso::wire);
+    let message = quote!(crate::host_logic::sso::messages::v1::RemoteMessage);
     let runtime = quote!(crate::runtime::sso_service);
+    let reply = quote!(#runtime::SsoReply);
     let mut impls = Vec::new();
     let mut arms = Vec::new();
     for entry in &mut item.items {
@@ -195,9 +189,6 @@ fn method_types(sig: &Signature) -> syn::Result<(Type, Type)> {
     {
         return Err(shape_error());
     }
-    let Pat::Ident(_) = request.pat.as_ref() else {
-        return Err(shape_error());
-    };
     let syn::ReturnType::Type(_, output) = &sig.output else {
         return Err(shape_error());
     };

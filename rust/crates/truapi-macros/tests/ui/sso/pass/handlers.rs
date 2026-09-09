@@ -11,22 +11,22 @@ impl Service {
         Self
     }
 
-    async fn value(&self, request: Request<u32>) -> Result<u32, String> {
-        Ok(request.0)
+    async fn value(&self, value: u32) -> Result<u32, String> {
+        Ok(value)
     }
 }
 
 #[truapi_macros::sso_service]
 impl Service {
-    async fn r#foo(&self, _: &SsoRequestContext, request: Request<u32>) -> FooResponse {
-        let value = self.value(request).await?;
+    async fn r#foo(&self, _: &SsoRequestContext, Request(value): Request<u32>) -> FooResponse {
+        let value = self.value(value).await?;
         if value == 0 {
             return Err("zero".into());
         }
         Ok(value)
     }
 
-    async fn bar(&self, _: &SsoRequestContext, _request: BarRequest) -> BarResponse {
+    async fn bar(&self, _: &SsoRequestContext, _: BarRequest) -> BarResponse {
         SsoReply::<BarResponse>::from(Ok(2)).with_outcome(ResponseOutcome)
     }
 }
