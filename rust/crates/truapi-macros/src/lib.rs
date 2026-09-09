@@ -117,8 +117,8 @@ impl Parse for WireArgs {
 
 /// Mark a TrUAPI trait method with its wire-protocol discriminant id. One id
 /// addresses the method regardless of shape (request/response or
-/// subscription) — direction is carried inside the method's versioned
-/// payload, not by a separate wire id.
+/// subscription): which leg a frame carries is named by its `message_type`
+/// byte, not by a separate wire id.
 ///
 /// ```ignore
 /// #[wire(id = 4)]

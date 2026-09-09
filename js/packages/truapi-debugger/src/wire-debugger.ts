@@ -151,12 +151,12 @@ export function frameIdOf(trait: number, method: number): number {
  * {@link WireMethodKind} and its own `messageType` byte - the wire's own leg
  * marker (`Payload.messageType`), read directly with no payload decode at all.
  *
- * `Start`/`Stop` and `Response`/`Receive`/`Interrupt` are NOT distinguishable
- * from `messageType` alone (both of a subscription's "out" phases share
- * `messageType` 0, and both of its "in" phases beyond the first share 1 with a
- * request's own `Response`) - `kind` is what resolves that ambiguity. Returns
- * `"unknown"` when `kind` is unset (an off-table id) or `messageType` is out
- * of range for that kind.
+ * `messageType` alone cannot name the leg, because its first two values are
+ * shared across kinds: 0 is a request's `Request` and a subscription's
+ * `Start`, 1 is a `Response` and a `Receive`. `kind` is what resolves that.
+ * A subscription's remaining values are unambiguous (`Interrupt` 2, `Stop`
+ * 3). Returns `"unknown"` when `kind` is unset (an off-table id) or
+ * `messageType` is out of range for that kind.
  */
 export function resolveRole(
   messageType: number,

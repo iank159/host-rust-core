@@ -245,7 +245,7 @@ mod tests {
     }
 
     /// A single subscription method reserves exactly one wire id, same as a
-    /// request method — direction lives in the payload, not the address.
+    /// request method: the leg is named by `message_type`, not the address.
     #[test]
     fn wire_table_subscribe_method_reserves_one_id() {
         let api = ApiDefinition {

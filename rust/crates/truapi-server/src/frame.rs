@@ -17,7 +17,7 @@
 //! subscription manager, and any tooling that taps the wire can all read it
 //! directly off `Payload`. The payload bytes that follow are that leg's own
 //! versioned wrapper (e.g. `{Method}Request`), SCALE-encoded and inlined
-//! without a length prefix — nothing about direction lives inside them.
+//! without a length prefix; nothing about the leg lives inside them.
 //!
 //! In-memory we keep the numeric pair directly so dispatch does not need to
 //! reconstruct string action tags on every frame.
@@ -28,7 +28,8 @@ use truapi::versioned::{FromLatest, IntoLatest, Versioned};
 
 use crate::generated::wire_table::{MethodIds, WIRE_TABLE, WireKind};
 
-/// Top-level wire message. Encoded as `[requestId][trait][method][bytes]`.
+/// Top-level wire message. Encoded as
+/// `[requestId][trait][method][message_type][bytes]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProtocolMessage {
     /// Per-message identifier carried by both halves of a request/response.
@@ -129,8 +130,8 @@ where
 /// Which leg of a method's exchange a frame carries: `Request`/`Response` for
 /// a plain request/response method, or a subscription's `Start`/`Receive`/
 /// `Interrupt`/`Stop`. Wire-level, third byte of every frame (see the module
-/// doc), so any code — the dispatcher, the subscription manager, a debug tap
-/// — can read it generically, without decoding the leg's own payload.
+/// doc), so the dispatcher, the subscription manager and a debug tap can all
+/// read it generically, without decoding the leg's own payload.
 ///
 /// `Request` and `Start` share `0`, `Response` and `Receive` share `1`: a
 /// subscription's first two legs occupy the same slots a plain method's two
@@ -144,16 +145,16 @@ pub const MESSAGE_TYPE_RESPONSE: u8 = 1;
 /// See [`MESSAGE_TYPE_REQUEST`].
 pub const MESSAGE_TYPE_RECEIVE: u8 = 1;
 /// A subscription's stream-ending frame: `Some(error)` for a failure,
-/// `None` for natural completion. Carries no version — nothing method-
-/// specific is ever negotiated for a bare `Option`.
+/// `None` for natural completion. The `Option`/`CallError` framing is fixed;
+/// a domain error inside it carries its own version wrapper.
 pub const MESSAGE_TYPE_INTERRUPT: u8 = 2;
 /// A subscription's cancellation, product → host. Carries no payload at all.
 pub const MESSAGE_TYPE_STOP: u8 = 3;
 
-/// Encode `Interrupt(None)` — a subscription's natural (error-free)
-/// completion. `Option::None` always encodes as a single `0` byte; pair with
-/// [`MESSAGE_TYPE_INTERRUPT`], not appended to any version tag, since a `None`
-/// carries nothing method-specific to version.
+/// Encode `Interrupt(None)`, a subscription's natural (error-free)
+/// completion. `Option::None` always encodes as a single `0` byte, so a clean
+/// interrupt is one byte whatever the method's error type is. Pair it with
+/// [`MESSAGE_TYPE_INTERRUPT`].
 pub fn encode_clean_interrupt() -> Vec<u8> {
     vec![0]
 }

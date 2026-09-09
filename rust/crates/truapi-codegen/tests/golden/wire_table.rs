@@ -4,13 +4,13 @@
 //!
 //! Every frame carries a `(trait, method)` discriminant pair; one
 //! method id addresses every frame a method ever sends or receives,
-//! regardless of shape. Direction (request/response, or a
-//! subscription's start/stop/interrupt/receive) and version are
-//! carried inside the payload. The ids for each method are exposed as
-//! a named const (`PREIMAGE_SUBMIT`, ...); [`WIRE_TABLE`] and the
-//! generated dispatcher both reference those consts so the numbers
-//! live in exactly one place. The table is sorted by (trait id,
-//! method id).
+//! regardless of shape. Which leg a frame carries (request/response,
+//! or a subscription's start/stop/interrupt/receive) is named by its
+//! `message_type` byte, and the payload carries its own version. The
+//! ids for each method are exposed as a named const
+//! (`PREIMAGE_SUBMIT`, ...); [`WIRE_TABLE`] and the generated
+//! dispatcher both reference those consts so the numbers live in
+//! exactly one place. The table is sorted by (trait id, method id).
 
 /// Wire discriminants for one method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

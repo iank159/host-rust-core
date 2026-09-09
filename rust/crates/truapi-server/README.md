@@ -255,11 +255,14 @@ session/SSO crypto, key derivation, and permission policy, while all I/O
 Every frame on the wire is encoded as:
 
 ```text
-[requestId: SCALE str][trait: u8][method: u8][payload bytes...]
+[requestId: SCALE str][trait: u8][method: u8][message_type: u8][payload bytes...]
 ```
 
-The `(trait, method)` discriminant pair identifies a method + frame kind via
-the auto-generated [`crate::generated::wire_table::WIRE_TABLE`]. The trait
+The `(trait, method)` discriminant pair identifies the method via the
+auto-generated [`crate::generated::wire_table::WIRE_TABLE`], and the
+`message_type` byte names which leg of that method's exchange the frame
+carries (`Request`/`Response`, or a subscription's
+`Start`/`Receive`/`Interrupt`/`Stop`). The trait
 byte comes from the trait-level `#[wire_trait(id = N)]` annotation; the method
 byte addresses a method within that trait, so method ids restart at 0 in every
 trait. Each method's ids are exposed as a named const (`PREIMAGE_SUBMIT`, ...);
@@ -269,4 +272,5 @@ append within a trait.
 
 The payload bytes are the SCALE-encoded inner value, inlined without a
 length prefix. The pair is carried as `Payload::trait_id` and
-`Payload::method_id`, and the dispatcher routes on it via pair-keyed tables.
+`Payload::method_id` with the leg in `Payload::message_type`, and the
+dispatcher routes on the pair via pair-keyed tables.

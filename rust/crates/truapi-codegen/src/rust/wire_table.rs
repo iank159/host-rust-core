@@ -3,10 +3,10 @@
 //!
 //! A trait-level `#[wire_trait(id = N)]` annotation assigns the trait
 //! discriminant; a per-method `#[wire(id = N)]` annotation assigns the method
-//! discriminant. One id addresses a method regardless of its shape —
-//! direction (request/response, or a subscription's start/stop/interrupt/
-//! receive) is carried inside the method's versioned payload, not by a
-//! separate id.
+//! discriminant. One id addresses a method regardless of its shape: which
+//! leg of the exchange a frame carries (request/response, or a
+//! subscription's start/stop/interrupt/receive) is named by the frame's
+//! `message_type` byte, not by a separate id.
 //!
 //! Missing annotations and collisions (per trait) both hard-fail codegen.
 
@@ -22,7 +22,8 @@ use super::{const_name, wire_method_name};
 use crate::RESERVED_PROTOCOL_ERROR_TRAIT_ID;
 
 /// Wire discriminants for one method: the pair every frame it ever sends or
-/// receives carries. Direction and version are carried inside the payload.
+/// receives carries. Which leg a frame carries is its `message_type` byte;
+/// the payload carries its own version.
 #[derive(Debug, Clone, Copy)]
 struct MethodIds {
     trait_id: u8,
@@ -160,13 +161,13 @@ fn render(methods: &[(String, MethodEntry)], schema_hash: &str) -> Result<String
         //!
         //! Every frame carries a `(trait, method)` discriminant pair; one
         //! method id addresses every frame a method ever sends or receives,
-        //! regardless of shape. Direction (request/response, or a
-        //! subscription's start/stop/interrupt/receive) and version are
-        //! carried inside the payload. The ids for each method are exposed as
-        //! a named const (`PREIMAGE_SUBMIT`, ...); [`WIRE_TABLE`] and the
-        //! generated dispatcher both reference those consts so the numbers
-        //! live in exactly one place. The table is sorted by (trait id,
-        //! method id).
+        //! regardless of shape. Which leg a frame carries (request/response,
+        //! or a subscription's start/stop/interrupt/receive) is named by its
+        //! `message_type` byte, and the payload carries its own version. The
+        //! ids for each method are exposed as a named const
+        //! (`PREIMAGE_SUBMIT`, ...); [`WIRE_TABLE`] and the generated
+        //! dispatcher both reference those consts so the numbers live in
+        //! exactly one place. The table is sorted by (trait id, method id).
 
         /// Wire discriminants for one method.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]

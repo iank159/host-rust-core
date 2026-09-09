@@ -156,7 +156,7 @@ Frames are SCALE encoded:
 [requestId: SCALE str][trait: u8][method: u8][payload bytes...]
 ```
 
-The discriminant is a `(trait, method)` pair: the trait byte names the API trait and the method byte addresses a method within it, so method ids restart at 0 in every trait. Direction (request vs. response, or a subscription's start/stop/interrupt/receive) is carried inside the payload rather than by a separate id, so one method occupies exactly one id regardless of shape. The table is generated from the Rust trait-level `#[wire_trait(id = N)]` annotation plus the method-level `#[wire(id = N)]` annotation, and is written to `src/generated/wire-table.ts`.
+The discriminant is a `(trait, method)` pair: the trait byte names the API trait and the method byte addresses a method within it, so method ids restart at 0 in every trait. Which leg a frame carries (request vs. response, or a subscription's start/stop/interrupt/receive) is named by the `message_type` byte rather than by a separate id, so one method occupies exactly one id regardless of shape. The table is generated from the Rust trait-level `#[wire_trait(id = N)]` annotation plus the method-level `#[wire(id = N)]` annotation, and is written to `src/generated/wire-table.ts`.
 
 This layout is wire codec version 2 and is not compatible with codec version 1, which addressed methods with a single flat byte.
 
