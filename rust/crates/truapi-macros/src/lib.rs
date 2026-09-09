@@ -8,11 +8,12 @@
 //! discriminant id, and the `wire_trait` attribute marks an API trait with
 //! its trait discriminant. Together they form the two-byte `(trait, method)`
 //! discriminant pair in the
-//! `Struct { request_id: str, payload: (trait, method, bytes) }` envelope;
-//! trait and method ordering become part of the wire protocol. One id
-//! addresses a method regardless of its shape — direction (request/response,
-//! or a subscription's start/stop/interrupt/receive) is carried inside the
-//! method's versioned payload, not by a separate id.
+//! `Struct { request_id: str, payload: (trait, method, message_type, bytes) }`
+//! envelope; trait and method ordering become part of the wire protocol. One
+//! id addresses a method regardless of its shape: which leg of the exchange a
+//! frame carries (request/response, or a subscription's
+//! start/stop/interrupt/receive) is named by the `message_type` byte, not by a
+//! separate id.
 //!
 //! At compile time the macro validates that every id literal is a `u8`. It emits
 //! a hidden doc line so the value survives into rustdoc JSON, where
@@ -192,7 +193,7 @@ impl Parse for WireTraitArgs {
 /// Mark a TrUAPI service trait with its wire-protocol trait discriminant.
 ///
 /// ```ignore
-/// #[wire_trait(id = 0)]
+/// #[wire_trait(id = 1)]
 /// pub trait System: Send + Sync { ... }
 /// ```
 ///

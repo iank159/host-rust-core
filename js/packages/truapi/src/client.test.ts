@@ -1,5 +1,5 @@
 import type { Result } from "neverthrow";
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, jest } from "bun:test";
 
 import { createTransport } from "./client.js";
 import * as S from "./scale.js";
@@ -635,6 +635,26 @@ describe("generated client transport", () => {
             handshakeResponsePayload({ success: true, value: undefined }),
         );
         expect(toHex(fixture.sent[0])).toBe(toHex(expectedFrame));
+    });
+
+    it("rejects the handshake call when the host never answers", async () => {
+        // The handshake is the one call with a deadline, because a codec
+        // mismatch means no answer ever arrives and the call that exists to
+        // detect the mismatch must not hang on it. Framework failures surface
+        // as a rejection rather than an `Err`, the same as a closed transport
+        // or a malformed control frame.
+        jest.useFakeTimers();
+        try {
+            const fixture = providerFixture();
+            const client = createClient(createTransport(fixture.provider));
+            const outcome = Promise.resolve(client.system.handshake());
+            jest.advanceTimersByTime(10_001);
+            await expect(outcome).rejects.toThrow(
+                "TrUAPI handshake timed out after 10000ms",
+            );
+        } finally {
+            jest.useRealTimers();
+        }
     });
 
     it("answers a codec 1 handshake ping with a protocol error and stays usable", () => {

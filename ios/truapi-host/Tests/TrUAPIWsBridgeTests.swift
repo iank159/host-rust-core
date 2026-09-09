@@ -33,9 +33,9 @@ struct TrUAPIWsBridgeTests {
             Issue.record("expected binary frame, got \(message)")
             return
         }
-        // Frame tail is the merged wire envelope: version(0x00), direction=
-        // Response(0x01), Result::Ok(0x00), supported(0x01).
-        #expect(response.suffix(4) == Data([0x00, 0x01, 0x00, 0x01]))
+        // Frame tail: message_type=Response(0x01), then the payload's own
+        // bytes, Result::Ok(0x00), V1(0x00), supported(0x01).
+        #expect(response.suffix(4) == Data([0x01, 0x00, 0x00, 0x01]))
     }
 
     /// An iOS host must classify itself as `Ios` without the embedding app
@@ -97,15 +97,16 @@ private extension TrUAPIWsBridgeTests {
         frame.append(contentsOf: [0x0C]) // compact length 3
         frame.append("p:1".data(using: .utf8)!)
         frame.append(hostInfoDiscriminant) // from wire_table.rs
-        frame.append(contentsOf: [0x00, 0x00]) // version=V1, direction=Request
+        // message_type=Request(0x00), then the payload: V1(0x00).
+        frame.append(contentsOf: [0x00, 0x00])
         return frame
     }
 
-    // The merged wire envelope's response tail: version(0x00),
-    // direction=Response(0x01), Result::Ok(0x00), then HostInfo as
-    // platform(Ios = 0x02), name, version (empty, hostVersion is unset).
+    // Response tail: message_type=Response(0x01), then the payload,
+    // Result::Ok(0x00), V1(0x00), then HostInfo as platform(Ios = 0x02),
+    // name, version (empty, hostVersion is unset).
     static var hostInfoResponseTail: Data {
-        var tail = Data([0x00, 0x01, 0x00, 0x02, 0x44]) // 0x44 is compact length 17
+        var tail = Data([0x01, 0x00, 0x00, 0x02, 0x44]) // 0x44 is compact length 17
         tail.append("truapi-host-tests".data(using: .utf8)!)
         tail.append(contentsOf: [0x00])
         return tail
@@ -116,7 +117,8 @@ private extension TrUAPIWsBridgeTests {
         frame.append(contentsOf: [0x0C]) // compact length 3
         frame.append("p:1".data(using: .utf8)!)
         frame.append(featureSupportedDiscriminant) // from wire_table.rs
-        // version=V1, direction=Request, Chain, compact(32)
+        // message_type=Request(0x00), then the payload: V1(0x00), Chain(0x00),
+        // compact(32) (0x80).
         frame.append(contentsOf: [0x00, 0x00, 0x00, 0x80])
         frame.append(Data(repeating: 0, count: 32))
         return frame

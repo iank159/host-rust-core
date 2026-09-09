@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use parity_scale_codec::Encode;
-use tracing::{instrument, warn};
+use tracing::{error, instrument};
 
 use crate::frame::{
     MESSAGE_TYPE_INTERRUPT, MESSAGE_TYPE_REQUEST, MESSAGE_TYPE_RESPONSE, MESSAGE_TYPE_START,
@@ -155,7 +155,7 @@ impl Dispatcher {
             // peer, but a known method receiving a leg it cannot have is a
             // bug on one side or the other.
             if message.payload.message_type != MESSAGE_TYPE_REQUEST {
-                warn!(
+                error!(
                     trait_id = key.0,
                     method_id = key.1,
                     message_type = message.payload.message_type,
@@ -184,7 +184,7 @@ impl Dispatcher {
             // share this address too, so anything else here would otherwise
             // start a subscription off a frame that is not a start.
             if message.payload.message_type != MESSAGE_TYPE_START {
-                warn!(
+                error!(
                     trait_id = key.0,
                     method_id = key.1,
                     message_type = message.payload.message_type,
@@ -225,9 +225,14 @@ impl Dispatcher {
             // Response / receive / interrupt frames are handled by the client
             // side and are never registered here, so they land in this arm too:
             // answering them is what tells a mismatched peer its frame was not
-            // understood. No log - a peer speaking a wire we do not know could
-            // otherwise flood the host's logs one frame at a time.
+            // understood.
             let (trait_id, method_id) = key;
+            // `ERROR` because this is the whole reason the crate's default
+            // floor is `ERROR` (see the `logging` module doc): a host that
+            // never calls `setLogLevel` still has to learn that its peer is
+            // speaking a wire it does not understand. This is also the string
+            // the local e2e docs tell people to grep for.
+            error!(trait_id, method_id, "unknown wire discriminant pair");
             // A codec 2 peer that asked for something unimplemented can read
             // the answer, and dropping it would leave the peer waiting forever.
             transport.send(ProtocolMessage {

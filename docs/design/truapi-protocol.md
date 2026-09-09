@@ -115,7 +115,7 @@ If a receiver has no handler for an incoming `(trait, method)` pair, it MUST sen
 
 A protocol-error frame MUST NOT receive another protocol-error response. An unmatched error is ignored. A protocol-error payload whose variant index the receiver does not recognize MUST settle the correlated call and leave the frame and the connection intact: `(255, 255)` is the one address every peer answers on, so a receiver that rejected an unfamiliar payload here could never be told anything new without the connection dying, which would freeze this channel at whatever shape shipped first. A payload whose variant IS recognized stays strict, and a malformed one is rejected as a wire violation. These rules prevent error loops and keep the channel extensible without hiding corrupt control messages.
 
-Hosts and Products released before this control frame was introduced still silently drop unknown discriminants. They must be upgraded once before they can safely reject APIs introduced by later peers. Existing API frames and codec version 1 remain unchanged.
+Hosts and Products released before this control frame was introduced still silently drop unknown discriminants. They must be upgraded once before they can safely reject APIs introduced by later peers. Codec version 1 frames are not decodable under this envelope at all: the handshake itself rides the changed header, so a codec-1 peer cannot be negotiated with in band.
 
 #### Subscription
 
