@@ -107,10 +107,10 @@ pub(crate) fn decode_protocol_error_payload(
 
 /// Downgrade a call error's domain payload to the version its caller speaks.
 ///
-/// A handler answers in latest terms. The frame's version byte alone is not
-/// enough: the domain payload carries its own variant tag, so without this a
-/// peer that asked in v0.1 receives a v0.2-tagged error it cannot decode. The
-/// framework variants carry no version and pass through.
+/// A handler answers in latest terms, so without this a peer that asked in
+/// v0.1 receives a v0.2-tagged error it cannot decode: the domain payload
+/// carries its own variant tag and that tag has to name the version the caller
+/// speaks. The framework variants carry no version and pass through.
 pub fn downgrade_call_error<E>(error: CallError<E>, version: u8) -> CallError<E>
 where
     E: Versioned + IntoLatest + FromLatest,
