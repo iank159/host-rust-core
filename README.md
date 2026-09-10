@@ -10,7 +10,6 @@ TrUAPI (Triangle User-Agent Programming Interface) is the API surface that hosts
 [![Docs](https://img.shields.io/badge/docs-rustdoc-blue?style=flat-square)](https://paritytech.github.io/host-rust-core)
 [![Playground](https://img.shields.io/badge/playground-live-success?style=flat-square)](https://truapi-playground.paseo.li/)
 
-</div>
 
 ## Documentation
 
